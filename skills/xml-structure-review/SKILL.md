@@ -94,6 +94,12 @@ python "$QG/tools/xml/meta-validate.py" -Path "<путь>"
 reason=python_unavailable]` и всё равно выполни пункт 1: сверка диск↔состав работает на Node и
 от Python не зависит. Она же и есть самая ценная часть контура.
 
+**Если валидатор упал с `ModuleNotFoundError: No module named 'lxml'`** — это не находка в
+проверяемом коде, а недоступность инструмента: все валидаторы разбирают XML через `lxml`.
+Запиши `[qg skipped: layer=xml, scope=structure-validation, reason=lxml_unavailable]`, назови
+лечение (`pip install lxml`) и так же выполни пункт 1. Молча выдать это за ошибку файла —
+худший исход: правка пойдёт в исправный XML.
+
 ---
 
 ## 3. Права на объекты в ролях расширения

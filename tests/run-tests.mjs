@@ -159,8 +159,19 @@ section('Сверка «диск ↔ состав»');
       outs.push(`${e.stdout || ''}${e.stderr || ''}`);
     }
   }
-  if (pythonMissing) {
-    process.stdout.write('  (пропуск: python недоступен)\n');
+  // Отсутствие зависимости — не то же самое, что отсутствие python: интерпретатор есть,
+  // код возврата 1, а причина видна только в тексте traceback. Без разбора этого случая
+  // тест сообщал обрезанный traceback вместо названной причины.
+  const lxmlMissing = !pythonMissing && outs.some((o) => /ModuleNotFoundError|ImportError/.test(o));
+  const skipReason = pythonMissing ? 'python недоступен' : lxmlMissing ? 'библиотека lxml недоступна' : '';
+  if (skipReason) {
+    // В CI пропуск запрещён: зелёный прогон без проверки неотличим от проверенного.
+    // Это же ловит удаление шага установки зависимостей из workflow.
+    if (process.env.CI) {
+      check('валидатор роли прогнан', false, `${skipReason} — в CI зависимости валидаторов обязаны быть установлены`);
+    } else {
+      process.stdout.write(`  (пропуск: ${skipReason})\n`);
+    }
   } else {
     const counts = outs.map((o) => (o.match(/\((\d+) checks\)/) || [])[1]);
     check('все три формы пути к роли дают один результат', new Set(counts).size === 1 && counts[0], counts.join(' / '));

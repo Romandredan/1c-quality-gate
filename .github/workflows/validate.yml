@@ -19,6 +19,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Валидаторы XML держатся на lxml. Без него они падают с ModuleNotFoundError, а тесты
+      # уходят в пропуск — контур xml остаётся непроверенным при зелёном прогоне.
+      - name: Зависимости валидаторов XML
+        run: pip install --disable-pip-version-check "lxml==6.1.1"
+
       - name: Целостность пакета
         run: node tools/validate-package.mjs
 
