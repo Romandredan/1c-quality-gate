@@ -143,40 +143,104 @@ section('Сверка «диск ↔ состав»');
   check('отсутствующий файл даёт код 2', r.code === 2);
 }
 
-// Валидатор роли проверяет Rights.xml, а путь ему дают тремя разными способами. Раньше файл
-// метаданных роли разбирался как Rights.xml и давал ЛОЖНУЮ ошибку при меньшем числе проверок:
-// не отказ, а находка, которой нет в чужом коде. Три формы обязаны давать один результат.
-{
+// ---------------------------------------------------------------------------
+section('Валидаторы XML — контракт вызова');
+
+// Десять валидаторов в tools/xml/ портированы из cc-1c-skills и до сих пор проверялись
+// только через роль — да и та попала под тест как побочный эффект починки ложной ошибки
+// версии 0.4.3. Между тем контур xml опирается на них целиком, а SKILL.md обещает
+// пользователю единый способ вызова. Обещание, которое никто не проверяет, живёт до
+// первого обновления порта.
+const PY_VALIDATORS = ['cf', 'cfe', 'epf', 'form', 'interface', 'meta', 'mxl', 'role', 'skd', 'subsystem'];
+const pyTool = (name) => join(ROOT, 'tools', 'xml', `${name}-validate.py`);
+
+/** Запускает python-валидатор, возвращает код возврата и объединённый вывод. */
+function runPy(script, args) {
+  try {
+    const out = execFileSync('python', [script, ...args], { encoding: 'utf8', stdio: 'pipe' });
+    return { code: 0, out };
+  } catch (e) {
+    return { code: e.status ?? 1, out: `${e.stdout || ''}${e.stderr || ''}` };
+  }
+}
+
+// Доступность определяется ОДИН раз и в одном месте. Иначе каждый блок вынес бы свой
+// вердикт: десять одинаковых провалов вместо одного внятного — или, того хуже, guard
+// остался бы только у первого блока, и остальные молча пропускались бы в CI.
+const python = (() => {
+  try {
+    execFileSync('python', ['-c', 'import lxml.etree'], { stdio: 'pipe' });
+    return { ok: true };
+  } catch (e) {
+    // Нет интерпретатора и нет зависимости — разные диагнозы: во втором случае python
+    // отвечает кодом 1, а причина видна только в тексте traceback.
+    const missing = /ENOENT/.test(String(e.code || e.message));
+    return { ok: false, reason: missing ? 'python недоступен' : 'библиотека lxml недоступна' };
+  }
+})();
+
+if (!python.ok) {
+  // В CI пропуск запрещён: зелёный прогон без проверки неотличим от проверенного.
+  // Это же ловит удаление шага установки зависимостей из workflow.
+  if (process.env.CI) {
+    check('валидаторы XML прогнаны', false, `${python.reason} — в CI зависимости валидаторов обязаны быть установлены`);
+  } else {
+    process.stdout.write(`  (пропуск валидаторов XML: ${python.reason})\n`);
+  }
+}
+
+if (python.ok) {
+  // SKILL.md обещает: «-Path принимается всеми валидаторами без исключения». У каждого
+  // скрипта своё второе имя параметра (-ObjectPath, -FormPath, -RightsPath…), а
+  // allow_abbrev=False превращает промах в отказ разбора аргументов. Проверено это было
+  // ровно для одного валидатора из десяти.
+  for (const name of PY_VALIDATORS) {
+    const r = runPy(pyTool(name), ['-Path', join(WORK, 'нет-такого-файла.xml')]);
+    check(`${name}: принимает -Path`, !/unrecognized arguments|error: the following arguments/.test(r.out), r.out.trim().slice(0, 100));
+    // Отсутствующий файл — штатная ситуация, а не сбой инструмента. Traceback здесь читается
+    // как находка в проверяемом XML: та же подмена, что дал ModuleNotFoundError без lxml.
+    check(`${name}: отсутствующий путь назван, а не свален в traceback`,
+      /not found|не найден/i.test(r.out) && !/Traceback/.test(r.out), r.out.trim().slice(0, 100));
+  }
+
+  // Пара на каждый валидатор: заведомо корректный файл обязан пройти чисто, заведомо
+  // дефектный — дать именно ту ошибку, ради которой фикстура написана. Проверка «нашёл
+  // хоть что-то» бесполезна: она зелёная и когда валидатор ругается не на то.
+  //
+  // Половина про «корректный» — якорь регрессии, а не независимая истина: фикстуры
+  // доводились до Validation OK по выводу самих валидаторов. Ценность в том, что молчание
+  // зафиксировано: после правки порта ложная находка на исправном файле станет видна.
+  // Дефекты во всех фикстурах — well-formed XML, нарушающий правило 1С, а не битая разметка:
+  // сломанный XML проверял бы парсер lxml, а не валидатор.
+  const xml = (...parts) => join(FIXTURES, 'xml', ...parts);
+  const VALIDATOR_CASES = [
+    ['cf', xml('cf', 'valid'), xml('cf', 'broken'), 'DefaultLanguage "Language.Английский" not found', 'язык по умолчанию не зарегистрирован в составе'],
+    ['cfe', xml('cfe', 'valid'), xml('cfe', 'broken'), "ObjectBelonging must be 'Adopted'", 'объект расширения не помечен заимствованным'],
+    ['epf', xml('epf', 'valid'), xml('epf', 'broken'), "expected 'c3831ec8-d8d5-4f93-8a22-f9bfae07327f'", 'ClassId отчёта в обработке'],
+    ['form', xml('form', 'valid.xml'), xml('form', 'broken.xml'), "attribute 'НетТакогоРеквизита' not found", 'поле связано с несуществующим реквизитом'],
+    ['interface', xml('interface', 'valid.xml'), xml('interface', 'broken.xml'), 'Section order', 'секции командного интерфейса переставлены'],
+    ['meta', xml('meta', 'valid.xml'), xml('meta', 'broken.xml'), 'Type block has no v8:Type', 'тип реквизита задан скаляром'],
+    ['mxl', xml('mxl', 'valid.xml'), xml('mxl', 'broken.xml'), 'height=1 but max row index=1', 'высота макета меньше числа строк'],
+    ['role', join(FIXTURES, 'role-min', 'Roles', 'QG_ТестоваяРоль'), xml('role', 'QG_БитаяРоль'), "right 'ThinClient' has invalid value", 'право без значения'],
+    ['skd', xml('skd', 'valid.xml'), xml('skd', 'broken.xml'), 'references unknown dataSource', 'набор данных ссылается на несуществующий источник'],
+    ['subsystem', xml('subsystem', 'valid.xml'), xml('subsystem', 'broken.xml'), 'invalid format (expected Type.Name or UUID)', 'ссылка в составе не разрешается'],
+  ];
+  for (const [name, validPath, brokenPath, marker, defect] of VALIDATOR_CASES) {
+    const good = runPy(pyTool(name), ['-Path', validPath]);
+    check(`${name}: корректный файл проходит чисто`, good.code === 0 && /Validation OK/.test(good.out), good.out.trim().slice(0, 110));
+    const bad = runPy(pyTool(name), ['-Path', brokenPath]);
+    check(`${name}: найден дефект — ${defect}`, bad.code === 1 && bad.out.includes(marker), bad.out.trim().slice(0, 110));
+  }
+
+  // Валидатор роли проверяет Rights.xml, а путь ему дают тремя разными способами. Раньше файл
+  // метаданных роли разбирался как Rights.xml и давал ЛОЖНУЮ ошибку при меньшем числе проверок:
+  // не отказ, а находка, которой нет в чужом коде. Три формы обязаны давать один результат.
   const roleDir = join(FIXTURES, 'role-min', 'Roles', 'QG_ТестоваяРоль');
   const forms = [`${roleDir}.xml`, roleDir, join(roleDir, 'Ext', 'Rights.xml')];
-  const outs = [];
-  let pythonMissing = false;
-  for (const p of forms) {
-    try {
-      outs.push(execFileSync('python', [join(ROOT, 'tools/xml/role-validate.py'), '-Path', p], { encoding: 'utf8', stdio: 'pipe' }));
-    } catch (e) {
-      if (/ENOENT/.test(String(e.code || e.message))) pythonMissing = true;
-      outs.push(`${e.stdout || ''}${e.stderr || ''}`);
-    }
-  }
-  // Отсутствие зависимости — не то же самое, что отсутствие python: интерпретатор есть,
-  // код возврата 1, а причина видна только в тексте traceback. Без разбора этого случая
-  // тест сообщал обрезанный traceback вместо названной причины.
-  const lxmlMissing = !pythonMissing && outs.some((o) => /ModuleNotFoundError|ImportError/.test(o));
-  const skipReason = pythonMissing ? 'python недоступен' : lxmlMissing ? 'библиотека lxml недоступна' : '';
-  if (skipReason) {
-    // В CI пропуск запрещён: зелёный прогон без проверки неотличим от проверенного.
-    // Это же ловит удаление шага установки зависимостей из workflow.
-    if (process.env.CI) {
-      check('валидатор роли прогнан', false, `${skipReason} — в CI зависимости валидаторов обязаны быть установлены`);
-    } else {
-      process.stdout.write(`  (пропуск: ${skipReason})\n`);
-    }
-  } else {
-    const counts = outs.map((o) => (o.match(/\((\d+) checks\)/) || [])[1]);
-    check('все три формы пути к роли дают один результат', new Set(counts).size === 1 && counts[0], counts.join(' / '));
-    check('роль признана валидной', outs.every((o) => o.includes('Validation OK')), outs[0].trim().slice(0, 100));
-  }
+  const outs = forms.map((p) => runPy(pyTool('role'), ['-Path', p]).out);
+  const counts = outs.map((o) => (o.match(/\((\d+) checks\)/) || [])[1]);
+  check('все три формы пути к роли дают один результат', new Set(counts).size === 1 && counts[0], counts.join(' / '));
+  check('роль признана валидной', outs.every((o) => o.includes('Validation OK')), outs[0].trim().slice(0, 100));
 }
 
 // ---------------------------------------------------------------------------
