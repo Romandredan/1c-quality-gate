@@ -383,6 +383,160 @@ section('Переиспользование доказательств и фор
 }
 
 // ---------------------------------------------------------------------------
+section('Проектная настройка — создание, разрешение, приоритет');
+
+{
+  const config = await import(pathToFileURL(join(ROOT, 'tools', 'config.mjs')).href);
+  const proj = join(WORK, 'cfg-proj');
+  const reset = () => {
+    rmSync(proj, { recursive: true, force: true });
+    mkdirSync(proj, { recursive: true });
+  };
+  const file = join(proj, config.CONFIG_FILE);
+  const write = (obj) => writeFileSync(file, typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2), 'utf8');
+
+  // --- создание -------------------------------------------------------------
+  reset();
+  const first = config.ensureConfig(proj);
+  check('настройка создаётся сама', first.created === true && existsSync(file));
+  check('созданный файл — валидный JSON', (() => {
+    try { JSON.parse(readFileSync(file, 'utf8')); return true; } catch { return false; }
+  })());
+
+  // Ключевой случай: чужие значения не должны исчезнуть. Настройка, которую плагин способен
+  // переписать, хуже отсутствующей — правку в неё делают один раз.
+  //
+  // Проверяется на ЧИСТОМ проекте, без маркера создания: именно так выглядит свежий клон
+  // репозитория, где настройку закоммитил коллега. Маркер лежит в .claude/.state и в клон не
+  // попадает, поэтому проверка «файл существует» здесь единственная защита.
+  reset();
+  write({ volume: { c1MaxLines: 999 } });
+  const before = readFileSync(file, 'utf8');
+  const second = config.ensureConfig(proj);
+  check(
+    'чужой файл настройки не перезаписывается',
+    second.created === false && second.reason === 'exists' && readFileSync(file, 'utf8') === before
+  );
+
+  // И то же самое после собственного создания — здесь дополнительно работает маркер.
+  reset();
+  config.ensureConfig(proj);
+  write({ volume: { c1MaxLines: 777 } });
+  const beforeOwn = readFileSync(file, 'utf8');
+  check('созданный файл не перезаписывается на следующем взводе',
+    config.ensureConfig(proj).created === false && readFileSync(file, 'utf8') === beforeOwn);
+
+  // Удаление — отказ от настройки, а не просьба заводить её заново на каждой правке.
+  rmSync(file, { force: true });
+  const third = config.ensureConfig(proj);
+  check('удалённая настройка повторно не создаётся', third.created === false && third.reason === 'declined' && !existsSync(file));
+
+  // --- разрешение значений --------------------------------------------------
+  reset();
+  const bare = config.resolve(proj, {});
+  check('без файла действуют умолчания', bare.values.volume.c1MaxLines === 40 && bare.sources.volume.c1MaxLines === 'умолчание');
+  check('умолчание часового — std454', bare.values.sentinel.id === 'std454');
+
+  // Шаблон намеренно не проставляет значения: иначе умолчание закрепляется навсегда и
+  // обновление плагина до такого проекта не доезжает.
+  write(config.template());
+  const fromTemplate = config.resolve(proj, {});
+  check('созданный файл ничего не закрепляет', JSON.stringify(fromTemplate.values) === JSON.stringify(bare.values));
+  // И это должно быть видно: значение, пришедшее «из файла», читается как решение проекта,
+  // даже если совпало с умолчанием.
+  check('в созданном файле всё числится умолчанием',
+    Object.values(fromTemplate.sources).every((s) => Object.values(s).every((v) => v === 'умолчание')),
+    JSON.stringify(fromTemplate.sources));
+  check('ключи-комментарии не доходят до потребителя', !JSON.stringify(fromTemplate.values).includes('//'));
+  check('комментарии снимаются на любой глубине', JSON.stringify(config.stripDocs({ a: { '//': 'x', b: [{ '//': 'y', c: 1 }] } })) === '{"a":{"b":[{"c":1}]}}');
+
+  // Отсутствующая, пустая и явно пустая секции — одно и то же.
+  write({});
+  const empty1 = config.resolve(proj, {}).values;
+  write({ archetypes: {} });
+  const empty2 = config.resolve(proj, {}).values;
+  write({ archetypes: { custom: [] } });
+  const empty3 = config.resolve(proj, {}).values;
+  check('пустая секция равна отсутствующей', JSON.stringify(empty1) === JSON.stringify(empty2) && JSON.stringify(empty2) === JSON.stringify(empty3));
+
+  write({ volume: { c1MaxLines: 5 }, sentinel: { id: 'std777' }, archetypes: { custom: [{ name: 'exchange', markers: ['ПланОбмена'], minCode: 'L2' }] } });
+  const fromFile = config.resolve(proj, {});
+  check('порог из файла применён', fromFile.values.volume.c1MaxLines === 5 && fromFile.sources.volume.c1MaxLines === 'файл');
+  check('номер часового из файла применён', fromFile.values.sentinel.id === 'std777');
+  check('проектный архетип прочитан', fromFile.values.archetypes.custom[0]?.name === 'exchange');
+  check('незаданный ключ остался умолчанием', fromFile.values.volume.c1MaxFiles === 1 && fromFile.sources.volume.c1MaxFiles === 'умолчание');
+
+  write({ analyzer: { engine: 'bsl-ls', required: true } });
+  const withEnv = config.resolve(proj, { QG_ANALYZER_ENGINE: 'bsl-analyzer' });
+  check('окружение перекрывает файл', withEnv.values.analyzer.engine === 'bsl-analyzer' && withEnv.sources.analyzer.engine === 'окружение');
+  check('неперекрытое значение файла остаётся', withEnv.values.analyzer.required === true);
+
+  // --- ошибки в файле -------------------------------------------------------
+  write('{ это не json');
+  const broken = config.resolve(proj, {});
+  check('повреждённый файл не роняет разбор', broken.values.volume.c1MaxLines === 40 && Boolean(broken.broken));
+
+  write({ volume: { c1MaxLine: 10 }, вулюм: {} });
+  const unknown = config.resolve(proj, {});
+  check('опечатка в ключе названа, а не проглочена', unknown.unknown.includes('volume.c1MaxLine') && unknown.unknown.includes('вулюм'));
+  check('неизвестный ключ не применяется', unknown.values.volume.c1MaxLines === 40);
+
+  // --- вывод для человека и для модели --------------------------------------
+  write({ volume: { c1MaxLines: 7 } });
+  const show = run('tools/config.mjs', ['show'], { env: { CLAUDE_PROJECT_DIR: proj } });
+  check('show печатает значение и источник', show.code === 0 && /volume\.c1MaxLines\s+7\s+файл/.test(show.out), show.out.trim().slice(0, 160));
+  const showJson = run('tools/config.mjs', ['show', '--json'], { env: { CLAUDE_PROJECT_DIR: proj } });
+  let parsedShow = null;
+  try { parsedShow = JSON.parse(showJson.out); } catch { /* останется null */ }
+  check('show --json машиночитаем', parsedShow?.values?.volume?.c1MaxLines === 7);
+
+  // --- контур анализатора читает ту же настройку ----------------------------
+  const analyzerCfg = await import(pathToFileURL(join(ROOT, 'tools', 'analyzer-run.mjs')).href);
+  write({ analyzer: { required: true } });
+  // Окружение передаётся явно: иначе экспортированная в оболочке разработчика переменная
+  // QG_ANALYZER_* меняет результат теста — ровно та зависимость от машины, из-за которой
+  // прогон бывает зелёным локально и красным в CI.
+  check('контур анализатора читает общий разрешитель', analyzerCfg.readAnalyzerConfig(proj, {}).required === true);
+
+  // --- создание при взводе гейта --------------------------------------------
+  const armProj = join(WORK, 'cfg-arm');
+  rmSync(armProj, { recursive: true, force: true });
+  mkdirSync(join(armProj, 'src', 'cf', 'CommonModules', 'К', 'Ext'), { recursive: true });
+  const armFile = join(armProj, 'src', 'cf', 'CommonModules', 'К', 'Ext', 'Module.bsl');
+  const armOut = (() => {
+    try {
+      return execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-arm.mjs')], {
+        input: JSON.stringify({ session_id: 'CFG', cwd: armProj, tool_input: { file_path: armFile } }),
+        encoding: 'utf8',
+        env: { ...process.env, CLAUDE_PROJECT_DIR: armProj },
+      });
+    } catch {
+      return '';
+    }
+  })();
+  check('первый взвод создаёт настройку', existsSync(join(armProj, config.CONFIG_FILE)));
+  // Файл, о котором не сказали, для пользователя не существует. Каналов два, и оба нужны:
+  // additionalContext доходит до модели, systemMessage — до человека.
+  let armParsed = null;
+  try { armParsed = JSON.parse(armOut); } catch { /* останется null */ }
+  check('создание объявлено модели', String(armParsed?.hookSpecificOutput?.additionalContext).includes(config.CONFIG_FILE), armOut.slice(0, 200));
+  check('создание объявлено пользователю', String(armParsed?.systemMessage).includes(config.CONFIG_FILE), armOut.slice(0, 200));
+
+  const armOut2 = (() => {
+    try {
+      return execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-arm.mjs')], {
+        input: JSON.stringify({ session_id: 'CFG', cwd: armProj, tool_input: { file_path: armFile } }),
+        encoding: 'utf8',
+        env: { ...process.env, CLAUDE_PROJECT_DIR: armProj },
+      });
+    } catch {
+      return '';
+    }
+  })();
+  check('на следующих правках о настройке не напоминают', !armOut2.includes(config.CONFIG_FILE), armOut2.slice(0, 200));
+}
+
+// ---------------------------------------------------------------------------
 section('Полнота правил (контуры code и arch выполняет модель — проверяем, что правила на месте)');
 
 const mustContain = [
@@ -400,6 +554,13 @@ const mustContain = [
   ['skills/bsl-code-review/SKILL.md', 'НЕ РАЗОБРАНО', 'неразобранные файлы называются явно'],
   ['skills/xml-structure-review/SKILL.md', '-Path', 'универсальное имя параметра валидаторов XML'],
   ['skills/xml-structure-review/SKILL.md', 'reason=lxml_unavailable', 'падение валидатора без lxml — не находка в XML'],
+  // Настройка, которую никто не читает, неотличима от «правило не сработало»: у каждой оси
+  // должно быть место в навыке, где сказано, откуда берётся её порог.
+  ['skills/quality-gate/SKILL.md', 'tools/config.mjs" show', 'пороги берутся из проектной настройки, а не по памяти'],
+  ['skills/quality-gate/SKILL.md', 'sentinel.id', 'номер часового задаётся проектом'],
+  ['skills/quality-gate/SKILL.md', 'archetypes.custom', 'архетипы проекта участвуют в выборе глубины'],
+  ['skills/quality-gate/SKILL.md', 'volume.c1MaxLines', 'порог объёма назван ключом настройки'],
+  ['skills/quality-gate/SKILL.md', 'complexity.maxNesting', 'порог сложности назван ключом настройки'],
 ];
 for (const [file, needle, label] of mustContain) {
   const p = join(ROOT, file);

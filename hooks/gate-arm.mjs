@@ -11,8 +11,12 @@
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { readPayload, projectRoot, toProjectRelative } from './_shared.mjs';
+import { ensureConfig } from '../tools/config.mjs';
+
+const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 const STATE_DIR = ['.claude', '.state'];
 const PENDING = 'qg-pending.json';
@@ -142,17 +146,38 @@ function main() {
     }
   }
 
+  // Настройка проекта создаётся здесь и только здесь: это единственное место, где уже
+  // известно, что проект на 1С. Заводить её при старте сессии значило бы сорить файлом в
+  // чужих проектах, а оставлять на пользователя — прятать настройку в документацию.
+  let created = null;
+  try {
+    const r = ensureConfig(root);
+    if (r.created) created = toProjectRelative(root, r.path);
+  } catch {
+    /* создание настройки не обязано мешать взводу гейта */
+  }
+
   // Вывод обязан быть JSON с hookSpecificOutput: простой текст из PostToolUse до модели
   // НЕ доходит — маркер при этом пишется, и получается гейт, о котором модель узнаёт только
   // при попытке завершить работу. Проверено на живой сессии.
-  const hint = HINTS[kind].join('\n').replace('%FILE%', rel);
+  let hint = HINTS[kind].join('\n').replace('%FILE%', rel);
+  // Только на прогоне, который файл создал: сообщение на каждой правке — шум, который
+  // перестают читать вместе со всем остальным текстом подсказки.
+  if (created) {
+    hint +=
+      `\n\nСоздан файл настройки проекта: ${created}\n` +
+      'В нём пороги осей профиля, движок анализатора, проектные архетипы и номер часового.\n' +
+      'Секции пустые — действуют умолчания; описание ключей лежит в самом файле.\n' +
+      `Что действует сейчас: node "${PLUGIN_ROOT.replace(/\\/g, '/')}/tools/config.mjs" show`;
+  }
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: {
         hookEventName: 'PostToolUse',
         additionalContext: hint,
       },
-      systemMessage: `Гейт качества 1С взведён: ${rel}`,
+      systemMessage:
+        `Гейт качества 1С взведён: ${rel}` + (created ? ` · создана настройка проекта ${created}` : ''),
     }) + '\n'
   );
 }

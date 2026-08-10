@@ -27,6 +27,7 @@ import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { readManifest, installed as bootstrapInstalled, install as installAnalyzer } from './analyzer-bootstrap.mjs';
+import { DEFAULTS, readConfig } from './config.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const PLUGIN_ROOT = dirname(HERE);
@@ -51,15 +52,8 @@ export const UNRESOLVED_WITHOUT_MAIN = new Set([
   'MissedRequiredParameter',
 ]);
 
-export const DEFAULT_ANALYZER = {
-  engine: 'bsl-analyzer',
-  binary: null,
-  jar: null,
-  version: null,
-  required: false,
-  autoInstall: true,
-  config: null,
-};
+/** Умолчания контура анализатора живут в общем разрешителе настройки — здесь только имя. */
+export const DEFAULT_ANALYZER = DEFAULTS.analyzer;
 
 /**
  * Серьёзность движка → наша шкала.
@@ -81,26 +75,15 @@ export function projectRoot() {
   return process.env.CLAUDE_PROJECT_DIR || process.cwd();
 }
 
-/** Читает проектный `.1c-quality-gate.json`; переменные окружения перекрывают файл. */
-export function readAnalyzerConfig(root = projectRoot()) {
-  const cfg = { ...DEFAULT_ANALYZER };
-  const file = join(root, '.1c-quality-gate.json');
-  if (existsSync(file)) {
-    try {
-      const raw = JSON.parse(readFileSync(file, 'utf8'));
-      Object.assign(cfg, raw?.analyzer || {});
-    } catch {
-      /* повреждённый проектный конфиг не должен ронять прогон — работаем на умолчаниях */
-    }
-  }
-  const env = process.env;
-  if (env.QG_ANALYZER_ENGINE) cfg.engine = env.QG_ANALYZER_ENGINE;
-  if (env.QG_ANALYZER_BIN) cfg.binary = env.QG_ANALYZER_BIN;
-  if (env.QG_ANALYZER_JAR) cfg.jar = env.QG_ANALYZER_JAR;
-  if (env.QG_ANALYZER_VERSION) cfg.version = env.QG_ANALYZER_VERSION;
-  if (env.QG_ANALYZER_REQUIRED) cfg.required = env.QG_ANALYZER_REQUIRED === 'true';
-  if (env.QG_ANALYZER_AUTOINSTALL) cfg.autoInstall = env.QG_ANALYZER_AUTOINSTALL !== 'false';
-  return cfg;
+/**
+ * Секция `analyzer` проектной настройки.
+ *
+ * Разбор `.1c-quality-gate.json` живёт в `config.mjs` и общий для всех осей: пока читателей
+ * было два (этот — секции analyzer, и никто — остальных), половина документированных ключей
+ * молча не работала.
+ */
+export function readAnalyzerConfig(root = projectRoot(), env = process.env) {
+  return readConfig(root, env).analyzer;
 }
 
 /**

@@ -52,7 +52,7 @@ shared/                      знание, общее для нескольки�
 ## Перед коммитом
 
 ```bash
-node tests/run-tests.mjs             # тесты программных проверок (139 кейсов)
+node tests/run-tests.mjs             # тесты программных проверок (173 кейса)
 node tools/validate-package.mjs      # целостность пакета, ссылки, утечки
 node tools/gen-signs-map-md.mjs      # если менялся signs-map.json
 ```
