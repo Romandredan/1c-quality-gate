@@ -335,6 +335,7 @@ const mustContain = [
   ['shared/routing-contract.md', 'радиус', 'граница контуров по радиусу правки'],
   ['skills/bsl-code-review/SKILL.md', 'НЕ РАЗОБРАНО', 'неразобранные файлы называются явно'],
   ['skills/xml-structure-review/SKILL.md', '-Path', 'универсальное имя параметра валидаторов XML'],
+  ['skills/xml-structure-review/SKILL.md', 'reason=lxml_unavailable', 'падение валидатора без lxml — не находка в XML'],
 ];
 for (const [file, needle, label] of mustContain) {
   const p = join(ROOT, file);
