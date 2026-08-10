@@ -21,10 +21,12 @@ const problems = [];
 const fail = (where, message) => problems.push({ severity: 'error', where, message });
 const warn = (where, message) => problems.push({ severity: 'warn', where, message });
 
-/** Все файлы репозитория, кроме служебных. */
+const SKIP_DIRS = new Set(['.git', 'node_modules', '.remember', '.state', '.qg-analyzer']);
+
+/** Все файлы репозитория, кроме служебных. Запасной обход, когда git недоступен. */
 function walk(dir, acc = []) {
   for (const entry of readdirSync(dir)) {
-    if (entry === '.git' || entry === 'node_modules') continue;
+    if (SKIP_DIRS.has(entry)) continue;
     const p = join(dir, entry);
     if (statSync(p).isDirectory()) walk(p, acc);
     else acc.push(p);
@@ -32,7 +34,33 @@ function walk(dir, acc = []) {
   return acc;
 }
 
-const files = walk(ROOT);
+/**
+ * Состав пакета. Источник истины — git: файлы под версией плюс ещё не закоммиченные,
+ * но не игнорируемые. Рядом с репозиторием живут чужие рабочие каталоги (история сессий
+ * других плагинов, состояние гейта), и обход дерева выдавал находки о них — шум о файлах,
+ * которые в пакет не входят.
+ *
+ * Незакоммиченные включены намеренно: утечку проектных данных надо ловить ДО коммита,
+ * иначе проверка бесполезна ровно в тот момент, когда нужна.
+ */
+function packageFiles() {
+  try {
+    // -z обязателен: без него git экранирует не-ASCII имена (core.quotepath), и файлы с
+    // кириллицей в имени — а это все фикстуры метаданных — молча выпадают из проверки.
+    const out = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const list = out.split('\0').filter(Boolean).map((p) => join(ROOT, p)).filter((p) => existsSync(p));
+    if (list.length) return list;
+  } catch {
+    // git недоступен — пакет распакован из архива; обходим дерево сами
+  }
+  return walk(ROOT);
+}
+
+const files = packageFiles();
 const rel = (p) => relative(ROOT, p).replace(/\\/g, '/');
 
 // --- 1. Манифесты ------------------------------------------------------------
