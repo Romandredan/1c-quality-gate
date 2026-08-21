@@ -23,6 +23,18 @@ const PENDING = 'qg-pending.json';
 const DONE = 'qg-done.json';
 
 /**
+ * Типовые каталоги объектов метаданных в выгрузках 1С (нижний регистр).
+ * Один список на все проверки ниже: раздвоенный, он разойдётся при первом же
+ * добавлении нового вида объектов.
+ */
+const METADATA_DIRS =
+  'catalogs|documents|informationregisters|accumulationregisters|commonmodules|dataprocessors|reports|enums|chartsofcharacteristictypes|businessprocesses|tasks|exchangeplans|roles|subsystems';
+
+const RE_META_UNDER_SRC_NESTED = new RegExp(`(^|/)src/.*/(${METADATA_DIRS})/`);
+const RE_META_UNDER_SRC_DIRECT = new RegExp(`(^|/)src/(${METADATA_DIRS})/`);
+const RE_META_DIR_SEGMENT = new RegExp(`(^|/)(${METADATA_DIRS})/`);
+
+/**
  * Определяет, файл какого рода затронут.
  * Возвращает null для всего, что не относится к 1С, — в не-1С проектах плагин молчит.
  */
@@ -31,6 +43,13 @@ function classifyFile(filePath) {
   const lower = p.toLowerCase();
 
   if (lower.endsWith('.bsl') || lower.endsWith('.os')) return 'bsl';
+
+  // Формат EDT: метаданные — .mdo, формы — .form. Правка руками мимо модели EDT ломает
+  // проект так же, как правка XML выгрузки, поэтому класс тот же — metadata-xml.
+  // .mdo достаточно однозначен сам по себе; .form встречается и вне 1С, поэтому
+  // принимается только внутри src/ — EDT другой раскладки не создаёт.
+  if (lower.endsWith('.mdo')) return 'metadata-xml';
+  if (lower.endsWith('.form') && /(^|\/)src\//.test(lower)) return 'metadata-xml';
 
   if (lower.endsWith('.xml')) {
     // Configuration.xml — корень выгрузки конфигурации, однозначный маркер 1С.
@@ -42,9 +61,28 @@ function classifyFile(filePath) {
     // гейт на каждый их XML.
     if (/(^|\/)(cf|cfe)\//.test(lower)) return 'metadata-xml';
 
-    // Выгрузка EDT/конфигуратора внутри src: src/<Имя>/... с типовыми каталогами объектов.
-    if (/(^|\/)src\/.*\/(catalogs|documents|informationregisters|accumulationregisters|commonmodules|dataprocessors|reports|enums|chartsofcharacteristictypes|businessprocesses|tasks|exchangeplans|roles|subsystems)\//.test(lower)) {
+    // Выгрузка внутри src: и src/<Имя>/Catalogs/… (несколько конфигураций в репозитории),
+    // и src/Catalogs/… — раскладка EDT-проекта и репозиториев с одной конфигурацией.
+    // Типовой каталог объектов сразу за src/ в чужих экосистемах не встречается,
+    // поэтому здесь дополнительное подтверждение не требуется.
+    if (RE_META_UNDER_SRC_NESTED.test(lower) || RE_META_UNDER_SRC_DIRECT.test(lower)) {
       return 'metadata-xml';
+    }
+
+    // Выгрузка конфигуратора БЕЗ src: DumpConfigToFiles пишет Catalogs/, Documents/ и
+    // Configuration.xml прямо в целевой каталог. Одного имени типового каталога мало
+    // (мало ли у кого есть documents/) — поэтому требуется подтверждение на диске:
+    // рядом с типовым каталогом обязан лежать Configuration.xml. Проверка по факту,
+    // а не по строке пути, — иначе гейт взводился бы в чужих проектах.
+    const m = RE_META_DIR_SEGMENT.exec(lower);
+    if (m) {
+      const idx = lower.indexOf(m[2] + '/', m.index);
+      const dumpRoot = p.slice(0, idx);
+      try {
+        if (existsSync(join(dumpRoot, 'Configuration.xml'))) return 'metadata-xml';
+      } catch {
+        /* недоступный диск не повод для гейта */
+      }
     }
 
     return null;
@@ -69,9 +107,10 @@ const HINTS = {
     'Файл: %FILE%',
     '',
     'Перед завершением работы прогони Skill: quality-gate.',
-    'Для нового объекта критична проверка регистрации в Configuration.xml:',
-    'файл-сирота вне <ChildObjects> не попадает в сборку, при этом конфигуратор',
-    'её не диагностирует — ошибка всплывает только в рантайме.',
+    'Для нового объекта критична проверка регистрации в составе конфигурации',
+    '(Configuration.xml выгрузки либо Configuration.mdo в проекте EDT): файл-сирота',
+    'вне состава не попадает в сборку, при этом среда этого не диагностирует —',
+    'ошибка всплывает только в рантайме.',
     '',
     'Завершение сессии заблокировано, пока гейт не снят.',
   ],

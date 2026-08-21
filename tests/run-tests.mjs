@@ -3271,6 +3271,81 @@ section('Версия плагина в выводе инструментов');
 }
 
 // ---------------------------------------------------------------------------
+section('Классификация форматов 1С: EDT и выгрузка конфигуратора');
+
+{
+  // Гейт обязан взводиться на ВСЕХ рабочих раскладках исходников 1С, а не только на
+  // выгрузке вида src/<Имя>/Catalogs. До этой секции формат EDT (.mdo, .form,
+  // src/Catalogs без промежуточного сегмента) и выгрузка конфигуратора без src/
+  // проходили мимо classifyFile: правка метаданных не взводила гейт вовсе.
+  const proj = join(WORK, 'classify-proj');
+  rmSync(proj, { recursive: true, force: true });
+  const env = { CLAUDE_PROJECT_DIR: proj };
+
+  const arm = (path, sessionId) => {
+    try {
+      execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-arm.mjs')], {
+        input: JSON.stringify({ session_id: sessionId, cwd: proj, tool_input: { file_path: path } }),
+        encoding: 'utf8',
+        env: { ...process.env, ...env },
+      });
+    } catch {
+      /* arm не падает; результат читается из маркера */
+    }
+    const pendingPath = join(proj, '.claude', '.state', 'qg-pending.json');
+    if (!existsSync(pendingPath)) return null;
+    const state = JSON.parse(readFileSync(pendingPath, 'utf8'));
+    const files = state.sessions?.[sessionId]?.files || {};
+    const entry = Object.entries(files).find(([k]) => path.replace(/\\/g, '/').endsWith(k));
+    return entry ? entry[1].kind : null;
+  };
+
+  // Формат EDT: метаданные и формы.
+  const mdo = join(proj, 'src', 'Catalogs', 'Валюты', 'Валюты.mdo');
+  mkdirSync(dirname(mdo), { recursive: true });
+  writeFileSync(mdo, '<mdclass/>', 'utf8');
+  check('EDT .mdo взводит гейт как metadata-xml', arm(mdo, 'EDT1') === 'metadata-xml');
+
+  const form = join(proj, 'src', 'Catalogs', 'Валюты', 'Forms', 'ФормаЭлемента', 'Form.form');
+  mkdirSync(dirname(form), { recursive: true });
+  writeFileSync(form, '<form/>', 'utf8');
+  check('EDT .form внутри src взводит гейт', arm(form, 'EDT2') === 'metadata-xml');
+
+  const strayForm = join(proj, 'templates', 'letter.form');
+  mkdirSync(dirname(strayForm), { recursive: true });
+  writeFileSync(strayForm, 'x', 'utf8');
+  check('.form вне src гейт не взводит', arm(strayForm, 'EDT3') === null);
+
+  // Раскладка src/Catalogs/… без промежуточного сегмента (EDT и репозитории
+  // с одной конфигурацией).
+  const srcXml = join(proj, 'src', 'Catalogs', 'Товары.xml');
+  writeFileSync(srcXml, '<x/>', 'utf8');
+  check('XML в src/Catalogs без сегмента взводит гейт', arm(srcXml, 'SRC1') === 'metadata-xml');
+
+  // Выгрузка конфигуратора без src: подтверждением служит Configuration.xml рядом.
+  const dump = join(proj, 'выгрузка');
+  mkdirSync(join(dump, 'Catalogs'), { recursive: true });
+  const dumpXml = join(dump, 'Catalogs', 'Товары.xml');
+  writeFileSync(dumpXml, '<x/>', 'utf8');
+  check('выгрузка без src и без Configuration.xml молчит', arm(dumpXml, 'DUMP1') === null);
+  writeFileSync(join(dump, 'Configuration.xml'), '<x/>', 'utf8');
+  check('выгрузка без src при Configuration.xml рядом взводит гейт', arm(dumpXml, 'DUMP2') === 'metadata-xml');
+
+  // Чужой проект: типовое имя каталога само по себе гейт не взводит.
+  const alien = join(proj, 'backend', 'documents', 'invoice.xml');
+  mkdirSync(dirname(alien), { recursive: true });
+  writeFileSync(alien, '<x/>', 'utf8');
+  check('чужой documents/ без Configuration.xml молчит', arm(alien, 'ALIEN1') === null);
+
+  const alienSrc = join(proj, 'app', 'src', 'main', 'resources', 'beans.xml');
+  mkdirSync(dirname(alienSrc), { recursive: true });
+  writeFileSync(alienSrc, '<x/>', 'utf8');
+  check('java-style src/main/resources молчит', arm(alienSrc, 'ALIEN2') === null);
+
+  rmSync(proj, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
 process.stdout.write(`\n${'='.repeat(60)}\nПройдено: ${passed}, провалено: ${failures.length}\n`);
 if (failures.length) {
   process.stdout.write('\nПровалившиеся проверки:\n');
