@@ -12,11 +12,12 @@
  *   node gate.mjs release --class C0 --reason "<...>"  # снять как не требующий проверки
  */
 
-import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { validate } from './evidence-validator.mjs';
 import { resolveProjectRoot } from './project-root.mjs';
 import { readConfig, versionSuffix, pluginVersion } from './config.mjs';
+import { removeFileSync } from './fs-safe.mjs';
 
 const STATE_DIR = ['.claude', '.state'];
 const PENDING = 'qg-pending.json';
@@ -274,11 +275,24 @@ function cmdRelease(args) {
 
   // Снимаем ТОЛЬКО свою сессию: записи остальных остаются взведёнными, за них отвечают
   // их владельцы. Если своя была последней — файл состояния удаляется целиком.
+  //
+  // Удаление обязано ПОДТВЕРДИТЬСЯ до того, как пользователю сказано «гейт снят»:
+  // на Node 24.x/Windows `rmSync` молча не удаляет файлы на путях с не-ASCII символами
+  // (кириллическое имя проекта — норма для 1С), и без проверки release рапортовал успех,
+  // а Stop-хук продолжал блокировать завершение. Успех, не отличимый от невыполнения, —
+  // ровно тот класс отказа, против которого написан весь плагин.
   delete state.sessions[sessionId];
   if (Object.keys(state.sessions).length) {
     writeFileSync(pending, JSON.stringify(state, null, 2), 'utf8');
-  } else {
-    rmSync(pending, { force: true });
+  } else if (!removeFileSync(pending)) {
+    process.stderr.write(
+      'Маркер гейта не удалился — гейт НЕ снят:\n' +
+        `  ${pending}\n` +
+        'Известная причина: fs.rmSync в Node 24.x на Windows молча пропускает пути\n' +
+        'с не-ASCII символами (nodejs/node#56049). Обнови Node до версии с исправлением\n' +
+        'либо удали файл вручную и повтори снятие.\n'
+    );
+    return 2;
   }
 
   let doneState = { version: 2, sessions: {} };

@@ -18,6 +18,7 @@
  */
 
 import { createWriteStream, createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, chmodSync, statSync, copyFileSync } from 'node:fs';
+import { removeFileSync } from './fs-safe.mjs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -138,20 +139,20 @@ export async function install(manifest, { root = dataRoot(), force = false, log 
     if (!response.ok || !response.body) {
       return { ok: false, reason: 'download_failed', status: response.status };
     }
-    rmSync(tmpPath, { force: true });
+    removeFileSync(tmpPath);
     await pipeline(Readable.fromWeb(response.body), createWriteStream(tmpPath));
   } catch (e) {
-    rmSync(tmpPath, { force: true });
+    removeFileSync(tmpPath);
     return { ok: false, reason: 'download_failed', error: String(e.message || e) };
   }
 
   const actual = await sha256(tmpPath);
   if (actual !== target.sha256) {
-    rmSync(tmpPath, { force: true });
+    removeFileSync(tmpPath);
     return { ok: false, reason: 'checksum_mismatch', actual, expected: target.sha256 };
   }
 
-  rmSync(finalPath, { force: true });
+  removeFileSync(finalPath);
   renameSync(tmpPath, finalPath);
   if (process.platform !== 'win32') chmodSync(finalPath, 0o755);
   writeMarker(manifest, root, { sha256: actual, size: statSync(finalPath).size, installedFrom: url });

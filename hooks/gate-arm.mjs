@@ -10,10 +10,11 @@
  * Любая внутренняя ошибка — молча exit 0: хук качества не имеет права ломать работу.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readPayload, projectRoot, toProjectRelative } from './_shared.mjs';
+import { removeFileSync } from '../tools/fs-safe.mjs';
 import { ensureConfig } from '../tools/config.mjs';
 
 const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -176,12 +177,12 @@ function main() {
       if (done?.sessions) {
         delete done.sessions[sessionId];
         if (Object.keys(done.sessions).length) writeFileSync(donePath, JSON.stringify(done, null, 2), 'utf8');
-        else rmSync(donePath, { force: true });
+        else removeFileSync(donePath);
       } else {
-        rmSync(donePath, { force: true });
+        removeFileSync(donePath);
       }
     } catch {
-      rmSync(donePath, { force: true });
+      removeFileSync(donePath);
     }
   }
 

@@ -19,6 +19,7 @@
  */
 
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { removeTreeSync } from '../tools/fs-safe.mjs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -75,7 +76,7 @@ function writeBytes(name, content) {
   return p;
 }
 
-rmSync(WORK, { recursive: true, force: true });
+removeTreeSync(WORK);
 mkdirSync(WORK, { recursive: true });
 
 // ---------------------------------------------------------------------------
@@ -3426,10 +3427,68 @@ section('Классификация форматов 1С: EDT и выгрузк�
 }
 
 // ---------------------------------------------------------------------------
+section('Удаление состояния на путях с не-ASCII символами');
+
+{
+  // На Node 24.x/Windows `fs.rmSync` молча не удаляет пути с не-ASCII символами
+  // (nodejs/node#56049): release печатал «гейт снят», маркер оставался, Stop блокировал
+  // завершение навсегда. Кириллическое имя проекта для 1С — норма, поэтому здесь
+  // фиксируется КОНТРАКТ: после удаления пути не существует — на любой версии Node.
+  const fsSafe = await import(pathToFileURL(join(ROOT, 'tools', 'fs-safe.mjs')).href);
+
+  const cyrDir = join(WORK, 'проект-кириллица');
+  fsSafe.removeTreeSync(cyrDir);
+  mkdirSync(join(cyrDir, '.claude', '.state'), { recursive: true });
+  const marker = join(cyrDir, '.claude', '.state', 'qg-pending.json');
+  writeFileSync(marker, '{}', 'utf8');
+  check('removeFileSync удаляет файл на кириллическом пути', fsSafe.removeFileSync(marker) === true && !existsSync(marker));
+  check('removeFileSync отсутствующего файла — успех', fsSafe.removeFileSync(marker) === true);
+
+  writeFileSync(join(cyrDir, 'вложенный файл.txt'), 'x', 'utf8');
+  check('removeTreeSync удаляет дерево с кириллицей внутри', fsSafe.removeTreeSync(cyrDir) === true && !existsSync(cyrDir));
+
+  // Интеграция: полный цикл взвода и снятия в проекте с кириллическим именем.
+  // Без removeFileSync в release этот тест на Node 24.x/Windows падал: маркер переживал
+  // «успешное» снятие, а повторный Stop возвращал блокировку.
+  const proj = join(WORK, 'проект-релиз');
+  fsSafe.removeTreeSync(proj);
+  mkdirSync(join(proj, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+  const env = { CLAUDE_PROJECT_DIR: proj };
+  const file = join(proj, 'src', 'cf', 'CommonModules', 'М', 'Ext', 'Module.bsl');
+  try {
+    execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-arm.mjs')], {
+      input: JSON.stringify({ session_id: 'КИР', cwd: proj, tool_input: { file_path: file } }),
+      encoding: 'utf8',
+      env: { ...process.env, ...env },
+    });
+  } catch {
+    /* arm никогда не падает — а если упал, ниже это видно по отсутствию маркера */
+  }
+  const pendingPath = join(proj, '.claude', '.state', 'qg-pending.json');
+  check('гейт взведён в кириллическом проекте', existsSync(pendingPath));
+  const rel = run('tools/gate.mjs', ['release', '--session', 'КИР', '--class', 'C0', '--reason', 'тест контракта удаления'], { env });
+  check('release в кириллическом проекте снял гейт и подтвердил это', rel.code === 0 && !existsSync(pendingPath), `code=${rel.code}, pending=${existsSync(pendingPath)}`);
+  check('журнал снятий записан', existsSync(join(proj, '.claude', '.state', 'qg-done.json')));
+  let stopCode = 0;
+  try {
+    execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-check.mjs')], {
+      input: JSON.stringify({ session_id: 'КИР', cwd: proj }),
+      encoding: 'utf8',
+      env: { ...process.env, ...env },
+      stdio: 'pipe',
+    });
+  } catch (e) {
+    stopCode = e.status ?? 1;
+  }
+  check('Stop после снятия не блокирует', stopCode === 0, `code=${stopCode}`);
+  fsSafe.removeTreeSync(proj);
+}
+
+// ---------------------------------------------------------------------------
 process.stdout.write(`\n${'='.repeat(60)}\nПройдено: ${passed}, провалено: ${failures.length}\n`);
 if (failures.length) {
   process.stdout.write('\nПровалившиеся проверки:\n');
   for (const f of failures) process.stdout.write(`  - ${f.name}${f.detail ? ` (${f.detail})` : ''}\n`);
 }
-rmSync(WORK, { recursive: true, force: true });
+removeTreeSync(WORK);
 process.exit(failures.length ? 1 : 0);

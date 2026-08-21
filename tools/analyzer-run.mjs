@@ -32,7 +32,8 @@
  * 2 — обязателен и недоступен, либо часовой не подтверждён.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync } from 'node:fs';
+import { removeTreeSync } from './fs-safe.mjs';
 import { join, dirname, resolve, relative, sep, isAbsolute, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -514,10 +515,10 @@ export function runBslLs({ jar, root, configPath }) {
   const report = join(out, 'bsl-json.json');
   const text = existsSync(report) ? readFileSync(report, 'utf8') : '';
   try {
-    rmSync(out, { recursive: true, force: true });
+    removeTreeSync(out);
     // Промежуточный каталог убираем ТОЛЬКО пустым: параллельный прогон может держать в нём
     // свой отчёт, и рекурсивное удаление снесло бы чужой результат.
-    if (readdirSync(stage).length === 0) rmSync(stage, { recursive: true, force: true });
+    if (readdirSync(stage).length === 0) removeTreeSync(stage);
   } catch {
     /* уборка не критична */
   }
