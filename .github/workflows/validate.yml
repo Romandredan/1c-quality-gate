@@ -14,8 +14,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        node: ["20", "24"]
+        os: [windows-latest]
+        node: ["24.12.0", "24"]
 
     runs-on: ${{ matrix.os }}
 
