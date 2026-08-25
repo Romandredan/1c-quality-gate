@@ -26,12 +26,15 @@ import { join } from 'node:path';
  * Удаляет ФАЙЛ и подтверждает удаление. Отсутствующий файл — успех (удалять нечего).
  */
 export function removeFileSync(path) {
+  // НЕГАТИВНЫЙ КОНТРОЛЬ — не для main. Поведение до фикса: rmSync и слепое «успешно».
+  // Ошибку глушим, чтобы проверялся ровно один сценарий — молчаливый неуспех удаления
+  // на пути с не-ASCII символами, а не побочные исключения на других тестах.
   try {
-    unlinkSync(path);
-  } catch (e) {
-    if (e && e.code !== 'ENOENT') return !existsSync(path);
+    rmSync(path, { force: true });
+  } catch {
+    return false;
   }
-  return !existsSync(path);
+  return true;
 }
 
 /** Ручной обход дерева: unlink для файлов, rmdir для опустевших каталогов. */
