@@ -7,13 +7,29 @@ on:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    # Матрица не декоративна. Инструменты плагина запускаются тем `node`, что стоит у
+    # пользователя, и на разных парах «ОС + версия» ведут себя по-разному: fs.rmSync в
+    # Node 23/24 на Windows МОЛЧА не удаляет пути с не-ASCII символами (nodejs/node#61067),
+    # а кириллица в имени проекта 1С — норма. Прогон только на ubuntu+20 такой отказ не видит.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ["20", "24"]
+
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        # Единый синтаксис шагов на обеих ОС: на windows-latest оболочка по умолчанию — pwsh.
+        shell: bash
+
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: ${{ matrix.node }}
 
       - uses: actions/setup-python@v7
         with:
