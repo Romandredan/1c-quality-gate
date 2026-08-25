@@ -2464,6 +2464,18 @@ section('Чужая установка принимается, только ес
 
   const gone = await boot.adopt(fake, join(launcher, 'нет-такого'), { root: join(WORK, 'adopt-data-3') });
   check('отсутствующий источник — не исключение, а причина', gone.ok === false && gone.reason === 'source_missing', JSON.stringify(gone));
+  // Старый бинарник остался на месте: на Node 24.x/Windows это штатный исход rmSync на путях
+  // с не-ASCII символами. Здесь неудаляемость моделируется каталогом по пути файла — важен не
+  // способ, а поведение: renameSync поверх живого пути Windows отвергает, и без проверки
+  // вызывающий получил бы исключение вместо причины. Мусор после отказа тоже не остаётся.
+  const dataRoot4 = join(WORK, 'adopt-data-4');
+  rmSync(dataRoot4, { recursive: true, force: true });
+  mkdirSync(boot.binaryPath(fake, dataRoot4), { recursive: true });
+  const stale = await boot.adopt(fake, theirs, { root: dataRoot4 });
+  check('неудалённый старый бинарник — причина, а не исключение', stale.ok === false && stale.reason === 'stale_target', JSON.stringify(stale));
+  check('после отказа не остаётся ни временного файла, ни маркера',
+    !existsSync(`${boot.binaryPath(fake, dataRoot4)}.download`) && !existsSync(join(boot.installDir(fake, dataRoot4), '.ready')));
+
 
   // Дальше проверяется порядок разрешения, поэтому каталог данных подменяется на пустой:
   // иначе тест увидел бы установку той машины, на которой запущен, и означал бы разное в

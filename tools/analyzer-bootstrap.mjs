@@ -17,7 +17,7 @@
  *   node analyzer-bootstrap.mjs [--force] [--verify]
  */
 
-import { createWriteStream, createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, chmodSync, statSync, copyFileSync } from 'node:fs';
+import { createWriteStream, createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, chmodSync, statSync, copyFileSync } from 'node:fs';
 import { removeFileSync } from './fs-safe.mjs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
@@ -152,7 +152,14 @@ export async function install(manifest, { root = dataRoot(), force = false, log 
     return { ok: false, reason: 'checksum_mismatch', actual, expected: target.sha256 };
   }
 
-  removeFileSync(finalPath);
+  // Удаление старого бинарника обязано ПОДТВЕРДИТЬСЯ: renameSync на существующий путь
+  // Windows отвергает, и вместо честного отказа вызывающий получил бы исключение из недр
+  // установки. Причина живого остатка та же, что у маркера гейта, — rmSync на путях с
+  // не-ASCII символами (имя пользователя Windows кириллицей — обычное дело).
+  if (!removeFileSync(finalPath)) {
+    removeFileSync(tmpPath);
+    return { ok: false, reason: 'stale_target', path: finalPath };
+  }
   renameSync(tmpPath, finalPath);
   if (process.platform !== 'win32') chmodSync(finalPath, 0o755);
   writeMarker(manifest, root, { sha256: actual, size: statSync(finalPath).size, installedFrom: url });
@@ -186,22 +193,29 @@ export async function adopt(manifest, sourcePath, { root = dataRoot(), log = () 
   const tmpPath = `${finalPath}.download`;
 
   try {
-    rmSync(tmpPath, { force: true });
+    removeFileSync(tmpPath);
     copyFileSync(sourcePath, tmpPath);
   } catch (e) {
     // На Windows лаунчер может держать свой файл открытым. Это не дефект и не повод падать:
     // вызывающий просто скачает бинарник обычным путём.
-    rmSync(tmpPath, { force: true });
+    removeFileSync(tmpPath);
     return { ok: false, reason: 'copy_failed', error: String(e.message || e) };
   }
 
   const actual = await sha256(tmpPath);
   if (actual !== target.sha256) {
-    rmSync(tmpPath, { force: true });
+    removeFileSync(tmpPath);
     return { ok: false, reason: 'checksum_mismatch', actual, expected: target.sha256 };
   }
 
-  rmSync(finalPath, { force: true });
+  // Удаление старого бинарника обязано ПОДТВЕРДИТЬСЯ: renameSync на существующий путь
+  // Windows отвергает, и вместо честного отказа вызывающий получил бы исключение из недр
+  // установки. Причина живого остатка та же, что у маркера гейта, — rmSync на путях с
+  // не-ASCII символами (имя пользователя Windows кириллицей — обычное дело).
+  if (!removeFileSync(finalPath)) {
+    removeFileSync(tmpPath);
+    return { ok: false, reason: 'stale_target', path: finalPath };
+  }
   renameSync(tmpPath, finalPath);
   if (process.platform !== 'win32') chmodSync(finalPath, 0o755);
   writeMarker(manifest, root, { sha256: actual, size: statSync(finalPath).size, installedFrom: sourcePath });
