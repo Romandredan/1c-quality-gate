@@ -131,6 +131,62 @@ if (plugin && market) {
   }
 }
 
+// --- 1а. Версия и точка входа для OpenCode ------------------------------------
+// package.json в корне — манифест установки для OpenCode: по нему пакет ставится из
+// репозитория и по нему же находится файл плагина. Третий манифест — третье место, где
+// версия может отстать, поэтому сверяется тем же правилом, что и marketplace.json.
+if (plugin) {
+  const pkgPath = join(ROOT, 'package.json');
+  let pkg = null;
+  try {
+    pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+  } catch {
+    fail('package.json', 'нет в корне или не читается: без него OpenCode пакет не поставит');
+  }
+  if (pkg) {
+    if (pkg.version !== plugin.version) {
+      fail('package.json', `версия ${pkg.version} расходится с plugin.json (${plugin.version})`);
+    }
+    // type: module — не косметика: файл плагина .js, и без него Node 20 падает на import
+    // ещё до первого вызова хука.
+    if (pkg.type !== 'module') {
+      fail('package.json', 'нет "type": "module": .js-плагин не загрузится на Node 20');
+    }
+    if (!pkg.main || !existsSync(join(ROOT, pkg.main))) {
+      fail('package.json', `main "${pkg.main}" не указывает на существующий файл`);
+    }
+    // files отсекает часть пакета при установке. Навыки, инструменты и hooks обязаны
+    // доехать целиком, иначе гейт установится без того, чем проверяет.
+    if (pkg.files) {
+      fail('package.json', 'поле files урезает пакет: навыки и инструменты не доедут');
+    }
+  }
+}
+
+// --- 1в. Строка установки OpenCode пиннится на ту же версию -------------------
+// Тег живёт ещё и в прозе: в README, в docs/OPENCODE.md и в примере конфигурации. Прозу
+// ни один манифест не сверяет, поэтому при выпуске она молча остаётся на старой версии —
+// и два харнесса ставят разный код. Проверяем каждую строку установки.
+if (plugin) {
+  const expected = `#v${plugin.version}`;
+  const spec = /1c-quality-gate@git\+https:\/\/github\.com\/[^"'\s]+/g;
+  for (const rel of ['README.md', join('docs', 'OPENCODE.md'), join('opencode', 'opencode.json.example')]) {
+    const abs = join(ROOT, rel);
+    if (!existsSync(abs)) continue;
+    const text = readFileSync(abs, 'utf8');
+    const found = text.match(spec) || [];
+    if (!found.length) {
+      fail(rel, 'нет строки установки OpenCode: пользователю неоткуда взять пакет');
+      continue;
+    }
+    for (const s of found) {
+      if (!s.endsWith(expected)) {
+        fail(rel, `строка установки "${s}" не закреплена на ${expected}`);
+      }
+    }
+  }
+}
+
 // --- 1б. Тег релиза совпадает с версией --------------------------------------
 // Проверка живёт только в сборке по тегу: GITHUB_REF_TYPE выставляет CI. Локально переменной
 // нет, и проверка молчит — сверять нечего.
@@ -222,6 +278,13 @@ for (const f of files.filter((p) => /(^|\/)agents\/[^/]+\.md$/.test(rel(p)))) {
   if (modelMatch && !AGENT_MODELS.has(modelMatch[1])) {
     fail(rel(f), `model "${modelMatch[1]}" вне набора ${[...AGENT_MODELS].join(', ')}`);
   }
+}
+
+// Отдельного каталога субагентов под OpenCode нет намеренно: те же файлы agents/ читает
+// плагин, переводя frontmatter в opencode/plugin/registry.js. Копия расходится с оригиналом
+// при первой правке одной из них, и расходится молча.
+if (existsSync(join(ROOT, 'opencode', 'agents'))) {
+  fail('opencode/agents/', 'копия субагентов: источник один — agents/, перевод в registry.js');
 }
 
 for (const f of files.filter((p) => /(^|\/)commands\/[^/]+\.md$/.test(rel(p)))) {

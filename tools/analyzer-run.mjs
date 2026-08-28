@@ -49,6 +49,7 @@ import {
 import { DEFAULTS, readConfig, versionSuffix } from './config.mjs';
 import { resolveProjectRoot as resolveRoot } from './project-root.mjs';
 import { recordRun } from './run-journal.mjs';
+import { stateDirSegments } from './state-dir.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const PLUGIN_ROOT = dirname(HERE);
@@ -770,7 +771,7 @@ async function main(argv) {
   const layout = engine === 'bsl-ls' ? { main: null, extensions: [] } : discoverLayout(root);
 
   if (layout.main) {
-    const generated = join(root, '.claude', '.state', 'qg-analyzer.toml');
+    const generated = join(root, ...stateDirSegments(), 'qg-analyzer.toml');
     mkdirSync(dirname(generated), { recursive: true });
     writeFileSync(generated, buildProjectConfig({ layout, root, baseConfig: configPath }), 'utf8');
     // В stderr, а не в stdout: с `--json` любая посторонняя строка ломает разбор вывода.

@@ -45,9 +45,23 @@ export function targetKey(platform = process.platform, arch = process.arch) {
 /**
  * Каталог данных плагина. Он переживает обновление плагина — в отличие от каталога кэша,
  * где версии плагина лежат порознь и шестидесятимегабайтный бинарник копировался бы заново.
+ *
+ * Умолчание общее для обоих харнессов, и это выбор, а не недосмотр. Бинарник закреплён по
+ * версии и SHA-256, то есть для Claude Code и OpenCode он побайтово один; свой каталог на
+ * харнесс означал бы вторую копию на шестьдесят мегабайт и второе скачивание у того, кто
+ * работает в обоих. Имя пути историческое — сменить его нельзя дёшево: у всех, кто уже
+ * поставил плагин, бинарник осиротеет, а по `docs/RELEASING.md` смена расположения файлов
+ * тянет мажорный номер.
+ *
+ * `QG_DATA_DIR` — явный обход для тех, кому каталог чужого харнесса на диске не нужен.
+ * Плагин OpenCode её намеренно НЕ выставляет: умолчание должно оставаться общим.
  */
 export function dataRoot() {
-  return process.env.CLAUDE_PLUGIN_DATA || join(homedir(), '.claude', 'plugins', 'data', DATA_DIR_NAME);
+  return (
+    process.env.QG_DATA_DIR ||
+    process.env.CLAUDE_PLUGIN_DATA ||
+    join(homedir(), '.claude', 'plugins', 'data', DATA_DIR_NAME)
+  );
 }
 
 export function installDir(manifest, root = dataRoot()) {

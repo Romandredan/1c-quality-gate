@@ -42,7 +42,8 @@ tools: Skill, ToolSearch, Bash, Read, Grep, Glob
 
 ## Инструменты
 
-Нужные MCP-инструменты подгружай через ToolSearch — их состав зависит от того, что
+Нужные MCP-инструменты в Claude Code подгружай через ToolSearch, в OpenCode они доступны
+по имени сервера напрямую. Состав зависит от того, что
 установлено в проекте:
 
 - статический анализатор BSL — через `tools/analyzer-run.mjs` плагина (не через MCP: гейту
@@ -63,7 +64,8 @@ tools: Skill, ToolSearch, Bash, Read, Grep, Glob
 
 ## Порядок работы
 
-1. Загрузи через Skill-тул навык `bsl-code-review` и открой его
+1. Загрузи навык `bsl-code-review` инструментом загрузки навыков (`Skill` в Claude Code,
+   `skill` в OpenCode) и открой его
    `skills/bsl-code-review/references/api-verification.md` — источник истины методологии. Ниже краткая карта;
    при расхождении приоритет у него.
 2. Определи проект для индекса кода и открой сессию поиска.

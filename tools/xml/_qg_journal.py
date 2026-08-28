@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 CONFIG_MARKER = ".1c-quality-gate.json"
 GIT_MARKER = ".git"
-STATE_DIR = os.path.join(".claude", ".state")
+STATE_DIR = os.environ.get("QG_STATE_DIR", os.path.join(".claude", ".state"))
 JOURNAL_FILE = "qg-runs.jsonl"
 KEEP = 500
 
@@ -30,7 +30,11 @@ def project_root(start=None):
     Порядок повторяет `tools/project-root.mjs`. Разойдясь, два разрешителя писали бы журнал
     в разные каталоги, и валидатор следа не нашёл бы записей питоновского валидатора.
     """
-    from_env = os.environ.get("CLAUDE_PROJECT_DIR")
+    from_env = (
+        os.environ.get("QG_PROJECT_DIR")
+        or os.environ.get("OPENCODE_PROJECT_DIR")
+        or os.environ.get("CLAUDE_PROJECT_DIR")
+    )
     if from_env:
         return from_env
 

@@ -7,27 +7,17 @@
  *
  * Снять гейт может только `tools/gate.mjs release` — он требует непустой evidence,
  * поэтому «снял и забыл» не проходит.
+ *
+ * Логика — в hooks/gate-core.mjs (общая с PostToolUse-хуком и плагином OpenCode),
+ * здесь только ввод-вывод харнесса.
  */
 
-import { readFileSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readPayload, projectRoot } from './_shared.mjs';
+import { readPendingState, blockMessage } from './gate-core.mjs';
 
-const STATE_DIR = ['.claude', '.state'];
-const PENDING = 'qg-pending.json';
-
-/**
- * Готовый путь к инструменту плагина для подстановки в сообщение.
- *
- * Печатается развёрнутым, а не плейсхолдером: тот, кто читает сообщение о блокировке, должен
- * иметь возможность выполнить команду немедленно. Плейсхолдер вида «каталог плагина»
- * заставляет сначала выяснять, где этот каталог, — и ровно в этот момент теряется выход
- * из блокировки.
- */
-function toolPath(name) {
-  return join(dirname(dirname(fileURLToPath(import.meta.url))), 'tools', name).replace(/\\/g, '/');
-}
+const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 function main() {
   const payload = readPayload();
@@ -39,13 +29,10 @@ function main() {
   // указанием причины), а на повторной попытке сообщение дополняется прямым путём.
   const repeated = Boolean(payload?.stop_hook_active);
 
-  const pendingPath = join(projectRoot(payload), ...STATE_DIR, PENDING);
-  if (!existsSync(pendingPath)) return 0;
+  const state = readPendingState(projectRoot(payload));
+  if (!state) return 0;
 
-  let state;
-  try {
-    state = JSON.parse(readFileSync(pendingPath, 'utf8'));
-  } catch {
+  if (state.corrupt) {
     // Повреждённый маркер — блокируем: неизвестное состояние безопаснее считать непроверенным.
     process.stderr.write(
       '[ГЕЙТ КАЧЕСТВА 1С — ЗАВЕРШЕНИЕ ЗАБЛОКИРОВАНО]\n' +
@@ -58,7 +45,7 @@ function main() {
   // Блокируем ТОЛЬКО за правки этой сессии. Чужие остаются в состоянии нетронутыми:
   // параллельная сессия отвечает за свой гейт сама, а перехватывать её работу нельзя.
   const sessionId = String(payload?.session_id || 'unknown-session');
-  const sessions = state.sessions || (state.files ? { legacy: { files: state.files } } : {});
+  const sessions = state.sessions || {};
   const mine = sessions[sessionId]?.files || {};
   const files = Object.entries(mine);
 
@@ -78,56 +65,9 @@ function main() {
     return 0;
   }
 
-  const bsl = files.filter(([, v]) => v.kind === 'bsl').map(([k]) => k);
-  const xml = files.filter(([, v]) => v.kind === 'metadata-xml').map(([k]) => k);
-
-  const lines = [
-    '[ГЕЙТ КАЧЕСТВА 1С — ЗАВЕРШЕНИЕ ЗАБЛОКИРОВАНО]',
-    '',
-    `В этой работе изменены файлы 1С (${files.length}), но Skill: quality-gate не прогонялся.`,
-  ];
-
-  if (bsl.length) {
-    lines.push('', `BSL (${bsl.length}):`);
-    lines.push(...bsl.slice(0, 10).map((f) => `  - ${f}`));
-    if (bsl.length > 10) lines.push(`  … и ещё ${bsl.length - 10}`);
-  }
-  if (xml.length) {
-    lines.push('', `XML метаданных (${xml.length}):`);
-    lines.push(...xml.slice(0, 10).map((f) => `  - ${f}`));
-    if (xml.length > 10) lines.push(`  … и ещё ${xml.length - 10}`);
-  }
-
-  lines.push(
-    '',
-    'Прогони Skill: quality-gate. Он определит глубину сам — по объёму правки,',
-    'архетипам кода и сложности — и запустит только нужные контуры.',
-    'Косметическая правка закрывается за секунды: класс C0 требует лишь гигиены файлов.',
-    '',
-    'Если правка действительно не требует проверки — сними гейт явно, с указанием причины:',
-    `  node "${toolPath('gate.mjs')}" release --class C0 --reason "<почему>"`,
-    'Причина сохраняется в состоянии: пропуск фиксируется, а не замалчивается.'
+  process.stderr.write(
+    blockMessage({ sessionId, files, foreign, packageRoot: PACKAGE_ROOT, mode: 'claude', repeated }) + '\n'
   );
-
-  lines.push('', `Сессия: ${sessionId}`);
-  if (foreign > 0) {
-    lines.push(
-      `В проекте есть также правки другой сессии (${foreign}) — их НЕ трогай:`,
-      'за них отвечает та сессия, снятие чужого гейта перехватывает чужую работу.'
-    );
-  }
-
-  if (repeated) {
-    // Повторная попытка завершения: гейт не пропускает по-прежнему, но если снятие
-    // штатным путём почему-то недоступно, показываем точную команду отказа.
-    lines.push(
-      '',
-      'Это повторная попытка завершения — блокировка не снимается сама.',
-      `Крайний случай: node "<каталог плагина>/tools/gate.mjs" release --session ${sessionId} --class C0 --reason "<почему>"`
-    );
-  }
-
-  process.stderr.write(lines.join('\n') + '\n');
   return 2;
 }
 

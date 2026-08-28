@@ -21,6 +21,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveProjectRoot } from './project-root.mjs';
+import { stateDirSegments } from './state-dir.mjs';
 
 export const CONFIG_FILE = '.1c-quality-gate.json';
 
@@ -47,7 +48,7 @@ export function versionSuffix() {
   return v ? ` [1c-quality-gate v${v}]` : '';
 }
 
-const STATE_DIR = ['.claude', '.state'];
+const STATE_DIR = stateDirSegments();
 const INIT_MARKER = 'qg-config-init.json';
 
 /**
@@ -326,7 +327,7 @@ function cmdShow(root, json) {
   const where = resolveProjectRoot(process.cwd());
   const via =
     where.via === 'env'
-      ? 'переменная CLAUDE_PROJECT_DIR'
+      ? 'переменная окружения (QG_PROJECT_DIR / CLAUDE_PROJECT_DIR)'
       : where.via === 'marker'
         ? `по маркеру ${where.marker}`
         : 'рабочий каталог — маркеров корня выше не найдено';

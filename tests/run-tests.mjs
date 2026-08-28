@@ -22,7 +22,7 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync
 import { removeTreeSync } from '../tools/fs-safe.mjs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -2505,6 +2505,40 @@ section('Чужая установка принимается, только ес
 }
 
 // ---------------------------------------------------------------------------
+section('Каталог данных анализатора общий для двух харнессов');
+
+{
+  // Бинарник закреплён по версии и SHA-256 — для Claude Code и OpenCode он один и тот же.
+  // Умолчание общее намеренно: свой каталог на харнесс означал бы вторую копию на шестьдесят
+  // мегабайт у того, кто работает в обоих. QG_DATA_DIR — явный обход для тех, кому каталог
+  // чужого харнесса не нужен; плагин OpenCode её не выставляет.
+  const boot = await import(pathToFileURL(join(ROOT, 'tools', 'analyzer-bootstrap.mjs')).href);
+  const savedQg = process.env.QG_DATA_DIR;
+  const savedClaude = process.env.CLAUDE_PLUGIN_DATA;
+  try {
+    delete process.env.QG_DATA_DIR;
+    delete process.env.CLAUDE_PLUGIN_DATA;
+    const fallback = boot.dataRoot();
+    check('без переменных — общий путь, а не путь харнесса',
+      fallback.includes('.claude') && fallback.includes('plugins'), fallback);
+
+    process.env.CLAUDE_PLUGIN_DATA = join(WORK, 'данные-claude');
+    check('CLAUDE_PLUGIN_DATA действует', boot.dataRoot() === join(WORK, 'данные-claude'));
+
+    process.env.QG_DATA_DIR = join(WORK, 'данные-обход');
+    check('QG_DATA_DIR сильнее CLAUDE_PLUGIN_DATA', boot.dataRoot() === join(WORK, 'данные-обход'));
+
+    delete process.env.CLAUDE_PLUGIN_DATA;
+    check('QG_DATA_DIR действует и в одиночку', boot.dataRoot() === join(WORK, 'данные-обход'));
+  } finally {
+    if (savedQg === undefined) delete process.env.QG_DATA_DIR;
+    else process.env.QG_DATA_DIR = savedQg;
+    if (savedClaude === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+    else process.env.CLAUDE_PLUGIN_DATA = savedClaude;
+  }
+}
+
+// ---------------------------------------------------------------------------
 section('Часовой проверяется по целям, а не «хотя бы один живой»');
 
 {
@@ -3494,6 +3528,21 @@ section('Удаление состояния на путях с не-ASCII си�
   }
   check('Stop после снятия не блокирует', stopCode === 0, `code=${stopCode}`);
   fsSafe.removeTreeSync(proj);
+}
+
+// ---------------------------------------------------------------------------
+// Изолированные наборы тестов — отдельными процессами: у них собственные счётчики
+// и временные каталоги, а их падение обязано быть видно в общем итоге CI.
+for (const suite of ['tests/gate-core.test.mjs', 'tests/opencode-plugin.test.mjs']) {
+  const res = spawnSync(process.execPath, [join(ROOT, ...suite.split('/'))], {
+    encoding: 'utf8',
+    env: { ...process.env },
+  });
+  check(
+    `${suite} — весь набор зелёный`,
+    res.status === 0,
+    res.status === 0 ? '' : (res.stdout || '') + (res.stderr || '')
+  );
 }
 
 // ---------------------------------------------------------------------------

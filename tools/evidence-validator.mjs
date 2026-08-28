@@ -23,6 +23,7 @@ import { resolve as resolveConfig, evidenceValue } from './config.mjs';
 import { SCOPES, TOOL_BACKED, RENAMED, isKnownScope, isKnownQgId } from './evidence-scopes.mjs';
 import { readJournal, coveredFiles } from './run-journal.mjs';
 import { projectRoot } from './project-root.mjs';
+import { stateDirSegments } from './state-dir.mjs';
 
 export const SECTION = '## quality evidence';
 
@@ -250,7 +251,7 @@ function isEmpty(value) {
  * блокировать добросовестную работу по чужой активности.
  */
 function ownSession(root, sessionId = null) {
-  const file = join(root, '.claude', '.state', 'qg-pending.json');
+  const file = join(root, ...stateDirSegments(), 'qg-pending.json');
   if (!existsSync(file)) return null;
   try {
     const state = JSON.parse(readFileSync(file, 'utf8'));

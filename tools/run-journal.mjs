@@ -27,8 +27,9 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname, relative, resolve, isAbsolute } from 'node:path';
 import { projectRoot } from './project-root.mjs';
+import { stateDirSegments } from './state-dir.mjs';
 
-const STATE_DIR = ['.claude', '.state'];
+const STATE_DIR = stateDirSegments();
 const JOURNAL_FILE = 'qg-runs.jsonl';
 
 /** Сколько записей держим. Журнал — доказательство текущего прогона, а не история проекта. */

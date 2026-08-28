@@ -21,7 +21,8 @@
  * пустой. Это тот же класс отказа, против которого написан весь формат следа.
  *
  * Порядок разрешения:
- *   1. `CLAUDE_PROJECT_DIR` — если харнесс её задал, он знает точнее нас;
+ *   1. `QG_PROJECT_DIR` / `OPENCODE_PROJECT_DIR` / `CLAUDE_PROJECT_DIR` — если харнесс
+ *      задал корень явно, он знает точнее нас;
  *   2. подъём до `.1c-quality-gate.json` — настройка гейта лежит в корне по определению;
  *   3. подъём до `.git`;
  *   4. исходный каталог — сказать больше нечего, но об этом можно сообщить (`via: 'start'`).
@@ -48,7 +49,9 @@ export const ROOT_MARKERS = ['.1c-quality-gate.json', '.git'];
  * откуда взялся корень.
  */
 export function resolveProjectRoot(start = process.cwd(), env = process.env) {
-  const fromEnv = env.CLAUDE_PROJECT_DIR;
+  // QG_PROJECT_DIR выставляет плагин OpenCode (opencode/plugin/quality-gate.js) —
+  // аналог CLAUDE_PROJECT_DIR для харнесса без собственной переменной корня.
+  const fromEnv = env.QG_PROJECT_DIR || env.OPENCODE_PROJECT_DIR || env.CLAUDE_PROJECT_DIR;
   if (fromEnv) return { root: fromEnv, via: 'env', marker: null };
 
   const from = resolve(start || process.cwd());
