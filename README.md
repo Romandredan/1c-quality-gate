@@ -6,20 +6,24 @@
 [![AGENTS.md](https://img.shields.io/badge/AGENTS.md-compatible-brightgreen.svg)](https://agents.md)
 
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-d97757.svg)](https://code.claude.com/docs/en/plugins)
+[![OpenCode](https://img.shields.io/badge/OpenCode-plugin-000000.svg)](https://opencode.ai/docs/plugins/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-339933.svg)](https://nodejs.org/)
 [![1C:Enterprise](https://img.shields.io/badge/1C%3AEnterprise-8.3-ffd200.svg)](https://v8.1c.ru/)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)
 
 **Контроль качества 1С-разработки в паре с языковой моделью.** Правка `.bsl` или XML метаданных
-взводит гейт — Claude Code не даёт объявить работу законченной, пока проверка не прогнана.
+взводит гейт: в Claude Code сессию нельзя завершить, пока проверка не прогнана, в OpenCode
+плагин настойчиво возвращает агента к непроверенным правкам.
 Глубина считается автоматически: косметическая правка закрывается за секунды, транзакция или
 новый общий модуль тянут за собой полный разбор. Результат — отчёт с находками и машиночитаемый
 след, по которому видно, что проверено, что пропущено и почему.
 
-> **English.** A Claude Code plugin that enforces code-quality checks for 1C:Enterprise (BSL)
-> development. Editing a BSL module or a metadata XML arms a session gate: a `Stop` hook refuses
-> to end the session until the quality run has happened. Depth is computed per change across
+> **English.** A Claude Code and OpenCode plugin that enforces code-quality checks for
+> 1C:Enterprise (BSL) development. Editing a BSL module or a metadata XML arms a session gate:
+> in Claude Code a `Stop` hook refuses to end the session until the quality run has happened;
+> OpenCode has no such mechanism, so the plugin keeps returning the agent to the unchecked
+> edits instead. Depth is computed per change across
 > three axes — volume, code archetypes, complexity — so a comment fix costs seconds while a
 > transaction or a new common module triggers the full review. Four review loops cover static
 > analysis and 1C development standards, architecture (SOLID and GRASP as applied to 1C),
