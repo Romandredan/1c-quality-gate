@@ -14,6 +14,8 @@
     "bsl",
     "claude-code",
     "claude-code-plugin",
+    "opencode",
+    "opencode-plugin",
     "agent-skills",
     "mcp",
     "hooks",
