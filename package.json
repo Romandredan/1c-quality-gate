@@ -1,6 +1,6 @@
 {
   "name": "1c-quality-gate",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Контроль качества разработки 1С:Предприятие (BSL) для Claude Code и OpenCode: стандарты, принципы проектирования, XML метаданных, блокирующие гейты и проверяемый след прогона.",
   "type": "module",
   "main": "opencode/plugin/quality-gate.js",

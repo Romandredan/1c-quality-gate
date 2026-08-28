@@ -25,7 +25,14 @@ commands/<имя>.md            слэш-команды
 hooks/hooks.json             хуки; пути через ${CLAUDE_PLUGIN_ROOT}
 tools/                       исполняемые проверки
 shared/                      знание, общее для нескольких навыков
+package.json                 манифест установки под OpenCode; main — файл плагина
+opencode/plugin/             плагин OpenCode и разбор состава пакета в его конфигурацию
+opencode/commands/           слэш-команды OpenCode
 ```
+
+Второй харнесс не дублирует состав: навыки, субагенты и инструменты общие, различаются
+только способ подключения (хуки против плагина) и схема frontmatter, которую переводит
+`opencode/plugin/registry.js`. Разбор — [docs/OPENCODE.md](docs/OPENCODE.md).
 
 Компоненты **не перечисляются** в манифесте — подхватываются по соглашению об именах каталогов.
 
@@ -61,7 +68,7 @@ shared/                      знание, общее для нескольки�
 ## Перед коммитом
 
 ```bash
-node tests/run-tests.mjs             # тесты программных проверок (596 кейсов)
+node tests/run-tests.mjs             # тесты программных проверок (602 кейса)
 node tools/validate-package.mjs      # целостность пакета, ссылки, утечки
 node tools/gen-signs-map-md.mjs      # если менялся signs-map.json
 ```
