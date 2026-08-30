@@ -9,7 +9,7 @@
  */
 
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import {
@@ -115,6 +115,22 @@ check('старый формат поднимается до сессионно�
 writeFileSync(join(legacyRoot, '.claude', '.state', 'qg-pending.json'), '{битый', 'utf8');
 check('повреждённый маркер — corrupt', readPendingState(legacyRoot, {})?.corrupt === true);
 
+// --- armGate: файл вне корня проекта ---
+// Ключ состояния для такого файла — абсолютный путь (относительный через «..» нестабилен),
+// а взвод обязан сообщить об этом наружу: часть контуров по чужому файлу не работает,
+// и узнать это модель должна при взводе, а не при отклонении следа.
+const outsideDir = mkdtempSync(join(tmpdir(), 'qg-core-outside-'));
+const outsideFile = join(outsideDir, 'Module.bsl');
+const armedOut = armGate({ root, filePath: outsideFile, sessionId: 'sess-1', env });
+check('файл вне корня взводится', Boolean(armedOut));
+check(
+  'ключ состояния — абсолютный путь файла',
+  armedOut.rel.toLowerCase() === String(outsideFile).split(sep).join('/').toLowerCase()
+);
+check('взвод сообщает, что файл вне корня', armedOut.outside === true);
+const armedIn = armGate({ root, filePath: bsl, sessionId: 'sess-1', env });
+check('файл в корне не помечается как внешний', !armedIn.outside);
+
 // --- gateHint: режимы харнессов ---
 const hintC = gateHint({ kind: 'bsl', rel: 'a.bsl', packageRoot: root, mode: 'claude' });
 const hintO = gateHint({ kind: 'bsl', rel: 'a.bsl', packageRoot: root, mode: 'opencode' });
@@ -123,12 +139,23 @@ check('подсказка opencode честна про мягкий гейт', h
 check('подсказка opencode не обещает блокировку', !hintO.includes('Завершение сессии заблокировано'));
 const hintXml = gateHint({ kind: 'metadata-xml', rel: 'x.xml', packageRoot: root, mode: 'claude' });
 check('подсказка metadata-xml упоминает Configuration.mdo (EDT)', hintXml.includes('Configuration.mdo'));
+const hintOut = gateHint({ ...armedOut, sessionId: 'sess-1', packageRoot: root, mode: 'claude' });
+check('подсказка про файл вне корня заявлена', hintOut.includes('вне корня'));
+check('подсказка называет судьбу проектных проверок', hintOut.includes('not_verified'));
+check('обычная подсказка про границы молчит', !hintC.includes('вне корня'));
+// Идентификатор сессии модель узнаёт здесь и только здесь до первого блока Stop-хука:
+// без него при нескольких сессиях verify/release отказывают.
+const hintS = gateHint({ kind: 'bsl', rel: 'a.bsl', sessionId: 'sess-1', packageRoot: root, mode: 'claude' });
+check('подсказка claude называет сессию', hintS.includes('Сессия: sess-1'));
+const hintSO = gateHint({ kind: 'bsl', rel: 'a.bsl', sessionId: 'sess-1', packageRoot: root, mode: 'opencode' });
+check('подсказка opencode называет сессию', hintSO.includes('Сессия: sess-1'));
 
 // --- blockMessage: режимы и повторы ---
 const files = [['a.bsl', { kind: 'bsl' }], ['src/Catalogs/Т.xml', { kind: 'metadata-xml' }]];
 const bmC = blockMessage({ sessionId: 's1', files, packageRoot: root, mode: 'claude', repeated: 0 });
 check('claude: заголовок блокировки', bmC.includes('ЗАВЕРШЕНИЕ ЗАБЛОКИРОВАНО'));
-check('claude: без --session в команде release', !bmC.includes('release --session'));
+// Команда обязана срабатывать и при нескольких сессиях, когда без --session утилита отказывает.
+check('claude: команда release содержит --session', bmC.includes('release --session s1'));
 const bmCr = blockMessage({ sessionId: 's1', files, packageRoot: root, mode: 'claude', repeated: 1 });
 check('claude: повторная попытка добавляет прямой путь', bmCr.includes('повторная попытка') && bmCr.includes('release --session s1'));
 const bmO = blockMessage({ sessionId: 's1', files, packageRoot: root, mode: 'opencode', repeated: 2, maxReprompts: 3 });
@@ -138,6 +165,7 @@ check('opencode: номер возврата из лимита', bmO.includes('�
 const bmF = blockMessage({ sessionId: 's1', files, foreign: 3, packageRoot: root, mode: 'opencode', repeated: 0 });
 check('чужие правки: предупреждение не трогать', bmF.includes('другой сессии (3)') && bmF.includes('НЕ трогай'));
 
+rmSync(outsideDir, { recursive: true, force: true });
 rmSync(root, { recursive: true, force: true });
 rmSync(root2, { recursive: true, force: true });
 rmSync(legacyRoot, { recursive: true, force: true });

@@ -38,7 +38,7 @@ function main() {
   // Вывод обязан быть JSON с hookSpecificOutput: простой текст из PostToolUse до модели
   // НЕ доходит — маркер при этом пишется, и получается гейт, о котором модель узнаёт только
   // при попытке завершить работу. Проверено на живой сессии.
-  const hint = gateHint({ ...armed, packageRoot: PACKAGE_ROOT, mode: 'claude' });
+  const hint = gateHint({ ...armed, sessionId, packageRoot: PACKAGE_ROOT, mode: 'claude' });
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: {

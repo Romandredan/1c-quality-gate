@@ -7,7 +7,7 @@
  * ОБОСНОВАННЫЙ пропуск. Валидатор отвергает записи, которые лишь выглядят заполненными.
  *
  * Использование:
- *   node evidence-validator.mjs <файл> [--gate] [--root <каталог проекта>]
+ *   node evidence-validator.mjs <файл> [--gate] [--root <каталог проекта>] [--session <id>]
  *
  * Режимы:
  *   lint  (по умолчанию) — только оформление; ноль записей = чисто.
@@ -21,7 +21,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolve as resolveConfig, evidenceValue } from './config.mjs';
 import { SCOPES, TOOL_BACKED, RENAMED, isKnownScope, isKnownQgId } from './evidence-scopes.mjs';
-import { readJournal, coveredFiles } from './run-journal.mjs';
+import { readJournal, coveredFiles, normalizePath } from './run-journal.mjs';
 import { projectRoot } from './project-root.mjs';
 import { stateDirSegments } from './state-dir.mjs';
 
@@ -246,9 +246,11 @@ function isEmpty(value) {
  * Граница берётся ТОЛЬКО из своей сессии. Максимум по всем сессиям вернул бы через чёрный
  * ход ровно то, что состояние гейта разделяет по сессиям намеренно: правка в соседней сессии
  * в 14:00 обесценивала бы прогон, честно сделанный в 13:00 по своим файлам. Когда сессия не
- * названа, а их несколько, определить свою нечем — тогда ограничения по времени нет, и
- * проверка вырождается в «отметка о прогоне вообще есть». Требовать больше значило бы
- * блокировать добросовестную работу по чужой активности.
+ * названа, а их несколько, определить свою нечем — брать «самую свежую» нельзя, это чужая.
+ * Тогда ограничения по времени нет, покрытие не сверяется, и проверка вырождается в «отметка
+ * о прогоне вообще есть». Такое вырождение возвращается как `{ ambiguous: true }`, чтобы
+ * валидатор сказал о нём вслух: молчаливо ослабленная проверка неотличима от полной.
+ * Требовать больше значило бы блокировать добросовестную работу по чужой активности.
  */
 function ownSession(root, sessionId = null) {
   const file = join(root, ...stateDirSegments(), 'qg-pending.json');
@@ -258,11 +260,13 @@ function ownSession(root, sessionId = null) {
     const sessions = state?.sessions || {};
     const ids = Object.keys(sessions);
     const own = sessionId && ids.includes(sessionId) ? sessionId : ids.length === 1 ? ids[0] : null;
-    if (!own) return null;
+    if (!own) return ids.length > 1 && !sessionId ? { ambiguous: true, ids } : null;
     const s = sessions[own] || {};
     return {
       since: String(s.updatedAt || s.armedAt || '') || null,
-      files: Object.keys(s.files || {}).map((p) => p.split('\\').join('/').toLowerCase()),
+      // Ключи состояния приводятся тем же канонизатором, что и журнал: для файла вне корня
+      // состояние хранит абсолютный путь, и сверка обязана работать поверх этой разницы.
+      files: Object.keys(s.files || {}).map((p) => normalizePath(p, root)),
     };
   } catch {
     return null;
@@ -533,7 +537,20 @@ export function validate(text, { gate = false, root = null, session = null } = {
   // не защищает от записи, дописанной в журнал вручную. Независимого источника, из которого
   // такое можно перевывести, у плагина нет. Это обнаружение молчания, и только.
   const journal = readJournal(projectDir);
-  const own = ownSession(projectDir, session);
+  let own = ownSession(projectDir, session);
+  if (own?.ambiguous) {
+    // Сессий несколько, своя не названа: свежесть и покрытие сверить нечем. Через
+    // `gate.mjs release` сессия приходит всегда; сюда без неё попадает только прямой вызов.
+    if (gate) {
+      add(
+        'warn',
+        0,
+        `в состоянии гейта несколько сессий (${own.ids.join(', ')}), а --session не указан: свежесть и ` +
+          'покрытие прогонов не сверены. Укажи --session <id> своей сессии — идентификатор напечатан при взводе гейта'
+      );
+    }
+    own = null;
+  }
   const since = own?.since || null;
   const fresh = journal.filter((r) => !since || String(r.ts || '') >= since);
   const runScopes = new Set(fresh.map((r) => r.scope));
@@ -647,11 +664,14 @@ function main(argv) {
   // рядом с файлом отчёта.
   const rootArg = args.indexOf('--root');
   const root = rootArg === -1 ? null : args[rootArg + 1];
-  const skip = rootArg === -1 ? -1 : rootArg + 1;
-  const file = args.find((a, i) => !a.startsWith('--') && i !== skip);
+  // Своя сессия: при нескольких взведённых валидатор иначе не знает, чью правку сверять.
+  const sessionArg = args.indexOf('--session');
+  const session = sessionArg === -1 ? null : args[sessionArg + 1];
+  const skip = new Set([rootArg, sessionArg].filter((i) => i !== -1).map((i) => i + 1));
+  const file = args.find((a, i) => !a.startsWith('--') && !skip.has(i));
 
   if (!file) {
-    process.stderr.write('Использование: node evidence-validator.mjs <файл> [--gate]\n');
+    process.stderr.write('Использование: node evidence-validator.mjs <файл> [--gate] [--root <каталог>] [--session <id>]\n');
     return 2;
   }
   if (!existsSync(file)) {
@@ -659,7 +679,7 @@ function main(argv) {
     return 2;
   }
 
-  const { records, problems, exitCode } = validate(readFileSync(file, 'utf8'), { gate, root });
+  const { records, problems, exitCode } = validate(readFileSync(file, 'utf8'), { gate, root, session });
 
   for (const p of problems) {
     const where = p.line ? `${file}:${p.line}` : file;

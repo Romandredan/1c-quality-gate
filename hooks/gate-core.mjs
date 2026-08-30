@@ -163,6 +163,10 @@ export function armGate({ root, filePath, sessionId, ensureConfig = null, env = 
   const now = new Date().toISOString();
   const session = state.sessions[sessionId] || { armedAt: now, files: {} };
   const rel = toProjectRelative(root, filePath);
+  // Файл вне корня хранится под абсолютным ключом (см. toProjectRelative). Взвод обязан
+  // сказать об этом наружу: часть контуров по чужому файлу не работает, и узнать это
+  // модель должна сейчас, а не при отклонении следа в конце прогона.
+  const outside = isAbsolute(rel);
   const entry = session.files[rel] || { kind, edits: 0 };
   entry.kind = kind;
   entry.edits += 1;
@@ -208,14 +212,19 @@ export function armGate({ root, filePath, sessionId, ensureConfig = null, env = 
     }
   }
 
-  return { kind, rel, created };
+  return { kind, rel, created, outside };
 }
 
 /**
  * Подсказка о взводе гейта. mode: 'claude' — исходные формулировки (жёсткий Stop-хук),
  * 'opencode' — честные для мягкого гейта («плагин будет возвращать к работе»).
+ *
+ * Идентификатор сессии печатается здесь, потому что больше модели его взять неоткуда до
+ * первого блока Stop-хука: в оболочке его нет, `gate.mjs status` перечисляет все сессии,
+ * не зная, которая своя. А при нескольких сессиях verify и release без `--session`
+ * отказывают — выбрать чужую наугад хуже, чем не выбрать.
  */
-export function gateHint({ kind, rel, created = null, packageRoot, mode = 'claude' }) {
+export function gateHint({ kind, rel, sessionId = null, created = null, outside = false, packageRoot, mode = 'claude' }) {
   const call =
     mode === 'claude'
       ? 'Перед завершением работы прогони Skill: quality-gate.'
@@ -230,6 +239,7 @@ export function gateHint({ kind, rel, created = null, packageRoot, mode = 'claud
       ? [
           '[1C QUALITY GATE — взведён: BSL]',
           `Файл: ${rel}`,
+          ...(sessionId ? [`Сессия: ${sessionId} — её идентификатор для --session в verify/release.`] : []),
           '',
           call,
           'Он сам определит глубину по трём осям (объём правки, архетипы кода, сложность)',
@@ -240,6 +250,7 @@ export function gateHint({ kind, rel, created = null, packageRoot, mode = 'claud
       : [
           '[1C QUALITY GATE — взведён: XML метаданных]',
           `Файл: ${rel}`,
+          ...(sessionId ? [`Сессия: ${sessionId} — её идентификатор для --session в verify/release.`] : []),
           '',
           call,
           'Для нового объекта критична проверка регистрации в составе конфигурации',
@@ -249,6 +260,18 @@ export function gateHint({ kind, rel, created = null, packageRoot, mode = 'claud
           '',
           tail,
         ];
+
+  // Приближение допустимо, но обязано быть заявлено — и в момент взвода, когда прогон ещё
+  // можно спланировать: отказ сверки в конце провоцирует обход (переписывание следа).
+  if (outside) {
+    lines.push(
+      '',
+      'Файл лежит вне корня проекта. Путезависимые проверки (bsl-lint, query-lint, гигиена,',
+      'валидаторы XML) работают по нему штатно; привязанные к проекту (статический анализатор',
+      'по конфигурации, индекс кода) его не увидят — закрывай их записью not_verified с точной',
+      'причиной. Из стороннего каталога корень задаётся явно: QG_PROJECT_DIR=<корень>.'
+    );
+  }
 
   // Только на прогоне, который файл создал: сообщение на каждой правке — шум, который
   // перестают читать вместе со всем остальным текстом подсказки.
@@ -307,7 +330,7 @@ export function blockMessage({ sessionId, files, foreign = 0, packageRoot, mode 
       'Косметическая правка закрывается за секунды: класс C0 требует лишь гигиены файлов.',
       '',
       'Если правка действительно не требует проверки — сними гейт явно, с указанием причины:',
-      `  node "${toolPath('gate.mjs')}" release --class C0 --reason "<почему>"`,
+      `  node "${toolPath('gate.mjs')}" release --session ${sessionId} --class C0 --reason "<почему>"`,
       'Причина сохраняется в состоянии: пропуск фиксируется, а не замалчивается.',
       '',
       `Сессия: ${sessionId}`
