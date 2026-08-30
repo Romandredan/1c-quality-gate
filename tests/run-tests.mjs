@@ -1055,6 +1055,188 @@ section('Строковая колонка без квалификатора д�
 }
 
 // ---------------------------------------------------------------------------
+section('Реквизит формы под именем локальной переменной');
+
+// В модуле формы имя реквизита — свойство формы: присваивание уходит В РЕКВИЗИТ и приводится
+// к его типу, а обращение через точку падает в рантайме. Ни анализатор, ни валидатор формы,
+// ни сборка .epf этого не видят.
+const FORM_XML = [
+  '<?xml version="1.0" encoding="UTF-8"?>',
+  '<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">',
+  '  <Attributes>',
+  '    <Attribute name="Результат" id="3">',
+  '      <Type><v8:Type>xs:string</v8:Type></Type>',
+  '    </Attribute>',
+  '    <Attribute name="ТаблицаДанных" id="4">',
+  '      <Type><v8:Type>v8:ValueTable</v8:Type></Type>',
+  '      <Columns>',
+  '        <Attribute name="Отметка" id="5">',
+  '          <Type><v8:Type>xs:boolean</v8:Type></Type>',
+  '        </Attribute>',
+  '      </Columns>',
+  '    </Attribute>',
+  '  </Attributes>',
+  '</Form>',
+].join('\n');
+
+/** Кладёт описание формы и модуль по путям выгрузки: правило ищет Form.xml точным путём. */
+function writeFormFixture(dir, moduleLines) {
+  writeBytes(`${dir}/Forms/Форма/Ext/Form.xml`, FORM_XML);
+  return writeBytes(`${dir}/Forms/Форма/Ext/Form/Module.bsl`, moduleLines.join('\n'));
+}
+
+{
+  const f = writeFormFixture('shadow-hit', [
+    '&НаСервере',
+    'Функция СобратьДанные()',
+    '\tРезультат = Новый Соответствие;',
+    '\tРезультат.Вставить("Ключ", 1);',
+    '\tВозврат Результат;',
+    'КонецФункции',
+  ]);
+  const r = run('tools/bsl-lint.mjs', [f]);
+  // Смотреть только часть до следа: `ids=[qg:BSL-FORM-ATTR-SHADOW]` печатается и при вердикте
+  // «чисто», поэтому поиск по всему выводу проходил бы и с выключенным правилом.
+  const report = r.out.split('## quality evidence')[0];
+  check('объектное присваивание имени реквизита — находка', report.includes('[qg:BSL-FORM-ATTR-SHADOW]'),
+    r.out.trim().slice(0, 200));
+  check('названы реквизит и метод', report.includes('«Результат»') && report.includes('СобратьДанные'));
+  check('находка блокирующая (код 2)', r.code === 2, `код ${r.code}`);
+}
+{
+  // Половина контр-сигналов в одном модуле: каждый из них — форма, в которой такое имя
+  // законно. Ложная находка здесь дороже пропущенной: она провоцирует переименование
+  // работающего кода.
+  const f = writeFormFixture('shadow-legit', [
+    '&НаСервереБезКонтекста',
+    'Функция БезКонтекста()',
+    '\tРезультат = Новый Соответствие;',
+    '\tРезультат.Вставить("Ключ", 1);',
+    '\tВозврат Результат;',
+    'КонецФункции',
+    '',
+    '&НаКлиенте',
+    'Процедура ЗавершениеВопроса(Результат, ДополнительныеПараметры) Экспорт',
+    '\tЕсли Результат.Статус = "Ошибка" Тогда',
+    '\t\tВозврат;',
+    '\tКонецЕсли;',
+    'КонецПроцедуры',
+    '',
+    '&НаСервере',
+    'Процедура ДобавитьВЖурнал(Текст)',
+    '\tРезультат = Результат + Символы.ПС + Текст;',
+    'КонецПроцедуры',
+    '',
+    '&НаСервере',
+    'Процедура СЛокальнымОбъявлением()',
+    '\tПерем Результат;',
+    '\tРезультат = Новый Массив;',
+    '\tРезультат.Добавить(1);',
+    'КонецПроцедуры',
+    '',
+    '&НаСервере',
+    'Процедура ЧерезЭтотОбъект()',
+    '\tЭтотОбъект.Результат = ПолучитьСтроку();',
+    '\tДлина = СтрДлина(ЭтотОбъект.Результат);',
+    'КонецПроцедуры',
+  ]);
+  const r = run('tools/bsl-lint.mjs', [f]);
+  check('БезКонтекста, параметр, Перем, конкатенация и ЭтотОбъект — не находка',
+    r.code === 0 && !r.out.split('## quality evidence')[0].includes('[qg:BSL-FORM-ATTR-SHADOW]'),
+    r.out.trim().slice(0, 300));
+  check('вердикт «чисто», а не пропуск',
+    r.out.includes('scope=form-attribute-shadowing, ids=[qg:BSL-FORM-ATTR-SHADOW], verdict=clean'),
+    r.out.split('## quality evidence')[1]?.trim());
+}
+{
+  // Заявленное сужение, а не полнота: присваивание ПРИМИТИВА правило пропускает, даже если
+  // ниже к тому же имени обращаются через точку. Такой код тоже упадёт, но по нему нельзя
+  // отличить путаницу с реквизитом от намеренной записи в него, а ложная находка здесь
+  // дороже пропущенной. Тест держит границу: снимите условие «присваивание объектное» —
+  // и он покажет, что поведение изменилось.
+  const f = writeFormFixture('shadow-primitive', [
+    '&НаСервере',
+    'Процедура ЗаписатьИтог()',
+    '\tРезультат = "готово";',
+    '\tРезультат.Вставить("Ключ", 1);',
+    'КонецПроцедуры',
+  ]);
+  const r = run('tools/bsl-lint.mjs', [f]);
+  check('присваивание примитива — намеренный пропуск',
+    r.code === 0 && !r.out.split('## quality evidence')[0].includes('[qg:BSL-FORM-ATTR-SHADOW]'),
+    r.out.trim().slice(0, 250));
+}
+{
+  // Колонки реквизита-таблицы лежат такими же тегами <Attribute> внутри <Columns>. Колонка
+  // реквизитом формы не является: переменная с её именем безопасна, и без счёта вложенности
+  // правило сработало бы на исправном коде.
+  const f = writeFormFixture('shadow-column', [
+    '&НаСервере',
+    'Процедура ОчиститьТаблицу()',
+    '\tТаблицаДанных.Очистить();',
+    '\tОтметка = Новый Массив;',
+    '\tОтметка.Добавить(1);',
+    'КонецПроцедуры',
+  ]);
+  const r = run('tools/bsl-lint.mjs', [f]);
+  check('имя колонки таблицы и реквизит-таблица — не находка', r.code === 0, r.out.trim().slice(0, 250));
+}
+{
+  // Модуль формы есть, описания формы рядом нет: список реквизитов взять неоткуда.
+  // «Не смог проверить» и «проверил, чисто» — разные утверждения.
+  const f = writeBytes('shadow-noxml/Forms/Форма/Ext/Form/Module.bsl',
+    '&НаСервере\nПроцедура Пустая()\n\tА = 1;\nКонецПроцедуры\n');
+  const r = run('tools/bsl-lint.mjs', [f]);
+  check('без Form.xml — пропуск с причиной',
+    r.out.includes('[qg skipped: layer=code, scope=form-attribute-shadowing, reason=no_metadata_resolved]'),
+    r.out.split('## quality evidence')[1]?.trim());
+}
+{
+  // Модуля формы в списке не было вовсе — правило неприменимо, и это тоже заявляется.
+  const f = writeBytes('shadow-notform/Ext/ObjectModule.bsl',
+    'Процедура ПриЗаписи(Отказ)\n\tА = 1;\nКонецПроцедуры\n');
+  const r = run('tools/bsl-lint.mjs', [f]);
+  check('не модуль формы — пропуск not_applicable',
+    r.out.includes('[qg skipped: layer=code, scope=form-attribute-shadowing, reason=not_applicable]'),
+    r.out.split('## quality evidence')[1]?.trim());
+}
+{
+  // Подъём за XML объекта натыкается на Ext/Form.xml — описание ФОРМЫ, а не объекта. Пока
+  // он принимался за объект, проверка ссылочных присваиваний печатала «clean» на модуле,
+  // полей которого не видела: ложная зелень ровно того вида, против которого заведён след.
+  const f = writeFormFixture('shadow-formxml-not-object', [
+    '&НаСервере',
+    'Процедура Пустая()',
+    '\tА = 1;',
+    'КонецПроцедуры',
+  ]);
+  const r = run('tools/bsl-lint.mjs', [f]);
+  check('Form.xml не принимается за XML объекта',
+    r.out.includes('[qg skipped: layer=code, scope=enum-string-assign, reason=no_metadata_resolved]'),
+    r.out.split('## quality evidence')[1]?.trim());
+}
+{
+  // Запись следа печатает инструмент, а принимает валидатор: разъедься эти два места —
+  // строку начнут сочинять руками.
+  const f = writeFormFixture('shadow-evidence', [
+    '&НаСервере',
+    'Процедура Пустая()',
+    '\tА = 1;',
+    'КонецПроцедуры',
+  ]);
+  const printed = run('tools/bsl-lint.mjs', [f]).out.split('## quality evidence')[1]?.trim() || '';
+  const report = writeBytes('ev-from-shadow.md',
+    '## quality evidence\n\n' +
+    '[qg scope: volume=C1, files=1, archetypes=[form-module], driver=archetype:form-module, resolved=code:L1, config=default]\n' +
+    '[qg sentinel: target=v8std, id=std454, status=found]\n' +
+    printed + '\n' +
+    '[qg not_verified: dimension=compilation, reason=no_platform]\n');
+  const r = run('tools/evidence-validator.mjs', [report, '--gate']);
+  check('запись следа о реквизитах формы проходит валидатор', r.code === 0,
+    `${printed} → ${r.out.trim().slice(0, 200)}`);
+}
+
+// ---------------------------------------------------------------------------
 section('Сверка «диск ↔ состав»');
 
 {

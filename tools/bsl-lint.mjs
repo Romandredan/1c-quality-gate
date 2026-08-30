@@ -2,7 +2,7 @@
 /**
  * Лексические проверки кода BSL — то, что видно по тексту модуля и его пути.
  *
- * Проверки три:
+ * Проверки:
  *   - `qg:BSL-TXN-IN-HANDLER` — собственная транзакция внутри обработчика события объекта,
  *     который платформа и так выполняет в транзакции;
  *   - `qg:BSL-ENUM-STRING-ASSIGN` — присваивание примитива ("", 0, Ложь, Истина) полю,
@@ -13,6 +13,10 @@
  *     `КвалификаторыСтроки`, у таблицы, которая в том же модуле уходит в
  *     `УстановитьПараметр`. Поле неограниченной длины движок запросов не умеет сравнивать:
  *     `РАЗЛИЧНЫЕ`, `СГРУППИРОВАТЬ ПО`, соединение, `ГДЕ` (#std432 п. 3.1).
+ *   - `qg:BSL-FORM-ATTR-SHADOW` — в модуле формы локальная переменная названа именем реквизита
+ *     примитивного типа. Присваивание уходит В РЕКВИЗИТ и приводится к его типу, обращение
+ *     через точку падает в рантайме. В `&НаСервереБезКонтекста` контекста формы нет, и там тот
+ *     же код работает — оттого дефект выглядит случайным.
  *
  * Зачем отдельный инструмент, а не правило в своде. Правило «не открывай транзакцию в
  * обработчике» формулируется одной строкой и ровно поэтому его легко не применить: проверка
@@ -40,7 +44,11 @@
  *     уходит параметром в чужой метод, и запрос делает он — здесь не ловится вообще: графа
  *     вызовов инструмент не строит. Эта половина остаётся за читателем (`qg:AI-16`);
  *   - тип колонки читается только из литерала прямо в вызове: `ОписаниеТипов`, собранное
- *     в переменную выше по тексту, инструменту не видно.
+ *     в переменную выше по тексту, инструменту не видно;
+ *   - реквизиты формы читаются из `Ext/Form.xml` рядом с модулем и только примитивных типов:
+ *     у реквизита-таблицы обращение через точку законно, а у составного типа законно и
+ *     объектное присваивание. Переменная, названная именем КОЛОНКИ реквизита-таблицы,
+ *     безопасна и в проверку не попадает.
  *
  * Использование:
  *   node bsl-lint.mjs <файл.bsl> [<файл.bsl> ...] [--json]
@@ -49,7 +57,7 @@
  */
 
 import { readFileSync, existsSync } from 'node:fs';
-import { basename, dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { recordRun } from './run-journal.mjs';
 import { versionSuffix } from './config.mjs';
 
@@ -211,14 +219,36 @@ const REF_MANAGERS = {
 const REF_TYPE_RE = new RegExp(`cfg:(${Object.keys(REF_MANAGERS).join('|')})\\.([\\w\\u0400-\\u04FF]+)`, 'u');
 
 /**
+ * Корневой элемент выгрузки объекта метаданных — `MetaDataObject`; у описания формы там
+ * `Form`, у макета — своё.
+ *
+ * Проверка нужна, потому что подъём по каталогам натыкается не только на объект: у модуля
+ * формы первым по пути лежит `Ext/Form.xml` — описание ФОРМЫ. Его `<Attribute>` устроены
+ * иначе (имя в атрибуте `name=`, а не дочерним `<Name>`), поэтому разбор возвращал пустой
+ * список полей, `metaResolved` становился истиной, и проверка ссылочных присваиваний
+ * печатала «clean» на модуле, полей которого не видела. Ложная зелень ровно того вида,
+ * против которого заведён след прогона.
+ */
+function isObjectXml(path) {
+  try {
+    // Корневой элемент лежит в первых сотнях байт: читать файл целиком незачем.
+    return /<MetaDataObject[\s>]/.test(readFileSync(path, 'utf8').slice(0, 1024));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * XML объекта метаданных для модуля: ближайший предок каталога, рядом с которым лежит
- * одноимённый .xml. Для `Documents/Заказ/Ext/ObjectModule.bsl` это `Documents/Заказ.xml`.
+ * одноимённый .xml. Для `Documents/Заказ/Ext/ObjectModule.bsl` это `Documents/Заказ.xml`;
+ * для `Documents/Заказ/Forms/Форма/Ext/Form/Module.bsl` — тот же файл, а не `Ext/Form.xml`
+ * по дороге.
  */
 export function findObjectXml(bslPath) {
   let dir = dirname(bslPath);
   for (let depth = 0; depth < 6 && dir && dir !== dirname(dir); depth++) {
     const candidate = `${dir}.xml`;
-    if (existsSync(candidate)) return candidate;
+    if (existsSync(candidate) && isObjectXml(candidate)) return candidate;
     dir = dirname(dir);
   }
   return null;
@@ -738,9 +768,196 @@ export function lintRefDotAccess(source) {
   return findings;
 }
 
+// ---------------------------------------------------------------------------
+// Локальная переменная под именем реквизита формы
+
+/**
+ * Описание формы рядом с модулем: `<...>/Ext/Form/Module.bsl` → `<...>/Ext/Form.xml`.
+ *
+ * Ищется точным путём, а не подъёмом вверх: подъём находит и XML объекта, у которого
+ * реквизиты совсем другие, и правило начало бы сверять имена не с тем списком.
+ */
+export function findFormXml(bslPath) {
+  if (basename(bslPath) !== 'Module.bsl') return null;
+  const formDir = dirname(bslPath);
+  if (basename(formDir) !== 'Form') return null;
+  const extDir = dirname(formDir);
+  if (basename(extDir) !== 'Ext') return null;
+  const candidate = join(extDir, 'Form.xml');
+  return existsSync(candidate) ? candidate : null;
+}
+
+/** Примитивные типы реквизита формы: только на них приведение молча портит значение. */
+const PRIMITIVE_FORM_TYPES = new Set(['xs:string', 'xs:decimal', 'xs:dateTime', 'xs:boolean']);
+
+/**
+ * Реквизиты формы примитивных типов — имена ВЕРХНЕГО уровня.
+ *
+ * Вложенность считается намеренно: колонки реквизита-таблицы лежат такими же тегами
+ * `<Attribute>` внутри `<Columns>`, и без счётчика их имена попали бы в список. Колонка
+ * реквизитом формы не является, локальная переменная с её именем безопасна, и находка на
+ * ней была бы ложной.
+ *
+ * Составные типы отбрасываются: у реквизита «Строка или ТаблицаЗначений» объектное
+ * присваивание законно.
+ */
+export function primitiveFormAttributes(xml) {
+  const attrsSection = xml.match(/<Attributes>([\s\S]*)<\/Attributes>/);
+  if (!attrsSection) return new Set();
+
+  const out = new Set();
+  const tagRe = /<(\/?)Attribute\b([^>]*?)(\/?)>/g;
+  let depth = 0;
+  let top = null;
+  let m;
+  while ((m = tagRe.exec(attrsSection[1])) !== null) {
+    const closing = m[1] === '/';
+    const selfClosing = m[3] === '/';
+    if (closing) {
+      depth--;
+      if (depth === 0 && top) {
+        const body = attrsSection[1].slice(top.bodyStart, m.index);
+        const typeBlock = body.match(/<Type>([\s\S]*?)<\/Type>/);
+        if (typeBlock) {
+          const types = [...typeBlock[1].matchAll(/<v8:Type>([^<]+)<\/v8:Type>/g)].map((x) => x[1].trim());
+          if (types.length > 0 && types.every((x) => PRIMITIVE_FORM_TYPES.has(x))) out.add(top.name);
+        }
+        top = null;
+      }
+      continue;
+    }
+    if (selfClosing) continue;
+    if (depth === 0) {
+      const name = m[2].match(/name="([^"]+)"/);
+      top = name ? { name: name[1], bodyStart: m.index + m[0].length } : null;
+    }
+    depth++;
+  }
+  return out;
+}
+
+/** Директива компиляции перед объявлением метода — последняя строка на «&» выше него. */
+function directiveBefore(source, routineStart) {
+  const before = source.slice(0, routineStart).split('\n').reverse();
+  for (const raw of before) {
+    const line = raw.trim();
+    if (line === '') continue;
+    if (line.startsWith('&')) return line.toLowerCase();
+    if (line.startsWith('//')) continue;
+    return '';
+  }
+  return '';
+}
+
+/** Имена параметров метода: они объявлены и потому реквизит перекрывают законно. */
+function routineParams(masked, bodyStart) {
+  let depth = 1;
+  let i = bodyStart;
+  for (; i < masked.length && depth > 0; i++) {
+    if (masked[i] === '(') depth++;
+    else if (masked[i] === ')') depth--;
+  }
+  const header = masked.slice(bodyStart, i - 1);
+  return new Set(
+    header
+      .split(',')
+      .map((p) => p.replace(/=.*$/s, '').replace(/\bЗнач\b/gi, '').trim())
+      .filter(Boolean)
+  );
+}
+
+/**
+ * Локальная переменная под именем реквизита формы.
+ *
+ * В модуле формы имя реквизита — свойство самой формы. Присваивание `Журнал = Новый Структура`
+ * НЕ создаёт локальную переменную: значение уходит в реквизит и приводится к его типу, а
+ * следующее обращение через точку падает — «Значение не является значением объектного типа».
+ * Локальное имя создают только объявление `Перем`, параметр метода и переменная цикла.
+ *
+ * Дефект проявляется выборочно и потому читается как случайный: в `&НаСервереБезКонтекста`
+ * контекста формы нет, и там ровно тот же код работает.
+ *
+ * Сигнал: в методе С контекстом формы имя реквизита ПРИМИТИВНОГО типа получает объектное
+ * значение (`Новый …` либо результат вызова), и ниже по тексту к тому же имени обращаются
+ * через точку. Порог — одно такое сочетание.
+ *
+ * Контр-сигналы (все проверяются):
+ *   - метод объявлен `…БезКонтекста` — имя честно локальное;
+ *   - имя объявлено параметром или `Перем` — то же самое;
+ *   - реквизит непримитивного типа (таблица, составной) — обращение через точку к нему
+ *     законно, и переприсвоение тоже встречается;
+ *   - присваивание примитива (`Журнал = ""`, конкатенация) — это намеренная запись в реквизит,
+ *     а не путаница;
+ *   - обращение вида `ЭтотОбъект.Журнал` — явное указание на реквизит, никогда не ошибка;
+ *   - обращение через точку ВЫШЕ присваивания — чтение реквизита, а не работа с объектом.
+ *
+ * Ни анализатор, ни валидатор формы, ни сборка `.epf` этого не видят: XML валиден, синтаксис
+ * верен, типы согласованы. Стандарта на такую коллизию нет — падение только в рантайме.
+ */
+export function lintFormAttrShadow(source, attributes) {
+  if (attributes.size === 0) return [];
+
+  const masked = maskModule(source);
+  const findings = [];
+
+  for (const routine of parseRoutines(masked)) {
+    const directive = directiveBefore(source, routine.start);
+    if (directive.includes('безконтекста')) continue;
+
+    const body = masked.slice(routine.bodyStart, routine.end);
+    const params = routineParams(masked, routine.bodyStart);
+    const declared = new Set(
+      [...body.matchAll(new RegExp(`(?<![${W}])Перем\\s+([^;]+);`, 'giu'))]
+        .flatMap((d) => d[1].split(',').map((n) => n.trim()))
+    );
+
+    for (const attr of attributes) {
+      if (params.has(attr) || declared.has(attr)) continue;
+
+      // Объектное присваивание: `Новый …` либо вызов. Литерал и конкатенация — законная
+      // запись в реквизит, они сюда не попадают.
+      const assignRe = new RegExp(
+        `(?<![${W}.])${attr}\\s*=\\s*(?:Новый(?![${W}])|${IDENT}\\s*\\(|${IDENT}\\s*\\.\\s*${IDENT}\\s*\\()`,
+        'giu'
+      );
+      const assign = assignRe.exec(body);
+      if (!assign) continue;
+
+      // Обращение через точку ниже присваивания. `ЭтотОбъект.<Имя>` исключается: это явное
+      // указание на реквизит.
+      const dotRe = new RegExp(`(?<![${W}.])${attr}\\s*\\.\\s*(${IDENT})`, 'giu');
+      dotRe.lastIndex = assign.index;
+      const use = dotRe.exec(body);
+      if (!use) continue;
+
+      const pos = routine.bodyStart + use.index;
+      findings.push({
+        severity: 'error',
+        rule: 'qg:BSL-FORM-ATTR-SHADOW',
+        line: lineAt(source, pos),
+        routine: routine.name,
+        attribute: attr,
+        message:
+          `«${attr}» — реквизит формы примитивного типа, а не локальная переменная: в методе ` +
+          `«${routine.name}» (директива с контекстом формы) присваивание уходит В РЕКВИЗИТ и ` +
+          `приводится к его типу, поэтому «${attr}.${use[1]}» упадёт с «Значение не является ` +
+          'значением объектного типа». Локальное имя создают только «Перем», параметр и переменная ' +
+          'цикла. Лечится переименованием реквизита (например, «Результат» → «Журнал»), а не ' +
+          'переименованием переменных: в «&НаСервереБезКонтекста» тот же код работает, и дефект ' +
+          'выглядит случайным',
+      });
+    }
+  }
+  return findings;
+}
+
 function checkFile(path) {
   if (!existsSync(path)) {
-    return { findings: [{ severity: 'error', rule: 'file-missing', line: 0, message: 'файл не найден' }], metaResolved: false };
+    return {
+      findings: [{ severity: 'error', rule: 'file-missing', line: 0, message: 'файл не найден' }],
+      metaResolved: false,
+      formResolved: false,
+    };
   }
   const source = readFileSync(path, 'utf8').replace(/^﻿/, '');
   const findings = lintSource(source, basename(path));
@@ -753,10 +970,17 @@ function checkFile(path) {
     const fields = refTypedFields(readFileSync(objectXml, 'utf8').replace(/^﻿/, ''));
     findings.push(...lintRefAssignments(source, fields));
   }
-  return { findings, metaResolved };
+  const formXml = findFormXml(path);
+  let formResolved = false;
+  if (formXml) {
+    formResolved = true;
+    const attributes = primitiveFormAttributes(readFileSync(formXml, 'utf8').replace(/^﻿/, ''));
+    findings.push(...lintFormAttrShadow(source, attributes));
+  }
+  return { findings, metaResolved, formResolved };
 }
 
-function evidenceBlock(findings, modulesSeen, metaResolved, files = []) {
+function evidenceBlock(findings, modulesSeen, metaResolved, files = [], formsSeen = false, formResolved = false) {
   const lines = [];
 
   const hitTxn = modulesSeen && findings.some((f) => f.rule === 'qg:BSL-TXN-IN-HANDLER');
@@ -825,6 +1049,26 @@ function evidenceBlock(findings, modulesSeen, metaResolved, files = []) {
       `verdict=${hitDot ? 'violation:qg:BSL-REF-DOT-ACCESS' : 'clean'}]`
   );
 
+  // Три исхода вместо двух. Модуля формы в списке не было — правило неприменимо; модуль был,
+  // а Form.xml рядом нет (выгрузка неполная, файл вне дерева) — список реквизитов взять
+  // неоткуда, и это «не смог проверить», а не «чисто». Слить их в один вердикт значит
+  // объявить проверенным то, что проверке не подвергалось.
+  const hitShadow = findings.some((f) => f.rule === 'qg:BSL-FORM-ATTR-SHADOW');
+  recordRun({
+    scope: 'form-attribute-shadowing',
+    tool: 'tools/bsl-lint.mjs',
+    verdict: !formsSeen ? 'not_applicable' : !formResolved ? 'no_metadata_resolved' : hitShadow ? 'violation' : 'clean',
+    files,
+  });
+  lines.push(
+    !formsSeen
+      ? '[qg skipped: layer=code, scope=form-attribute-shadowing, reason=not_applicable]'
+      : !formResolved
+        ? '[qg skipped: layer=code, scope=form-attribute-shadowing, reason=no_metadata_resolved]'
+        : '[qg applied: layer=code, scope=form-attribute-shadowing, ids=[qg:BSL-FORM-ATTR-SHADOW], ' +
+          `verdict=${hitShadow ? 'violation:qg:BSL-FORM-ATTR-SHADOW' : 'clean'}]`
+  );
+
   return lines.join('\n');
 }
 
@@ -848,7 +1092,11 @@ function main(argv) {
   // а не «чисто»: молчание об области применения читается как проведённая проверка.
   const modulesSeen = files.some((f) => IMPLICIT_TRANSACTION_MODULES.has(basename(f)));
   const metaResolved = report.some((r) => r.metaResolved);
-  const evidence = evidenceBlock(findings, modulesSeen, metaResolved, files);
+  // «Модуль формы» определяется по форме пути (`…/Ext/Form/Module.bsl`), а наличие описания
+  // формы рядом — отдельным фактом: без него список реквизитов пуст и сверять не с чем.
+  const formsSeen = files.some((f) => basename(f) === 'Module.bsl' && basename(dirname(f)) === 'Form');
+  const formResolved = report.some((r) => r.formResolved);
+  const evidence = evidenceBlock(findings, modulesSeen, metaResolved, files, formsSeen, formResolved);
 
   if (asJson) {
     process.stdout.write(JSON.stringify({ files: report, errors, warns, evidence }, null, 2) + '\n');
