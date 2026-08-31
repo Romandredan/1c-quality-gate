@@ -242,14 +242,36 @@ export async function serverInfo({ url, timeoutMs = 5000, fetchImpl = globalThis
     if (!res.ok) return null;
     const body = JSON.parse(await res.text());
     // Из пути платформы берём только номер версии: полный путь в следе бесполезен и зависит
-    // от машины, а `8.3.27.1688` сравнимо между прогонами.
-    const platform = String(body.platform_path || '').match(/8\.3\.\d+\.\d+/)?.[0] || null;
+    // от машины, а `8.3.27.1688` сравнимо между прогонами. Шаблон не прибит к «8.3»
+    // намеренно: на 8.2 и на будущих ветках платформы отметка просто исчезла бы, и прогон
+    // против другой версии стал бы неотличим — та самая потеря, против которой поле заведено.
+    // Берётся последнее совпадение: в пути установки номер может встретиться дважды.
+    const versions = String(body.platform_path || '').match(/\d+\.\d+\.\d+\.\d+/g);
+    const platform = versions?.[versions.length - 1] || null;
     return { version: body.version || null, platform };
   } catch {
     return null;
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Совпадает ли версия платформы у сервера с закреплённой в проекте.
+ *
+ * Один сервер отдаёт справку ОДНОЙ версии, а проектов на машине бывает несколько, и версии у
+ * них разные. Без закрепления проект на 8.3.25, указавший общий адрес, молча проверялся бы
+ * справкой 8.3.27: состав системных перечислений и сигнатуры между релизами отличаются, и
+ * находка «значения не существует» означала бы не дефект кода, а чужую версию справки.
+ * Механика та же, что у `analyzer.version` — несовпадение останавливает прогон.
+ *
+ * Молчит в двух случаях: версия не закреплена (проект не заявлял требования) и версия сервера
+ * неизвестна (`/health` не ответил). Отказ по неизвестной версии превратил бы недоступность
+ * второстепенной ручки в блокирующую ошибку.
+ */
+export function platformMismatch(cfg, info) {
+  if (!cfg?.platformVersion || !info?.platform) return false;
+  return info.platform !== cfg.platformVersion;
 }
 
 /** Отметка движка для следа: версия сервера и версия платформы, чья справка загружена. */
@@ -383,6 +405,17 @@ async function main(argv) {
   }
 
   const info = await serverInfo({ url: cfg.url, fetchImpl: globalThis.fetch });
+
+  if (platformMismatch(cfg, info)) {
+    for (const l of skipEvidence('platform_version_mismatch')) out(l);
+    process.stderr.write(
+      `Сервер справки отдаёт платформу ${info.platform}, а проект закрепил ${cfg.platformVersion}.\n` +
+        'Проверка против чужой версии даёт находки, которых нет в коде: укажите адрес сервера с нужной ' +
+        'версией либо поправьте platformContext.platformVersion.\n'
+    );
+    return 2;
+  }
+
   const sentinelResult = await sentinel({ url: cfg.url, repo: cfg.repo, timeoutMs: cfg.timeoutMs });
 
   if (args.sentinel) {

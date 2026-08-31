@@ -3919,6 +3919,68 @@ section('Контур платформенного API (движок bsl-context
     stamped[0]
   );
 
+  // --- закрепление версии платформы ------------------------------------------
+  // Один сервер справки — одна версия платформы, а проектов на машине несколько. Без
+  // закрепления проект на другой версии молча проверяется чужой справкой, и находка
+  // «значения не существует» означает не дефект кода, а расхождение версий.
+  {
+    const verProj = join(WORK, 'pc-version-pin');
+    rmSync(verProj, { recursive: true, force: true });
+    mkdirSync(join(verProj, 'src'), { recursive: true });
+    writeFileSync(
+      join(verProj, '.1c-quality-gate.json'),
+      JSON.stringify({
+        platformContext: {
+          enabled: true,
+          url: 'http://127.0.0.1:1/mcp',
+          repo: 'x',
+          platformVersion: '8.3.25.1257',
+        },
+      }),
+      'utf8'
+    );
+    const bslFile = join(verProj, 'src', 'Module.bsl');
+    writeFileSync(bslFile, 'Процедура П() Экспорт\nКонецПроцедуры\n', 'utf8');
+    // Сервера нет: /health не ответит, версия неизвестна — закрепление не должно
+    // превращаться в отказ на ровном месте, иначе выключить его можно будет только удалением.
+    const res = run('tools/platform-context-run.mjs', ['--changed', bslFile], {
+      env: { CLAUDE_PROJECT_DIR: verProj },
+    });
+    check(
+      'неизвестная версия сервера не выдаётся за несовпадение',
+      !res.out.includes('platform_version_mismatch'),
+      res.out.trim().slice(0, 160)
+    );
+  }
+  check(
+    'чужая версия справки останавливает прогон',
+    pc.platformMismatch({ platformVersion: '8.3.25.1257' }, { platform: '8.3.27.1688' }) === true
+  );
+  check(
+    'совпадение версий прогону не мешает',
+    pc.platformMismatch({ platformVersion: '8.3.27.1688' }, { platform: '8.3.27.1688' }) === false
+  );
+  check(
+    'без закрепления версия сервера не проверяется',
+    pc.platformMismatch({ platformVersion: null }, { platform: '8.3.27.1688' }) === false
+  );
+  check(
+    'неизвестная версия сервера не считается несовпадением',
+    pc.platformMismatch({ platformVersion: '8.3.25.1257' }, null) === false
+  );
+  check(
+    'версия платформы читается из любой ветки, не только 8.3',
+    (
+      await pc.serverInfo({
+        url: 'http://test/mcp',
+        fetchImpl: async () => ({
+          ok: true,
+          text: async () => JSON.stringify({ version: '0.16.0', platform_path: '/opt/1cv8/8.4.1.100' }),
+        }),
+      })
+    )?.platform === '8.4.1.100'
+  );
+
   // --- правка без единого .bsl не выдаётся за проверенную ---------------------
   // Цикл идёт по отфильтрованному списку, а проверка стояла на исходном: набор из одних XML
   // давал ноль итераций и verdict=clean — ложный зелёный вердикт в движке, написанном

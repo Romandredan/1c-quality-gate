@@ -73,7 +73,15 @@ export const DEFAULTS = {
   // обязан отметиться в следе пропуском, а не молча ничего не проверить. `repo` — алиас
   // конфигурации на стороне сервера; он обязателен в каждом запросе, и промах по нему
   // приходит НЕ ошибкой вызова, а обычным ответом, который легко принять за «замечаний нет».
-  platformContext: { enabled: false, url: null, repo: null, level: 2, timeoutMs: 15000, required: false },
+  platformContext: {
+    enabled: false,
+    url: null,
+    repo: null,
+    level: 2,
+    timeoutMs: 15000,
+    required: false,
+    platformVersion: null,
+  },
   volume: { c1MaxLines: 40, c1MaxFiles: 1 },
   complexity: { maxNesting: 4, maxMethodLines: 120, maxParams: 7 },
   archetypes: { custom: [] },
@@ -98,6 +106,7 @@ const ENV_MAP = [
   ['platformContext', 'url', 'QG_PLATFORM_CONTEXT_URL', (v) => v],
   ['platformContext', 'repo', 'QG_PLATFORM_CONTEXT_REPO', (v) => v],
   ['platformContext', 'level', 'QG_PLATFORM_CONTEXT_LEVEL', (v) => Number(v)],
+  ['platformContext', 'platformVersion', 'QG_PLATFORM_CONTEXT_VERSION', (v) => v],
 ];
 
 /**
