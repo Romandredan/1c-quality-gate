@@ -2108,6 +2108,18 @@ const mustContain = [
   ['skills/bsl-code-review/references/checklist-code.md', 'BSL-UNBOUNDED-STRING-COLUMN', 'колонка без квалификатора — пункт чеклиста'],
   ['agents/bsl-verifier.md', 'BSL-UNBOUNDED-STRING-COLUMN', 'верификатор прогоняет проверку колонок'],
   ['skills/bsl-code-review/references/bsl-query-reference.md', 'КвалификаторыСтроки', 'справочник языка называет типизацию колонок таблицы-параметра'],
+  // AI-17/AI-18/ARCH-AI-08: выбор коллекции-носителя. Правило вредно без двух половин -
+  // обязательной типизации добавляемой колонки и контр-сигнала про константный доступ по ключу.
+  ['skills/bsl-code-review/references/ai-antipatterns.md', 'Выгрузить()', 'AI-17 называет замену ручной перекладке'],
+  ['skills/bsl-code-review/references/ai-antipatterns.md', 'Тип колонки обязателен', 'у AI-17 названо условие, без которого замена падает в рантайме'],
+  ['skills/bsl-code-review/references/ai-antipatterns.md', 'сворачивать копию', 'AI-17 предупреждает о потере колонок в Свернуть'],
+  ['skills/bsl-code-review/references/ai-antipatterns.md', 'Ключ — это состав колонок, а не колонка', 'AI-18 запрещает перенос склейки в колонку таблицы'],
+  ['skills/bsl-code-review/references/ai-antipatterns.md', 'совпадении состава', 'у AI-18 назван порядок подхвата индекса (#std452)'],
+  ['skills/bsl-code-review/references/ai-antipatterns.md', 'горячем пути', 'у AI-18 назван контр-сигнал: словарь бывает быстрее таблицы'],
+  ['skills/bsl-code-review/references/checklist-code.md', 'qg:AI-18', 'выбор носителя и отбор по колонкам — пункт чеклиста кода'],
+  ['skills/bsl-architecture-review/references/ai-antipatterns-arch.md', 'в квадратичный', 'у ARCH-AI-08 назван контр-сигнал: замена бакетов без индекса — регресс'],
+  ['skills/bsl-architecture-review/references/ai-antipatterns-arch.md', 'заголовки HTTP-запроса', 'у ARCH-AI-08 названа законная форма соответствия'],
+  ['skills/bsl-architecture-review/references/checklist-architecture.md', 'ARCH-AI-08', 'носитель между слоями — пункт архитектурного чеклиста'],
   // Обязательное к прочтению: если из навыка усвоен только этот блок, прогон ещё имеет смысл.
   ['skills/quality-gate/SKILL.md', 'Инварианты прогона', 'у оркестратора выделен минимум, держащий прогон'],
   // Обоснования переехали, но обязаны существовать: правило без причины не применяется.
