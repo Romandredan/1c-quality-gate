@@ -45,7 +45,17 @@ const VOLUMES = ['C0', 'C1', 'C2', 'C3'];
  * заполненной, но ничего не закрывает. Пополнять его нужно вместе с инструментом, который
  * новое имя печатает, — иначе валидатор ругается на собственный вывод плагина.
  */
-const DIMENSIONS = ['compilation', 'query-execution', 'static-analysis', 'cross-config-resolution', 'artifact-freshness'];
+const DIMENSIONS = [
+  'compilation',
+  'query-execution',
+  'static-analysis',
+  'cross-config-resolution',
+  'artifact-freshness',
+  // `platform-api` печатает `platform-context-run.mjs`: справочник платформы не ответил по
+  // части файлов, либо ответил без имён конфигурации (`symbols_unavailable`), либо не
+  // разобрал текст в дерево. Проверка при этом состоялась, но закрывает меньше полной.
+  'platform-api',
+];
 
 /**
  * Метки архетипов из таблицы `quality-gate/SKILL.md`.
@@ -91,13 +101,25 @@ const REQUIRED = {
 // форма пропускала любое правдоподобное имя, и в живой сессии больше половины `qg:*` в
 // отчётах не существовало в плагине. Шаблон ниже — для ЧУЖИХ пространств, у которых
 // собственного реестра здесь нет.
-const ID_PATTERN = /^(std\d{3,4}|bslls:(\*|[A-Za-z][\w-]*)|acc:\d{3,4}|v8cs:[\w-]+|patterns:[\w:-]+)$/;
+// `pc:` — находки движка платформенного контекста (`platform-context-run.mjs`). Пространство
+// чужое по той же причине, что и `bslls:`: перечень видов находок задаёт сервер справки
+// платформы, а не плагин, поэтому реестра здесь нет и проверяется форма.
+const ID_PATTERN =
+  /^(std\d{3,4}|bslls:(\*|[A-Za-z][\w-]*)|pc:(\*|[a-z][\w-]*)|acc:\d{3,4}|v8cs:[\w-]+|patterns:[\w:-]+)$/;
 const KEBAB = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 // Настройка, применённая к прогону: `default` либо `custom:<секция>[+<секция>]`. Печатает её
 // `tools/config.mjs show`, откуда она и переносится в след. Список секций закрытый: выдуманное
 // имя означает, что строку сочинили, а не скопировали из вывода инструмента.
-const CONFIG_SECTIONS = ['analyzer', 'volume', 'complexity', 'archetypes', 'sentinel', 'artifacts'];
+const CONFIG_SECTIONS = [
+  'analyzer',
+  'platformContext',
+  'volume',
+  'complexity',
+  'archetypes',
+  'sentinel',
+  'artifacts',
+];
 const CONFIG_PATTERN = new RegExp(`^(default|custom:(${CONFIG_SECTIONS.join('|')})(\\+(${CONFIG_SECTIONS.join('|')}))*)$`);
 
 /**
@@ -639,15 +661,22 @@ export function validate(text, { gate = false, root = null, session = null } = {
   for (const scope of new Set(fresh.filter((r) => Number(r.unanalyzed) > 0).map((r) => r.scope))) {
     if (scope === 'static-analysis') continue; // разобрано выше, со своим текстом
     const last = [...fresh].reverse().find((r) => r.scope === scope);
+    // Признаётся обе формы: `skipped` носит имя проверки в поле `scope`, а `not_verified` —
+    // в поле `dimension` (поля `scope` у него нет по схеме REQUIRED). Раньше правило искало
+    // только `scope`, то есть `not_verified` не засчитывался никогда, и инструмент, честно
+    // объявивший непроверенные файлы принятой формой записи, получал ошибку валидатора.
     const declared = records.some(
-      (r) => (r.type === 'skipped' || r.type === 'not_verified') && String(r.fields.scope || '') === scope
+      (r) =>
+        (r.type === 'skipped' && String(r.fields.scope || '') === scope) ||
+        (r.type === 'not_verified' && String(r.fields.dimension || r.fields.scope || '') === scope)
     );
     if (!declared) {
       add(
         'error',
         0,
         `${last.tool || scope} не проверил ${last.unanalyzed} из переданных файлов, а в следе это не ` +
-          `заявлено: нужна запись [qg skipped: ... scope=${scope}, reason=..., files=N] — её печатает сам инструмент`
+          `заявлено: нужна запись [qg skipped: ... scope=${scope}, reason=..., files=N] либо ` +
+          `[qg not_verified: dimension=${scope}, reason=..., files=N] — её печатает сам инструмент`
       );
     }
   }

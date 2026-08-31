@@ -68,6 +68,12 @@ export const DEFAULTS = {
     autoInstall: true,
     config: null,
   },
+  // Сверка кода со справочником платформы (сервер `bsl-context`, контур `platform-api`).
+  // Выключено по умолчанию: сервер поднимает у себя тот, кому он нужен, а движок без адреса
+  // обязан отметиться в следе пропуском, а не молча ничего не проверить. `repo` — алиас
+  // конфигурации на стороне сервера; он обязателен в каждом запросе, и промах по нему
+  // приходит НЕ ошибкой вызова, а обычным ответом, который легко принять за «замечаний нет».
+  platformContext: { enabled: false, url: null, repo: null, level: 2, timeoutMs: 15000, required: false },
   volume: { c1MaxLines: 40, c1MaxFiles: 1 },
   complexity: { maxNesting: 4, maxMethodLines: 120, maxParams: 7 },
   archetypes: { custom: [] },
@@ -88,6 +94,10 @@ const ENV_MAP = [
   ['analyzer', 'version', 'QG_ANALYZER_VERSION', (v) => v],
   ['analyzer', 'required', 'QG_ANALYZER_REQUIRED', (v) => v === 'true'],
   ['analyzer', 'autoInstall', 'QG_ANALYZER_AUTOINSTALL', (v) => v !== 'false'],
+  ['platformContext', 'enabled', 'QG_PLATFORM_CONTEXT', (v) => v === 'true'],
+  ['platformContext', 'url', 'QG_PLATFORM_CONTEXT_URL', (v) => v],
+  ['platformContext', 'repo', 'QG_PLATFORM_CONTEXT_REPO', (v) => v],
+  ['platformContext', 'level', 'QG_PLATFORM_CONTEXT_LEVEL', (v) => Number(v)],
 ];
 
 /**

@@ -2156,7 +2156,11 @@ section('Бюджет навыков и достижимость справоч�
   // ловит рост заранее, а число в нём называет долг вслух.
   const BUDGET = {
     'quality-gate': 28 * 1024,
-    'bsl-code-review': 25 * 1024,
+    // 26 вместо 25 КБ: у слоя 1а появился второй движок (сверка со справочником платформы),
+    // и его блок — команда, признак «выключен по умолчанию» и два правила чтения вывода —
+    // в справочник не выносится: без него движок просто не будет запущен. Обосновывающее
+    // при этом лежит в `references/platform-api.md`, в навыке остались только действия.
+    'bsl-code-review': 26 * 1024,
     'xml-structure-review': 24 * 1024,
     'bsl-architecture-review': 20 * 1024,
     'file-hygiene': 12 * 1024,
@@ -3745,6 +3749,201 @@ section('Файлы вне корня проекта — канонически�
     alien.trim().slice(0, 220)
   );
   check('и способ опознания — маркер .git', alien.includes('.git'), alien.trim().slice(0, 220));
+}
+
+// ---------------------------------------------------------------------------
+section('Контур платформенного API (движок bsl-context)');
+{
+  const pc = await import(pathToFileURL(join(ROOT, 'tools', 'platform-context-run.mjs')).href);
+
+  /** Успешный конверт инструмента MCP с полезной нагрузкой внутри текстового содержимого. */
+  const envelope = (payload) =>
+    JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: JSON.stringify(payload) }] } });
+
+  // --- разбор ответа --------------------------------------------------------
+  // Главная ловушка потребления: сервер сообщает об отказе ВНУТРИ успешного ответа.
+  // Потребитель, читающий только список находок, принимает отказ за «замечаний нет» — так
+  // выглядела бы непроверенная правка с зелёным вердиктом.
+  const refused = pc.parseToolResult(envelope({ ok: false, message: 'параметр repo обязателен' }));
+  check('отказ сервера не читается как успех', refused.ok === false && String(refused.refusal).includes('repo'));
+
+  const viaStream = pc.parseToolResult(`event: message\ndata: ${envelope({ errors: [], tree_parsed: true })}\n`);
+  check('ответ потоком событий разбирается', viaStream.ok === true && Array.isArray(viaStream.payload.errors));
+
+  check('битый ответ не роняет разбор', pc.parseToolResult('{ это не json').transport === 'malformed_response');
+
+  // --- нормализация находок -------------------------------------------------
+  const payload = {
+    tree_parsed: true,
+    symbols_available: true,
+    errors: [
+      { line: 10, kind: 'unknown_enum_value', confidence: 'high', message: 'нет значения' },
+      { line: 20, kind: 'unknown_type_member', confidence: 'low', message: 'нет члена' },
+      { line: 30, kind: 'wrong_argument_count', confidence: 'high', message: 'аргументов не столько' },
+      { line: 40, kind: 'or_in_join_condition', confidence: 'high', message: 'ИЛИ в соединении' },
+      { line: 50, kind: 'unknown_metadata_object', confidence: 'high', message: 'нет объекта' },
+    ],
+  };
+  const norm = pc.normalizeFindings(payload, { file: 'a/Module.bsl' });
+  check(
+    'уверенность high становится major',
+    norm.findings.find((f) => f.kind === 'unknown_enum_value')?.severity === 'major'
+  );
+  // Выбрасывать low нельзя: класс смешанный — в нём приходят и ложные (переменная названа
+  // именем платформенного типа), и настоящие (несуществующее свойство объекта платформы).
+  check(
+    'уверенность low остаётся находкой уровня info',
+    norm.findings.find((f) => f.kind === 'unknown_type_member')?.severity === 'info'
+  );
+  check(
+    'находки, дублирующие анализатор, отброшены',
+    norm.findings.length === 2 && !norm.findings.some((f) => pc.DUPLICATED_BY_ANALYZER.has(f.kind)),
+    norm.findings.map((f) => f.kind).join(',')
+  );
+  check('идентификатор находки в пространстве pc:', norm.findings.every((f) => f.code.startsWith('pc:')));
+
+  const degraded = pc.normalizeFindings(
+    { errors: [], tree_parsed: false, symbols_available: false },
+    { file: 'b.bsl' }
+  );
+  check(
+    'неполная проверка объявлена, а не выдана за чистую',
+    degraded.degraded.includes('tree_not_parsed') && degraded.degraded.includes('symbols_unavailable'),
+    degraded.degraded.join(',')
+  );
+
+  // --- контр-сигнал: на корректном коде движок обязан молчать ----------------
+  const silent = pc.normalizeFindings({ errors: [], tree_parsed: true, symbols_available: true }, { file: 'c.bsl' });
+  check('корректный код не даёт находок', silent.findings.length === 0 && silent.degraded.length === 0);
+
+  // --- след прогона ---------------------------------------------------------
+  const cleanEv = pc.toEvidence({ findings: [], sentinelResult: { status: 'found' } });
+  check(
+    'чистый прогон отчитывается одной записью',
+    cleanEv.some((l) => l.includes('scope=platform-api') && l.includes('verdict=clean'))
+  );
+  check('часовой попадает в след', cleanEv.some((l) => l.startsWith('[qg sentinel: target=platform-api')));
+
+  const dirtyEv = pc.toEvidence({
+    findings: norm.findings,
+    sentinelResult: { status: 'found' },
+    degraded: ['symbols_unavailable'],
+    unchecked: [{ file: 'x.bsl', reason: 'timeout' }],
+  });
+  check('каждый вид находки — своя запись следа', dirtyEv.filter((l) => l.includes('verdict=violation:pc:')).length === 2);
+  check(
+    'непроверенные файлы заявлены в следе',
+    dirtyEv.some((l) => l.includes('not_verified') && l.includes('reason=request_failed') && l.includes('files=1'))
+  );
+  check(
+    'деградация источника имён заявлена в следе',
+    dirtyEv.some((l) => l.includes('not_verified') && l.includes('reason=symbols_unavailable'))
+  );
+
+  // --- часовой --------------------------------------------------------------
+  // Доказывает, что справка платформы загружена, а не что сервер ответил: сервер без справки
+  // отвечает на всё, просто не находит ничего.
+  const fetchWith = (payloadOrText) => async () => ({
+    ok: true,
+    text: async () => (typeof payloadOrText === 'string' ? payloadOrText : envelope(payloadOrText)),
+  });
+  const sentinelFound = await pc.sentinel({
+    url: 'http://test',
+    repo: 'r',
+    fetchImpl: fetchWith({
+      tree_parsed: true,
+      errors: [{ line: 22, kind: 'unknown_enum_value', confidence: 'high', message: '' }],
+    }),
+  });
+  check('часовой видит посаженную находку', sentinelFound.status === 'found');
+
+  const sentinelEmpty = await pc.sentinel({
+    url: 'http://test',
+    repo: 'r',
+    fetchImpl: fetchWith({ tree_parsed: true, errors: [] }),
+  });
+  check(
+    'пустой ответ не выдаётся за исправность',
+    sentinelEmpty.status === 'not_found' && sentinelEmpty.reason === 'finding_absent'
+  );
+
+  const sentinelRefused = await pc.sentinel({
+    url: 'http://test',
+    repo: 'r',
+    fetchImpl: fetchWith({ ok: false, message: 'конфигурация не настроена' }),
+  });
+  check('отказ отличается от отсутствия находки', sentinelRefused.reason === 'request_refused', sentinelRefused.reason);
+
+  const sentinelDown = await pc.sentinel({
+    url: 'http://test',
+    repo: 'r',
+    fetchImpl: async () => {
+      throw Object.assign(new Error('нет связи'), { name: 'TypeError' });
+    },
+  });
+  check('недоступный сервер назван причиной', sentinelDown.status === 'not_found' && sentinelDown.reason === 'unreachable');
+
+  // --- фикстуры -------------------------------------------------------------
+  const sentinelFixture = readFileSync(join(ROOT, 'assets', 'platform-context', 'sentinel-fixture.bsl'), 'utf8');
+  check(
+    'фикстура часового содержит несуществующее значение перечисления',
+    /ТипГруппыЭлементовОтбораКомпоновкиДанных\.Группа[^ИиЛлНн]/.test(sentinelFixture),
+    sentinelFixture.split('\n').find((l) => l.includes('ТипГруппыЭлементов')) || ''
+  );
+  check('контр-фикстура на месте', existsSync(join(ROOT, 'assets', 'platform-context', 'clean-fixture.bsl')));
+
+  // --- настройка ------------------------------------------------------------
+  check('без адреса и алиаса контур не запускается', pc.isConfigured({ enabled: true, url: null, repo: 'r' }) === false);
+  check(
+    'выключенный контур не запускается даже с адресом',
+    pc.isConfigured({ enabled: false, url: 'http://x', repo: 'r' }) === false
+  );
+  check('настроенный контур запускается', pc.isConfigured({ enabled: true, url: 'http://x', repo: 'r' }) === true);
+
+  const scopesMod = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-scopes.mjs')).href);
+  check(
+    'скоуп зарегистрирован и назвал свой инструмент',
+    scopesMod.SCOPES['platform-api']?.tool === 'tools/platform-context-run.mjs',
+    JSON.stringify(scopesMod.SCOPES['platform-api'] || null)
+  );
+
+  // --- валидатор следа принимает то, что печатает инструмент -----------------
+  // Ровно та поломка, которую комментарий к DIMENSIONS называет вслух: список пополняется
+  // вместе с инструментом, иначе плагин ругается на собственный вывод. Проверяем весь
+  // напечатанный блок целиком, а не по одной строке.
+  {
+    const evProj = join(WORK, 'pc-evidence');
+    rmSync(evProj, { recursive: true, force: true });
+    mkdirSync(evProj, { recursive: true });
+    writeFileSync(
+      join(evProj, '.1c-quality-gate.json'),
+      JSON.stringify({ platformContext: { enabled: true, url: 'http://127.0.0.1:1/mcp', repo: 'x' } }),
+      'utf8'
+    );
+    const report = join(evProj, 'evidence.md');
+    writeFileSync(
+      report,
+      '## quality evidence\n\n' +
+        '[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, config=custom:platformContext]\n' +
+        '[qg sentinel: target=v8std, id=std454, status=found]\n' +
+        pc
+          .toEvidence({
+            findings: norm.findings,
+            sentinelResult: { status: 'found' },
+            degraded: ['symbols_unavailable'],
+            unchecked: [{ file: 'x.bsl', reason: 'timeout' }],
+          })
+          .join('\n') +
+        '\n',
+      'utf8'
+    );
+    const res = run('tools/evidence-validator.mjs', [report], { env: { CLAUDE_PROJECT_DIR: evProj } });
+    check(
+      'валидатор принимает след, напечатанный движком',
+      !/ОШИБКА|ПРЕДУПРЕЖДЕНИЕ/.test(res.out),
+      res.out.trim().slice(0, 300)
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
