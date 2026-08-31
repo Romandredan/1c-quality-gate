@@ -1873,6 +1873,15 @@ section('Проектная настройка — создание, разре�
   check('в созданном файле всё числится умолчанием',
     Object.values(fromTemplate.sources).every((s) => Object.values(s).every((v) => v === 'умолчание')),
     JSON.stringify(fromTemplate.sources));
+  // Шаблон статический, а список настраиваемого — в DEFAULTS. Разъедься они, и настройка,
+  // которой нет в шаблоне, окажется работающей, но ненаходимой: новый проект о ней не узнает
+  // ниоткуда, кроме документации, которую открывают уже зная, что искать. Так едва не уехала
+  // секция platformContext.
+  {
+    const inTemplate = new Set(Object.keys(JSON.parse(config.template())).filter((k) => !k.startsWith('//')));
+    const missing = Object.keys(config.DEFAULTS).filter((k) => !inTemplate.has(k));
+    check('каждая секция настройки описана в создаваемом файле', missing.length === 0, missing.join(', '));
+  }
   check('ключи-комментарии не доходят до потребителя', !JSON.stringify(fromTemplate.values).includes('//'));
   check('комментарии снимаются на любой глубине', JSON.stringify(config.stripDocs({ a: { '//': 'x', b: [{ '//': 'y', c: 1 }] } })) === '{"a":{"b":[{"c":1}]}}');
 
