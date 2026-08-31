@@ -3883,6 +3883,68 @@ section('Контур платформенного API (движок bsl-context
   });
   check('недоступный сервер назван причиной', sentinelDown.status === 'not_found' && sentinelDown.reason === 'unreachable');
 
+  // --- версия движка и платформы в следе -------------------------------------
+  // Состав системных перечислений и сигнатуры между релизами платформы отличаются, поэтому
+  // без отметки два прогона против разных версий дают побайтово одинаковый след.
+  check(
+    'отметка движка называет версию сервера и версию платформы',
+    pc.engineStamp({ version: '0.16.0', platform: '8.3.27.1688' }) === 'bsl-context@0.16.0/8.3.27.1688'
+  );
+  check('без ответа /health отметка остаётся без версии', pc.engineStamp(null) === 'bsl-context');
+  check(
+    'версия платформы вынимается из пути установки',
+    (
+      await pc.serverInfo({
+        url: 'http://test/mcp',
+        fetchImpl: async (u) => ({
+          ok: true,
+          text: async () =>
+            JSON.stringify({ version: '0.16.0', platform_path: 'C:\\Program Files (x86)\\1cv8\\8.3.27.1688' }),
+        }),
+      })
+    )?.platform === '8.3.27.1688'
+  );
+  check(
+    'недоступный /health не роняет прогон',
+    (await pc.serverInfo({ url: 'http://test/mcp', fetchImpl: async () => { throw new Error('нет связи'); } })) === null
+  );
+  const stamped = pc.toEvidence({
+    findings: [],
+    sentinelResult: { status: 'found' },
+    info: { version: '0.16.0', platform: '8.3.27.1688' },
+  });
+  check(
+    'отметка попадает в запись часового',
+    stamped[0].includes('engine=bsl-context@0.16.0/8.3.27.1688'),
+    stamped[0]
+  );
+
+  // --- правка без единого .bsl не выдаётся за проверенную ---------------------
+  // Цикл идёт по отфильтрованному списку, а проверка стояла на исходном: набор из одних XML
+  // давал ноль итераций и verdict=clean — ложный зелёный вердикт в движке, написанном
+  // против ложных зелёных вердиктов.
+  {
+    const xmlProj = join(WORK, 'pc-xml-only');
+    rmSync(xmlProj, { recursive: true, force: true });
+    mkdirSync(xmlProj, { recursive: true });
+    writeFileSync(
+      join(xmlProj, '.1c-quality-gate.json'),
+      // Порт 1 — соединение отвергается мгновенно: тест не должен зависеть от живого сервера.
+      JSON.stringify({ platformContext: { enabled: true, url: 'http://127.0.0.1:1/mcp', repo: 'x' } }),
+      'utf8'
+    );
+    const xmlFile = join(xmlProj, 'Catalog.xml');
+    writeFileSync(xmlFile, '<?xml version="1.0"?><MetaDataObject/>', 'utf8');
+    const res = run('tools/platform-context-run.mjs', ['--changed', xmlFile], {
+      env: { CLAUDE_PROJECT_DIR: xmlProj },
+    });
+    check(
+      'правка без .bsl отмечается пропуском, а не «чисто»',
+      res.out.includes('scope=platform-api') && res.out.includes('reason=no_bsl_files') && !res.out.includes('verdict=clean'),
+      res.out.trim().slice(0, 200)
+    );
+  }
+
   // --- фикстуры -------------------------------------------------------------
   const sentinelFixture = readFileSync(join(ROOT, 'assets', 'platform-context', 'sentinel-fixture.bsl'), 'utf8');
   check(

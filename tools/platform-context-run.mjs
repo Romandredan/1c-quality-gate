@@ -222,6 +222,43 @@ export function normalizeFindings(payload, { file }) {
 }
 
 /**
+ * Версия движка и версия платформы, чью справку он отдаёт.
+ *
+ * Обе нужны в следе, и вторая важнее первой. Состав системных перечислений и сигнатуры между
+ * релизами платформы отличаются — потому сервер и не выбирает версию сам, а требует указать
+ * её явно. Без отметки два прогона, сверявшие один и тот же код с 8.3.25 и с 8.3.27, дают
+ * побайтово одинаковый след, и вопрос «почему находка была вчера и нет сегодня» становится
+ * неразрешимым. Анализатор ту же проблему решает закреплением `analyzer.version`.
+ *
+ * Недоступность `/health` прогон не отменяет: поле останется пустым, а сам разбор модулей
+ * от него не зависит.
+ */
+export async function serverInfo({ url, timeoutMs = 5000, fetchImpl = globalThis.fetch }) {
+  const health = String(url || '').replace(/\/mcp\/?$/, '/health');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(health, { signal: controller.signal });
+    if (!res.ok) return null;
+    const body = JSON.parse(await res.text());
+    // Из пути платформы берём только номер версии: полный путь в следе бесполезен и зависит
+    // от машины, а `8.3.27.1688` сравнимо между прогонами.
+    const platform = String(body.platform_path || '').match(/8\.3\.\d+\.\d+/)?.[0] || null;
+    return { version: body.version || null, platform };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Отметка движка для следа: версия сервера и версия платформы, чья справка загружена. */
+export function engineStamp(info) {
+  if (!info?.version) return 'bsl-context';
+  return info.platform ? `bsl-context@${info.version}/${info.platform}` : `bsl-context@${info.version}`;
+}
+
+/**
  * Часовой: доказывает, что справка платформы загружена, а не что сервер ответил.
  *
  * Проверок две, и обе обязательны. Находка на фикстуре — что `hbk` разобран и правила
@@ -256,9 +293,9 @@ export async function sentinel({ url, repo, timeoutMs = 15000, fetchImpl = globa
  * растворяются в вердикте: проверка, прошедшая без справочника конфигурации, закрывает
  * меньше, чем полная, и читать её как полную нельзя.
  */
-export function toEvidence({ findings, sentinelResult, degraded = [], unchecked = [], version = null }) {
+export function toEvidence({ findings, sentinelResult, degraded = [], unchecked = [], info = null }) {
   const lines = [];
-  const stamp = version ? `bsl-context@${version}` : 'bsl-context';
+  const stamp = engineStamp(info);
   lines.push(
     `[qg sentinel: target=${SCOPE}, id=${SENTINEL_KIND}, status=${sentinelResult.status}, engine=${stamp}]`
   );
@@ -345,20 +382,32 @@ async function main(argv) {
     return 1;
   }
 
+  const info = await serverInfo({ url: cfg.url, fetchImpl: globalThis.fetch });
   const sentinelResult = await sentinel({ url: cfg.url, repo: cfg.repo, timeoutMs: cfg.timeoutMs });
 
   if (args.sentinel) {
     out(
-      `Часовой (bsl-context): ${sentinelResult.status}` +
+      `Часовой (${engineStamp(info)}): ${sentinelResult.status}` +
         (sentinelResult.reason ? ` — ${sentinelResult.reason}` : '')
     );
     return sentinelResult.status === 'found' ? 0 : 2;
   }
 
-  const targets = args.changed.filter((f) => BSL_EXT.test(f));
   if (args.changed.length === 0) {
     process.stderr.write('Нечего проверять: не передан ни один --changed <файл>.\n');
     return 2;
+  }
+
+  // Правка без единого `.bsl` — законный исход, но НЕ «чисто». Раньше проверка стояла на
+  // `args.changed`, а цикл шёл по отфильтрованному списку: набор из одних XML давал ноль
+  // итераций и запись `verdict=clean` — ровно тот ложный зелёный вердикт, ради которого этот
+  // движок и написан. Состав правки в реальном потоке смешанный: оркестратор передаёт всё,
+  // что видит `gate.mjs status`.
+  const targets = args.changed.filter((f) => BSL_EXT.test(f));
+  if (targets.length === 0) {
+    for (const l of skipEvidence('no_bsl_files')) out(l);
+    process.stderr.write('В составе правки нет файлов .bsl/.os — контур не применим.\n');
+    return 0;
   }
 
   const findings = [];
@@ -387,7 +436,7 @@ async function main(argv) {
     degraded.push(...norm.degraded);
   }
 
-  const evidence = toEvidence({ findings, sentinelResult, degraded, unchecked });
+  const evidence = toEvidence({ findings, sentinelResult, degraded, unchecked, info });
 
   recordRun({
     scope: SCOPE,
@@ -399,7 +448,7 @@ async function main(argv) {
   });
 
   if (args.json) {
-    out(JSON.stringify({ sentinel: sentinelResult, findings, degraded, unchecked, evidence }, null, 2));
+    out(JSON.stringify({ engine: engineStamp(info), sentinel: sentinelResult, findings, degraded, unchecked, evidence }, null, 2));
     return sentinelResult.status === 'found' ? 0 : 2;
   }
 
@@ -411,7 +460,7 @@ async function main(argv) {
     if (degraded.includes('symbols_unavailable')) {
       out('Имена конфигурации серверу недоступны: применены только правила платформы.');
     }
-    out(`Движок: bsl-context | часовой: ${sentinelResult.status} | находок: ${findings.length}`);
+    out(`Движок: ${engineStamp(info)} | часовой: ${sentinelResult.status} | находок: ${findings.length}`);
     report(findings, out, { all: args.all });
   }
   out('\n## quality evidence\n');
