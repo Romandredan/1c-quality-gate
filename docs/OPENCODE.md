@@ -13,7 +13,7 @@ skill `skills/quality-gate`. Различаются способ взвода, �
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["1c-quality-gate@git+https://github.com/Romandredan/1c-quality-gate.git#v3.2.1"]
+  "plugin": ["1c-quality-gate@git+https://github.com/Romandredan/1c-quality-gate.git#v3.3.0"]
 }
 ```
 
@@ -30,7 +30,7 @@ skill `skills/quality-gate`. Различаются способ взвода, �
 
 | Что регистрируется | Как |
 |---|---|
-| пять навыков контура и `shared/` | `config.skills.paths` — каталог `skills/` внутри пакета |
+| навыки контуров и `shared/` | `config.skills.paths` — каталог `skills/` внутри пакета |
 | команды `/gate`, `/gate-status` | `config.command`, тело файла становится `template` |
 | субагенты `bsl-verifier`, `bsl-scout`, `xml-runner` | `config.agent` из общего каталога `agents/`, тело файла становится `prompt` |
 | MCP-сервер стандартов `v8std` | `config.mcp` |
