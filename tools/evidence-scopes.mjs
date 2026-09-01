@@ -136,6 +136,13 @@ export const SCOPES = {
     granularity: 'files',
     applies: ['.bsl', '.os']
   },
+  'form-attribute-shadowing': {
+    layer: 'code',
+    tool: 'tools/bsl-lint.mjs',
+    about: 'локальная переменная под именем реквизита формы: присваивание уходит в реквизит',
+    granularity: 'files',
+    applies: ['.bsl']
+  },
   'api-verification': {
     layer: 'code',
     tool: null,
@@ -294,6 +301,7 @@ export const QG_IDS = {
   'qg:BSL-ENUM-STRING-ASSIGN': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-UNBOUNDED-STRING-COLUMN': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-REF-DOT-ACCESS': { tool: 'tools/bsl-lint.mjs' },
+  'qg:BSL-FORM-ATTR-SHADOW': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-STALE-LOCAL-CALL': { tool: 'tools/rename-check.mjs' },
 
   // --- код, модельные ------------------------------------------------------

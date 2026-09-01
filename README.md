@@ -459,9 +459,10 @@ node "$QG/tools/evidence-validator.mjs" <файл отчёта> --gate   # ст�
 написанная по прочтении кода она неотличима от полученной прогоном. Поэтому инструменты
 печатают свою строку сами и отмечаются в журнале `.claude/.state/qg-runs.jsonl`, а валидатор
 сверяет с ним каждую запись `applied`, у чьей проверки инструмент есть: `static-analysis`,
-`platform-api`, `query-alias-shadowing`, `query-top-order`, `transaction-nesting`, `enum-string-assign`,
-`unbounded-string-column`, `attribute-access`, `file-encoding`, `registration-check`,
-`uuid-uniqueness`, `structure-validation`. Отметка должна быть не старше
+`platform-api`, `query-alias-shadowing`, `query-alias-vs-nested-table`, `query-top-order`,
+`transaction-nesting`, `enum-string-assign`, `unbounded-string-column`, `attribute-access`,
+`form-attribute-shadowing`, `stale-local-calls`, `file-encoding`, `registration-check`,
+`uuid-uniqueness`, `structure-validation`, `form-binding`. Отметка должна быть не старше
 последней правки файлов своей сессии — прогон до правки описывает состояние, которого уже нет.
 
 **Сверяется и покрытие.** В журнале лежат пути файлов, которые инструмент видел; они

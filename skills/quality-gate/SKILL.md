@@ -198,7 +198,7 @@ node "$QG/tools/config.mjs" show
 | `static-analysis` | `tools/analyzer-run.mjs` |
 | `platform-api` | `tools/platform-context-run.mjs` (сервер справки заводится сам) |
 | `query-alias-shadowing`, `query-top-order` | `tools/query-lint.mjs` (`.bsl` и `.xml`) |
-| `transaction-nesting`, `enum-string-assign`, `unbounded-string-column`, `attribute-access` | `tools/bsl-lint.mjs` |
+| `transaction-nesting`, `enum-string-assign`, `unbounded-string-column`, `attribute-access`, `form-attribute-shadowing` | `tools/bsl-lint.mjs` |
 | `stale-local-calls` | `tools/rename-check.mjs` |
 | `file-encoding` | `tools/hygiene-check.mjs` |
 | `registration-check` | `tools/xml/orphan-check.mjs` |
