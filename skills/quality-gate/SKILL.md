@@ -196,6 +196,7 @@ node "$QG/tools/config.mjs" show
 | Проверка (`scope`) | Инструмент |
 |---|---|
 | `static-analysis` | `tools/analyzer-run.mjs` |
+| `platform-api` | `tools/platform-context-run.mjs` (сервер справки заводится сам) |
 | `query-alias-shadowing`, `query-top-order` | `tools/query-lint.mjs` (`.bsl` и `.xml`) |
 | `transaction-nesting`, `enum-string-assign`, `unbounded-string-column`, `attribute-access` | `tools/bsl-lint.mjs` |
 | `stale-local-calls` | `tools/rename-check.mjs` |
@@ -205,8 +206,12 @@ node "$QG/tools/config.mjs" show
 | `structure-validation` | `tools/xml/meta-validate.py` |
 | `form-binding` | `tools/xml/form-validate.py` |
 
-Остальные проверки (архитектурные признаки, разбор стандартов, верификация API) инструмента
-не имеют: журнала для них не требуется. Полный словарь имён — `tools/evidence-scopes.mjs`;
+**Есть модули — сверка со справочником платформы обязательна.** Валидатор требует не успеха, а
+отчёта: движок сам печатает и `applied`, и `skipped` с причиной. Этот класс дефектов не
+закрывает больше ничто — анализатор знает имена конфигурации, но не платформы.
+
+Остальные проверки (архитектурные признаки, разбор стандартов, ручная сверка API там, где
+движок промолчал) инструмента не имеют: журнала для них не требуется. Полный словарь имён — `tools/evidence-scopes.mjs`;
 имя вне словаря валидатор отвергает, потому что закрывает требование, которого не выполняло.
 
 ### Субагенты в составе прогона

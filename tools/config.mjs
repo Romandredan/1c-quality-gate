@@ -69,18 +69,33 @@ export const DEFAULTS = {
     config: null,
   },
   // Сверка кода со справочником платформы (сервер `bsl-context`, контур `platform-api`).
-  // Выключено по умолчанию: сервер поднимает у себя тот, кому он нужен, а движок без адреса
-  // обязан отметиться в следе пропуском, а не молча ничего не проверить. `repo` — алиас
-  // конфигурации на стороне сервера; он обязателен в каждом запросе, и промах по нему
-  // приходит НЕ ошибкой вызова, а обычным ответом, который легко принять за «замечаний нет».
+  //
+  // `enabled: 'auto'` — контур заводит себя сам: ищет уже поднятый сервер, а не найдя,
+  // ставит закреплённый релиз и поднимает свой по установленной на машине платформе.
+  // Настраивать нечего ровно до тех пор, пока машина обычная: 1С установлена, порт свободен.
+  // Умолчание не `true` потому, что `true` обещает работу и там, где платформы нет вовсе
+  // (сборочный агент), а `false` выключало бы контур у всех, кто не читал INSTALL.md.
+  //
+  // `required: 'auto'` — обязателен там, где выполним: платформа на машине есть, значит
+  // контур обязан подняться, и молчание об этом классе дефектов — не «нет замечаний».
+  // Платформы нет — требование снимается, потому что выполнить его нечем.
+  //
+  // `repo` — алиас конфигурации на стороне сервера. Нужен только чужому серверу, у которого
+  // источники имён настроены: промах по нему приходит НЕ ошибкой вызова, а обычным ответом,
+  // который легко принять за «замечаний нет». Свой сервер плагин поднимает без источников —
+  // имена конфигурации закрывает анализатор, а здесь нужна платформа.
   platformContext: {
-    enabled: false,
+    enabled: 'auto',
     url: null,
     repo: null,
     level: 2,
     timeoutMs: 15000,
-    required: false,
+    required: 'auto',
     platformVersion: null,
+    platformPath: null,
+    port: null,
+    autoInstall: true,
+    autoStart: true,
   },
   volume: { c1MaxLines: 40, c1MaxFiles: 1 },
   complexity: { maxNesting: 4, maxMethodLines: 120, maxParams: 7 },
@@ -102,11 +117,19 @@ const ENV_MAP = [
   ['analyzer', 'version', 'QG_ANALYZER_VERSION', (v) => v],
   ['analyzer', 'required', 'QG_ANALYZER_REQUIRED', (v) => v === 'true'],
   ['analyzer', 'autoInstall', 'QG_ANALYZER_AUTOINSTALL', (v) => v !== 'false'],
-  ['platformContext', 'enabled', 'QG_PLATFORM_CONTEXT', (v) => v === 'true'],
+  // `auto` — значение, а не «не задано»: строку из окружения надо уметь вернуть в то же
+  // состояние, что и умолчание, иначе выключить принудительное `true` можно будет только
+  // правкой файла.
+  ['platformContext', 'enabled', 'QG_PLATFORM_CONTEXT', (v) => (v === 'auto' ? 'auto' : v === 'true')],
   ['platformContext', 'url', 'QG_PLATFORM_CONTEXT_URL', (v) => v],
   ['platformContext', 'repo', 'QG_PLATFORM_CONTEXT_REPO', (v) => v],
   ['platformContext', 'level', 'QG_PLATFORM_CONTEXT_LEVEL', (v) => Number(v)],
+  ['platformContext', 'required', 'QG_PLATFORM_CONTEXT_REQUIRED', (v) => (v === 'auto' ? 'auto' : v === 'true')],
   ['platformContext', 'platformVersion', 'QG_PLATFORM_CONTEXT_VERSION', (v) => v],
+  ['platformContext', 'platformPath', 'QG_PLATFORM_CONTEXT_PLATFORM_PATH', (v) => v],
+  ['platformContext', 'port', 'QG_PLATFORM_CONTEXT_PORT', (v) => Number(v)],
+  ['platformContext', 'autoInstall', 'QG_PLATFORM_CONTEXT_AUTOINSTALL', (v) => v !== 'false'],
+  ['platformContext', 'autoStart', 'QG_PLATFORM_CONTEXT_AUTOSTART', (v) => v !== 'false'],
 ];
 
 /**
@@ -260,11 +283,14 @@ export function template() {
         },
         platformContext: {
           '//':
-            'Сверка кода со справочником платформы (сервер bsl-context). Выключено по умолчанию: ' +
-            'enabled: false. url: адрес MCP сервера. repo: алиас конфигурации на его стороне, ' +
-            'обязателен. level: 2. platformVersion: закреплённая версия платформы, несовпадение с ' +
-            'версией сервера останавливает прогон — нужно там, где на машине несколько проектов. ' +
-            'Установка сервера: docs/INSTALL.md.',
+            'Сверка кода со справочником платформы (сервер bsl-context). enabled: auto — контур ' +
+            'сам находит поднятый сервер, а не найдя, ставит закреплённый релиз и поднимает свой ' +
+            'по установленной платформе; true форсирует, false выключает. required: auto — ' +
+            'обязателен там, где платформа на машине есть. platformVersion: закреплённая версия ' +
+            'платформы, по ней выбирается каталог 1С и отвергается чужой сервер. platformPath: ' +
+            'каталог платформы вручную. url: адрес чужого сервера вместо своего. repo: алиас ' +
+            'конфигурации на его стороне. port, level: 2, autoInstall, autoStart. Разбор: ' +
+            'docs/CONFIG.md.',
         },
         volume: {
           '//':

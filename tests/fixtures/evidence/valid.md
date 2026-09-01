@@ -8,6 +8,7 @@
 [qg sentinel: target=v8std, id=std454, status=found]
 [qg applied: layer=hygiene, scope=file-encoding, ids=[qg:HYG-BOM], verdict=clean]
 [qg applied: layer=code, scope=naming-std454, ids=[std454], verdict=clean]
+[qg skipped: layer=code, scope=platform-api, planned=[pc:*], reason=no_platform_install]
 [qg skipped: layer=arch, reason=volume_below_threshold]
 [qg skipped: layer=xml, reason=not_applicable]
 [qg not_verified: dimension=compilation, reason=no_platform]

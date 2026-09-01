@@ -1,0 +1,28 @@
+{
+  "_comment": "Закреплённая версия сервера справки платформы и контрольные суммы его архивов. Плагин качает файл с релизов автора (не зеркалит) и проверяет SHA-256 до распаковки. Обновление версии: поменять version, суммы и размеры, взяв их из GitHub API релиза (поле digest у каждого asset).",
+  "engine": "bsl-context",
+  "version": "0.16.0",
+  "repo": "Regsorm/bsl-context",
+  "urlTemplate": "https://github.com/{repo}/releases/download/v{version}/{asset}",
+  "binary": "bsl-context-rs",
+  "targets": {
+    "win32-x64": {
+      "asset": "bsl-context-v0.16.0-x86_64-pc-windows-msvc.zip",
+      "dir": "bsl-context-v0.16.0-x86_64-pc-windows-msvc",
+      "sha256": "7729e75b808d17c0b5d779538bcb0468f38f7e2d4c2357aefdf5beceaeb61eaa",
+      "size": 5485804
+    },
+    "linux-x64": {
+      "asset": "bsl-context-v0.16.0-x86_64-unknown-linux-gnu.tar.gz",
+      "dir": "bsl-context-v0.16.0-x86_64-unknown-linux-gnu",
+      "sha256": "bbc59088e1a98bf4915f686ce7782e9c1baaf3ae2722d591d8df5cffaa544d05",
+      "size": 5588654
+    },
+    "darwin-arm64": {
+      "asset": "bsl-context-v0.16.0-aarch64-apple-darwin.tar.gz",
+      "dir": "bsl-context-v0.16.0-aarch64-apple-darwin",
+      "sha256": "4e0c730d66a374134a2ff4682e398700d26e2faa299a5ec51fb7e1fb7f07f895",
+      "size": 4885367
+    }
+  }
+}

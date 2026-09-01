@@ -19,8 +19,11 @@
  * `analyze --incremental`, только по HTTP.
  *
  * Источник данных — сервер `bsl-context` (https://github.com/Regsorm/bsl-context), который
- * читает справку платформы `shcntx_ru.hbk`. По умолчанию контур ВЫКЛЮЧЕН: сервера нет ни у
- * кого, кроме тех, кто его поднял, а движок без адреса обязан молчать в след, а не в пустоту.
+ * читает справку платформы `shcntx_ru.hbk`. Сервер заводит сам плагин: ищет уже поднятый, а
+ * не найдя — ставит закреплённый релиз и поднимает свой по установленной на машине платформе
+ * (`platform-context-bootstrap.mjs`). Настройка нужна только там, где машина необычная:
+ * чужой сервер, своя версия платформы, занятый порт. Где завести нечем — контур молчит в
+ * след записью пропуска с причиной, а не в пустоту.
  *
  * Использование:
  *   node tools/platform-context-run.mjs --changed <файл> [--changed <файл> ...] [--json] [--all]
@@ -34,6 +37,7 @@ import { fileURLToPath } from 'node:url';
 import { readConfig } from './config.mjs';
 import { projectRoot } from './project-root.mjs';
 import { recordRun } from './run-journal.mjs';
+import { ensureServer, probeHealth, platformOf, sourcesOf, platformSatisfies } from './platform-context-bootstrap.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const PLUGIN_ROOT = dirname(HERE);
@@ -89,9 +93,64 @@ export function readPlatformContextConfig(root = projectRoot(), env = process.en
   return readConfig(root, env).platformContext;
 }
 
-/** Настроен ли контур: без адреса и алиаса конфигурации запускать нечего. */
-export function isConfigured(cfg) {
-  return Boolean(cfg && cfg.enabled && cfg.url && cfg.repo);
+/**
+ * Включён ли контур. `false` — единственное выключение; `'auto'` и `true` означают «работать»
+ * и различаются только тем, что делать, когда завести нечем (см. `isRequired`).
+ */
+export function isEnabled(cfg) {
+  return cfg?.enabled !== false;
+}
+
+/**
+ * Обязателен ли контур.
+ *
+ * `'auto'` — обязателен там, где невыполнение означает не случайность, а незакрытое требование
+ * проекта. Требовать невыполнимого значит уронить гейт на сборочном агенте, где 1С нет и не
+ * будет; не требовать ничего значит вернуться к тихому пропуску, ради ухода от которого
+ * самозаведение и написано.
+ */
+export function isRequired(cfg, { enforceable }) {
+  if (cfg?.required === true) return true;
+  if (cfg?.required === false) return false;
+  return Boolean(enforceable);
+}
+
+/**
+ * Заводить нечем: платформы на машине нет, либо для системы не публикуют сборок сервера.
+ * Требование `'auto'` снимается — выполнить его невозможно в принципе.
+ */
+export const NOT_PROVISIONABLE = new Set(['no_platform_install', 'unsupported_platform']);
+
+/**
+ * Срыв заведения, а не незакрытое требование: недоступный GitHub, битый архив, занятый порт,
+ * не успевший разобрать справку демон.
+ *
+ * Под `'auto'` они тоже не блокируют, и это выбор, а не послабление. Статический анализатор
+ * ведёт себя так же: `analyzer.required` по умолчанию `false`, и неудачная установка движка
+ * даёт запись `analyzer_unavailable` с кодом 1, а не остановку. Сделать здесь строже значило бы
+ * ронять гейт всей команды на чужом сбое сети — тот самый налог, из-за которого гейт начинают
+ * обходить. Кому нужна жёсткость, ставит `required: true`: тогда блокирует любая причина.
+ */
+export const PROVISION_FAILURES = new Set([
+  'download_failed',
+  'checksum_mismatch',
+  'extract_failed',
+  'binary_missing',
+  'stale_target',
+  'spawn_failed',
+  'start_timeout',
+  'no_free_port',
+]);
+
+/**
+ * Блокирует ли причина под `'auto'`.
+ *
+ * Блокирует то, что проект попросил и не получил: закреплённой версии платформы на машине нет,
+ * названный сервер молчит, алиас конфигурации не указан. Это не случайность и не сбой сети —
+ * это заявленное требование, оставшееся невыполненным.
+ */
+export function blocksUnderAuto(reason) {
+  return !NOT_PROVISIONABLE.has(reason) && !PROVISION_FAILURES.has(reason);
 }
 
 /**
@@ -234,26 +293,29 @@ export function normalizeFindings(payload, { file }) {
  * от него не зависит.
  */
 export async function serverInfo({ url, timeoutMs = 5000, fetchImpl = globalThis.fetch }) {
-  const health = String(url || '').replace(/\/mcp\/?$/, '/health');
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetchImpl(health, { signal: controller.signal });
-    if (!res.ok) return null;
-    const body = JSON.parse(await res.text());
-    // Из пути платформы берём только номер версии: полный путь в следе бесполезен и зависит
-    // от машины, а `8.3.27.1688` сравнимо между прогонами. Шаблон не прибит к «8.3»
-    // намеренно: на 8.2 и на будущих ветках платформы отметка просто исчезла бы, и прогон
-    // против другой версии стал бы неотличим — та самая потеря, против которой поле заведено.
-    // Берётся последнее совпадение: в пути установки номер может встретиться дважды.
-    const versions = String(body.platform_path || '').match(/\d+\.\d+\.\d+\.\d+/g);
-    const platform = versions?.[versions.length - 1] || null;
-    return { version: body.version || null, platform };
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
+  const body = await probeHealth({ url, timeoutMs, fetchImpl });
+  if (!body) return null;
+  // Из пути платформы берём только номер версии: полный путь в следе бесполезен и зависит
+  // от машины, а `8.3.27.1688` сравнимо между прогонами. Шаблон не прибит к «8.3»
+  // намеренно: на 8.2 и на будущих ветках платформы отметка просто исчезла бы, и прогон
+  // против другой версии стал бы неотличим — та самая потеря, против которой поле заведено.
+  // Берётся последнее совпадение: в пути установки номер может встретиться дважды.
+  return { version: body.version || null, platform: platformOf(body), sources: sourcesOf(body) };
+}
+
+/**
+ * Потребует ли сервер алиас конфигурации.
+ *
+ * Сервер с настроенными источниками имён отвергает запрос без `repo`, и отказ приходит
+ * успешным ответом — то есть выглядит как «замечаний нет» по каждому файлу. Спросить об этом
+ * заранее дешевле, чем разбирать отказ по каждому файлу, а сказать «укажите алиас, вот они»
+ * полезнее, чем «файлы не проверены».
+ *
+ * Угадывать алиас нельзя, даже когда он единственный: источник — имена ЧУЖОЙ конфигурации,
+ * и проверка ими выдаёт находки, которых в коде нет, либо прячет настоящие.
+ */
+export function repoRequired(info, cfg) {
+  return Boolean(info?.sources?.length) && !cfg?.repo;
 }
 
 /**
@@ -271,7 +333,10 @@ export async function serverInfo({ url, timeoutMs = 5000, fetchImpl = globalThis
  */
 export function platformMismatch(cfg, info) {
   if (!cfg?.platformVersion || !info?.platform) return false;
-  return info.platform !== cfg.platformVersion;
+  // Сравнение то же самое, что при выборе каталога платформы и при оценке найденного сервера:
+  // порознь эти три места разъезжались, и закрепление по ветке (`8.3.27`) поднимало демон,
+  // который тут же отвергался как чужая версия.
+  return !platformSatisfies(cfg.platformVersion, info.platform);
 }
 
 /** Отметка движка для следа: версия сервера и версия платформы, чья справка загружена. */
@@ -342,6 +407,98 @@ export function skipEvidence(reason) {
   return [`[qg skipped: layer=code, scope=${SCOPE}, planned=[pc:*], reason=${reason}]`];
 }
 
+/**
+ * Человеческая строка рядом со следом: что случилось и что с этим делать.
+ *
+ * Машинная причина в следе адресована валидатору, а не человеку: `no_platform_install` в
+ * отчёте ничем не помогает тому, кто вообще не знал про этот контур. Пока пропуск не называл
+ * следующего шага, контур для большинства не существовал — читать про него было неоткуда.
+ */
+export function explainFailure(res, cfg) {
+  const doc = 'Разбор настройки: docs/CONFIG.md, секция platformContext.';
+  switch (res.reason) {
+    case 'no_platform_install':
+      return (
+        'Установленной платформы 1С со справкой shcntx_ru.hbk на машине нет — сверять код не с чем, ' +
+        'контур пропущен с отметкой в следе.\n' +
+        'Платформа лежит нестандартно — укажите каталог в platformContext.platformPath. ' +
+        'Что видит плагин: node tools/platform-context-bootstrap.mjs --platforms'
+      );
+    case 'platform_version_absent':
+      return (
+        `Проект закрепил платформу ${cfg?.platformVersion}, а на машине есть только: ${(res.available || []).join(', ') || '—'}.\n` +
+        'Старшую вместо закреплённой плагин не берёт: находки чужой версии выглядят как дефекты кода. ' +
+        'Поставьте нужную версию платформы либо поправьте platformContext.platformVersion.'
+      );
+    case 'platform_path_invalid':
+      return (
+        `В каталоге ${res.path} нет файла справки shcntx_ru.hbk — ни в нём самом, ни в bin.\n` +
+        'Проверьте platformContext.platformPath: нужен каталог установленной платформы, а не каталог базы.'
+      );
+    case 'server_unreachable':
+      return (
+        `Сервер справки по адресу ${res.url} не отвечает, а адрес задан проектом — свой поднимать нельзя, ` +
+        'это была бы подмена чужого решения.\n' +
+        `Поднимите сервер либо уберите platformContext.url, чтобы плагин завёл свой. ${doc}`
+      );
+    case 'index_not_loaded':
+      return (
+        `Сервер ${res.url} отвечает, но справка платформы не разобрана: проверять нечем.\n` +
+        'У сервера не задан platform_path либо каталог платформы без shcntx_ru.hbk.'
+      );
+    case 'platform_version_mismatch':
+      return (
+        `Сервер по адресу ${res.url} отдаёт платформу ${res.platform}, а проект закрепил ${cfg?.platformVersion}.\n` +
+        'Проверка чужой версией даёт находки, которых в коде нет.'
+      );
+    case 'unsupported_platform':
+      return (
+        'Для этой системы автор сервера справки бинарников не публикует — завести контур нечем.\n' +
+        'Соберите сервер сами и укажите его адрес в platformContext.url.'
+      );
+    case 'repo_required':
+      return (
+        `Сервер ${res.url} знает имена конфигураций (${(res.sources || []).join(', ') || '—'}) и без алиаса ` +
+        'отвечает отказом, а отказ приходит успешным ответом — то есть выглядел бы как «замечаний нет».\n' +
+        'Укажите свой алиас в platformContext.repo либо уберите platformContext.url: без явного адреса ' +
+        'плагин поднимет собственный сервер, которому алиас не нужен.'
+      );
+    case 'server_absent':
+      return (
+        'Поднятого сервера справки нет, а автозапуск выключен (platformContext.autoStart: false).\n' +
+        `Поднимите сервер сами либо верните автозапуск. ${doc}`
+      );
+    case 'not_installed':
+      return (
+        'Сервер справки не установлен, а автоустановка выключена (platformContext.autoInstall: false).\n' +
+        'Поставьте его: node tools/platform-context-bootstrap.mjs'
+      );
+    case 'download_failed':
+    case 'checksum_mismatch':
+    case 'extract_failed':
+    case 'binary_missing':
+    case 'stale_target':
+      return (
+        `Установка сервера справки не удалась: ${res.reason}${res.detail ? ` (${res.detail})` : ''}.\n` +
+        'Повторите вручную и посмотрите вывод: node tools/platform-context-bootstrap.mjs'
+      );
+    case 'start_timeout':
+      return (
+        `Сервер справки запущен, но за отведённое время не разобрал справку платформы (${res.url}).\n` +
+        'Первый разбор hbk долгий: повторите прогон — второй запуск подхватит уже поднятый сервер.'
+      );
+    case 'no_free_port':
+      return (
+        'Свободного порта для сервера справки не нашлось.\n' +
+        'Укажите порт явно: platformContext.port.'
+      );
+    case 'spawn_failed':
+      return `Сервер справки не запустился: ${res.error || 'причина неизвестна'}.`;
+    default:
+      return `Контур платформенного API не заведён: ${res.reason}. ${doc}`;
+  }
+}
+
 /** Печать для человека: уверенность видна сразу, иначе `low` чинят как подтверждённый дефект. */
 export function report(findings, out, { all = false } = {}) {
   const shown = all ? findings : findings.filter((f) => f.severity !== 'info' || f.confidence === 'low');
@@ -390,33 +547,68 @@ async function main(argv) {
   const root = projectRoot();
   const cfg = readPlatformContextConfig(root);
 
-  if (!isConfigured(cfg)) {
-    for (const l of skipEvidence(cfg?.enabled ? 'platform_context_not_configured' : 'platform_context_disabled')) {
-      out(l);
-    }
-    if (cfg?.required) {
-      process.stderr.write(
-        'Контур платформенного API включён как обязательный, но не настроен: задайте platformContext.url и platformContext.repo.\n'
-      );
-      return 2;
-    }
-    process.stderr.write('Контур платформенного API выключен — пропущен с отметкой в следе.\n');
+  const say = (s) => process.stderr.write(`${s}\n`);
+
+  if (!isEnabled(cfg)) {
+    for (const l of skipEvidence('platform_context_disabled')) out(l);
+    say('Контур платформенного API выключен настройкой — пропущен с отметкой в следе.');
     return 1;
   }
 
-  const info = await serverInfo({ url: cfg.url, fetchImpl: globalThis.fetch });
+  // Применимость выясняется ДО заведения: ставить сервер и разбирать справку платформы ради
+  // правки, в которой нет ни одного модуля, — плата ни за что. Порядок ещё и честнее: «правило
+  // к этим файлам не относится» не зависит от того, поднялся сервер или нет.
+  let targets = null;
+  if (!args.sentinel) {
+    if (args.changed.length === 0) {
+      say('Нечего проверять: не передан ни один --changed <файл>.');
+      return 2;
+    }
+    // Правка без единого `.bsl` — законный исход, но НЕ «чисто». Раньше проверка стояла на
+    // `args.changed`, а цикл шёл по отфильтрованному списку: набор из одних XML давал ноль
+    // итераций и запись `verdict=clean` — ровно тот ложный зелёный вердикт, ради которого этот
+    // движок и написан. Состав правки в реальном потоке смешанный: оркестратор передаёт всё,
+    // что видит `gate.mjs status`.
+    targets = args.changed.filter((f) => BSL_EXT.test(f));
+    if (targets.length === 0) {
+      for (const l of skipEvidence('no_bsl_files')) out(l);
+      say('В составе правки нет файлов .bsl/.os — контур не применим.');
+      return 0;
+    }
+  }
+
+  // Заведение стоит дороже прогона, поэтому и вынесено сюда целиком: движок не должен знать,
+  // чей сервер он получил — свой поднятый, чужой общий или указанный проектом.
+  const ready = await ensureServer(cfg, { log: say });
+  if (!ready.ok) {
+    for (const l of skipEvidence(ready.reason)) out(l);
+    say(explainFailure(ready, cfg));
+    return isRequired(cfg, { enforceable: blocksUnderAuto(ready.reason) }) ? 2 : 1;
+  }
+
+  const url = ready.url;
+  const info = await serverInfo({ url, fetchImpl: globalThis.fetch });
+
+  if (repoRequired(info, cfg)) {
+    for (const l of skipEvidence('repo_required')) out(l);
+    say(
+      `Сервер ${url} знает имена конфигураций (${info.sources.join(', ')}) и без алиаса отвечает отказом.\n` +
+        'Укажите свой в platformContext.repo — угадывать нельзя: чужая конфигурация даёт находки, которых в коде нет.'
+    );
+    return isRequired(cfg, { enforceable: true }) ? 2 : 1;
+  }
 
   if (platformMismatch(cfg, info)) {
     for (const l of skipEvidence('platform_version_mismatch')) out(l);
-    process.stderr.write(
+    say(
       `Сервер справки отдаёт платформу ${info.platform}, а проект закрепил ${cfg.platformVersion}.\n` +
         'Проверка против чужой версии даёт находки, которых нет в коде: укажите адрес сервера с нужной ' +
-        'версией либо поправьте platformContext.platformVersion.\n'
+        'версией либо поправьте platformContext.platformVersion.'
     );
     return 2;
   }
 
-  const sentinelResult = await sentinel({ url: cfg.url, repo: cfg.repo, timeoutMs: cfg.timeoutMs });
+  const sentinelResult = await sentinel({ url, repo: cfg.repo, timeoutMs: cfg.timeoutMs });
 
   if (args.sentinel) {
     out(
@@ -424,23 +616,6 @@ async function main(argv) {
         (sentinelResult.reason ? ` — ${sentinelResult.reason}` : '')
     );
     return sentinelResult.status === 'found' ? 0 : 2;
-  }
-
-  if (args.changed.length === 0) {
-    process.stderr.write('Нечего проверять: не передан ни один --changed <файл>.\n');
-    return 2;
-  }
-
-  // Правка без единого `.bsl` — законный исход, но НЕ «чисто». Раньше проверка стояла на
-  // `args.changed`, а цикл шёл по отфильтрованному списку: набор из одних XML давал ноль
-  // итераций и запись `verdict=clean` — ровно тот ложный зелёный вердикт, ради которого этот
-  // движок и написан. Состав правки в реальном потоке смешанный: оркестратор передаёт всё,
-  // что видит `gate.mjs status`.
-  const targets = args.changed.filter((f) => BSL_EXT.test(f));
-  if (targets.length === 0) {
-    for (const l of skipEvidence('no_bsl_files')) out(l);
-    process.stderr.write('В составе правки нет файлов .bsl/.os — контур не применим.\n');
-    return 0;
   }
 
   const findings = [];
@@ -453,7 +628,7 @@ async function main(argv) {
       continue;
     }
     const res = await validateModule({
-      url: cfg.url,
+      url,
       repo: cfg.repo,
       level: cfg.level,
       timeoutMs: cfg.timeoutMs,
