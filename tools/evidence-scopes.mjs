@@ -272,7 +272,7 @@ export function isKnownScope(scope) {
  * заявлять её руками нельзя»; null — признак проверяет модель по чеклисту.
  */
 const ARCH_SIGNS = Array.from({ length: 11 }, (_, i) => [`qg:ARCH-A${i + 1}`, { tool: null }]);
-const AI_SIGNS = Array.from({ length: 16 }, (_, i) => [`qg:AI-${String(i + 1).padStart(2, '0')}`, { tool: null }]);
+const AI_SIGNS = Array.from({ length: 18 }, (_, i) => [`qg:AI-${String(i + 1).padStart(2, '0')}`, { tool: null }]);
 
 /** @type {Record<string, { tool: string|null }>} */
 export const QG_IDS = {
