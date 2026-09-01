@@ -734,5 +734,9 @@ async function main(argv) {
 }
 
 if (process.argv[1]?.endsWith('platform-context-bootstrap.mjs')) {
-  main(process.argv).then((code) => process.exit(code));
+  // Причина та же, что у движка: мгновенный выход обрывает недописанный stdout, когда он труба.
+  main(process.argv).then((code) => {
+    process.exitCode = code;
+    setTimeout(() => process.exit(code), 2000).unref();
+  });
 }
