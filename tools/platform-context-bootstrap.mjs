@@ -425,7 +425,9 @@ export async function probeHealth({ url, timeoutMs = 3000, fetchImpl = globalThi
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetchImpl(healthUrl(url), { signal: controller.signal });
+    // `Connection: close` по той же причине, что и в запросах движка: инструмент одноразовый,
+    // сокет keep-alive пережил бы работу и мешал выходу процесса.
+    const res = await fetchImpl(healthUrl(url), { signal: controller.signal, headers: { Connection: 'close' } });
     if (!res.ok) return null;
     return JSON.parse(await res.text());
   } catch {

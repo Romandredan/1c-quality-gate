@@ -199,6 +199,12 @@ export async function validateModule({
         'Content-Type': 'application/json',
         Accept: 'application/json, text/event-stream',
         'MCP-Protocol-Version': '2025-06-18',
+        // Соединение не переиспользуется: инструмент одноразовый и по завершении зовёт
+        // process.exit. Оставленный открытым сокет keep-alive держится в пуле до самого
+        // выхода — на сборочном агенте Windows это стабильно роняло уже отработавший процесс
+        // (весь вывод напечатан, код возврата 0xC0000409). Просить закрытие дешевле, чем
+        // разбирать чужой пул.
+        Connection: 'close',
       },
       body,
       signal: controller.signal,
