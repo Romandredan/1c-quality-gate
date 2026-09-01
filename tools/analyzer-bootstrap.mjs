@@ -269,5 +269,11 @@ async function main(argv) {
 }
 
 if (process.argv[1]?.endsWith('analyzer-bootstrap.mjs')) {
-  main(process.argv).then((code) => process.exit(code));
+  // Не мгновенный выход: когда stdout — труба, запись асинхронная, и process.exit обрывает
+  // недописанный поток (установка сообщает о себе в трубу оркестратора).
+  // Таймер с unref цикл событий не держит и обычный выход не задерживает.
+  main(process.argv).then((code) => {
+    process.exitCode = code;
+    setTimeout(() => process.exit(code), 2000).unref();
+  });
 }
