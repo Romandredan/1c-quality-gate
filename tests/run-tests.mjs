@@ -2830,6 +2830,15 @@ section('Реестр признаков — полнота: источники 
   const aiOrphans = Object.keys(registry).filter((id) => id.startsWith('qg:AI-')).filter((id) => !aiInDoc.includes(id));
   check('в реестре нет AI-признаков, которых нет в документе', aiOrphans.length === 0, aiOrphans.join(', '));
 
+  // Перечень инструментальных проверок в README — та же истина, что TOOL_BACKED, только прозой.
+  // Разъезд тихий: список читают, чтобы понять, где нужна отметка в журнале, и пропущенное имя
+  // выглядит проверкой без инструмента. Так и случилось: из перечня выпали три проверки.
+  {
+    const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+    const missing = Object.keys(scopesMod.TOOL_BACKED).filter((k) => !readme.includes('`' + k + '`'));
+    check('README называет все проверки с инструментом', missing.length === 0, missing.join(', '));
+  }
+
   // Каждый qg:* из исходников инструментов есть в реестре: инструмент, печатающий признак,
   // о котором реестр не знает, делал бы вымышленным собственный след.
   const { readdirSync, statSync } = await import('node:fs');
