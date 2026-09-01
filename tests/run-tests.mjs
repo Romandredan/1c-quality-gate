@@ -20,7 +20,7 @@
 
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { removeTreeSync } from '../tools/fs-safe.mjs';
-import { join, dirname } from 'node:path';
+import { join, dirname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -3015,8 +3015,15 @@ section('Журнал прогонов — вердикт без прогона 
     }),
     'utf8'
   );
+  // Без --session своя сессия неизвестна: свежесть не сверяется (чужая правка не в счёт),
+  // но и молчать об ослабленной проверке нельзя — предупреждение, не ошибка.
   const twoSessions = run('tools/evidence-validator.mjs', [withHygiene, '--gate'], { env });
-  check('чужая сессия не обесценивает свой прогон', twoSessions.code === 0, twoSessions.out.trim().slice(0, 150));
+  check('чужая сессия не обесценивает свой прогон',
+    twoSessions.code !== 2 && !twoSessions.out.includes('старше'), twoSessions.out.trim().slice(0, 150));
+  check('без --session при двух сессиях сказано, что сверка ослаблена',
+    twoSessions.code === 1 && twoSessions.out.includes('несколько сессий'), twoSessions.out.trim().slice(0, 150));
+  const mineOnly = run('tools/evidence-validator.mjs', [withHygiene, '--gate', '--session', 'MINE'], { env });
+  check('со своей сессией прогон принят без оговорок', mineOnly.code === 0, mineOnly.out.trim().slice(0, 150));
   rmSync(join(proj, '.claude', '.state', 'qg-pending.json'), { force: true });
 
   // Проверки без инструмента журнала не требуют: требовать не с кого, и молчание здесь —
@@ -3710,6 +3717,216 @@ section('Удаление состояния на путях с не-ASCII си�
   }
   check('Stop после снятия не блокирует', stopCode === 0, `code=${stopCode}`);
   fsSafe.removeTreeSync(proj);
+}
+
+// ---------------------------------------------------------------------------
+section('Несколько сессий — без --session утилита отказывает, а не выбирает');
+
+// Наблюдалось в живой работе: при параллельных сессиях verify без --session привязывался к
+// самой свежей сессии — чужой — и отвечал «файл не найден в охвате», а release --class снял
+// бы чужой гейт. Выбор по свежести — это выбор чужой работы наугад; честный ответ при
+// неоднозначности один — отказ с перечнем и требованием назвать сессию.
+{
+  const proj = join(WORK, 'multi-session');
+  rmSync(proj, { recursive: true, force: true });
+  const dir = join(proj, 'src', 'cf', 'CommonModules', 'М', 'Ext');
+  mkdirSync(dir, { recursive: true });
+  const env = { CLAUDE_PROJECT_DIR: proj };
+  const fileA = join(dir, 'Module.bsl');
+  const fileB = join(dir, 'ManagerModule.bsl');
+  for (const f of [fileA, fileB]) writeFileSync(f, BOM + 'Процедура Пример()\r\nКонецПроцедуры\r\n', 'utf8');
+
+  const arm = (sessionId, path) => {
+    try {
+      return execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-arm.mjs')], {
+        input: JSON.stringify({ session_id: sessionId, cwd: proj, tool_input: { file_path: path } }),
+        encoding: 'utf8',
+        env: { ...process.env, ...env },
+      });
+    } catch {
+      return '';
+    }
+  };
+  const stop = (sessionId) => {
+    try {
+      execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-check.mjs')], {
+        input: JSON.stringify({ session_id: sessionId, cwd: proj }),
+        encoding: 'utf8',
+        env: { ...process.env, ...env },
+        stdio: 'pipe',
+      });
+      return { code: 0, err: '' };
+    } catch (e) {
+      return { code: e.status ?? 1, err: String(e.stderr || '') };
+    }
+  };
+  const pendingPath = join(proj, '.claude', '.state', 'qg-pending.json');
+  const sessions = () => (existsSync(pendingPath) ? Object.keys(JSON.parse(readFileSync(pendingPath, 'utf8')).sessions || {}) : []);
+
+  // Идентификатор сессии модель обязана узнать при взводе: до первого блока Stop-хука она
+  // его больше ниоткуда не получит, а без него при нескольких сессиях ничего не сделать.
+  const armOut = arm('S1', fileA);
+  let armHint = '';
+  try {
+    armHint = String(JSON.parse(armOut)?.hookSpecificOutput?.additionalContext || '');
+  } catch {
+    /* останется пустым */
+  }
+  check('подсказка при взводе называет сессию', armHint.includes('Сессия: S1'), armHint.slice(0, 200));
+
+  // Одна сессия — --session по-прежнему не обязателен: неоднозначности нет.
+  const single = run('tools/gate.mjs', ['release', '--class', 'C0', '--reason', 'единственная сессия, проверка не нужна'], { env });
+  check('одна сессия: release без --session проходит', single.code === 0 && !existsSync(pendingPath), single.out.trim().slice(0, 120));
+
+  arm('S1', fileA);
+  arm('S2', fileB);
+  check('взведены две сессии', sessions().length === 2, sessions().join(', '));
+
+  const rel = run('tools/gate.mjs', ['release', '--class', 'C0', '--reason', 'без указания сессии при двух взведённых'], { env });
+  check('две сессии: release без --session отказывает', rel.code === 2, `code=${rel.code}: ${rel.out.trim().slice(0, 120)}`);
+  check('отказ перечисляет сессии', rel.out.includes('S1') && rel.out.includes('S2'), rel.out.trim().slice(0, 200));
+  check('отказ ничего не снял', sessions().length === 2, sessions().join(', '));
+
+  const ver = run('tools/gate.mjs', ['verify', '--layer', 'code', fileB], { env });
+  check('две сессии: verify без --session отказывает', ver.code === 2, `code=${ver.code}: ${ver.out.trim().slice(0, 120)}`);
+  check('отказ ничего не отметил', !readFileSync(pendingPath, 'utf8').includes('verified'));
+
+  // Сообщение блокировки даёт команду, которая сработает и при нескольких сессиях.
+  const blocked = stop('S2');
+  check('Stop блокирует свою сессию', blocked.code === 2, `code=${blocked.code}`);
+  check('команда снятия в блоке уже содержит --session', blocked.err.includes('--session S2'), blocked.err.slice(0, 300));
+
+  // С названной сессией всё работает, и снимается ровно она.
+  const own = run('tools/gate.mjs', ['release', '--session', 'S2', '--class', 'C0', '--reason', 'сессия названа явно, снимаем свою'], { env });
+  check('две сессии: release с --session снимает свою', own.code === 0 && sessions().join() === 'S1', `code=${own.code}, остались: ${sessions().join(', ')}`);
+
+  // Валидатор сам по себе (вне release) при нескольких сессиях без --session не сверяет ни
+  // свежесть, ни покрытие — и обязан сказать об этом, а не промолчать.
+  arm('S2', fileB);
+  run('tools/hygiene-check.mjs', [fileA], { env });
+  const evFile = writeBytes(
+    'ev-multi-session.md',
+    '## quality evidence\n\n' +
+      '[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, config=default]\n' +
+      '[qg sentinel: target=v8std, id=std454, status=found]\n' +
+      '[qg applied: layer=hygiene, scope=file-encoding, ids=[qg:HYG-BOM], verdict=clean]\n' +
+      '[qg not_verified: dimension=compilation, reason=no_platform]\n'
+  );
+  const anon = run('tools/evidence-validator.mjs', [evFile, '--gate'], { env });
+  check('валидатор без --session при двух сессиях предупреждает', anon.out.includes('несколько сессий'), anon.out.trim().slice(0, 200));
+  const named = run('tools/evidence-validator.mjs', [evFile, '--gate', '--session', 'S1'], { env });
+  check('валидатор с --session сверяет по своей сессии', named.code === 0 && !named.out.includes('несколько сессий'), named.out.trim().slice(0, 200));
+  const wrong = run('tools/evidence-validator.mjs', [evFile, '--gate', '--session', 'S2'], { env });
+  check('валидатор с чужой сессией видит непокрытый файл', wrong.code === 2 && wrong.out.includes('managermodule.bsl'), wrong.out.trim().slice(0, 200));
+}
+
+// ---------------------------------------------------------------------------
+section('Файлы вне корня проекта — канонический ключ, заявленность, корень в выводе');
+
+// Живой случай 2026-08-30: правки в соседнем репозитории при чужом корне проекта. Состояние
+// гейта хранило абсолютный путь файла, журнал прогонов — относительный через «..», и
+// сверка покрытия не сходилась ни по одной проверке, хотя инструменты отработали с
+// вердиктом clean. Гейт удалось снять только переписыванием applied в not_verified —
+// след, лгущий в безопасную сторону, всё равно лжёт. Ключ файла обязан быть один:
+// внутри корня — относительный, вне корня — абсолютный, без «..», слэши вперёд,
+// нижний регистр.
+{
+  const proj = join(WORK, 'canon-proj');
+  const other = join(WORK, 'canon-other'); // «соседний репозиторий» на том же диске
+  rmSync(proj, { recursive: true, force: true });
+  rmSync(other, { recursive: true, force: true });
+  mkdirSync(join(proj, 'src'), { recursive: true });
+  mkdirSync(join(other, 'src', 'Обработка', 'Forms', 'Форма', 'Ext', 'Form'), { recursive: true });
+  const env = { CLAUDE_PROJECT_DIR: proj };
+  const outsideFile = join(other, 'src', 'Обработка', 'Forms', 'Форма', 'Ext', 'Form', 'Module.bsl');
+  writeFileSync(outsideFile, BOM + 'Процедура Пример()\r\nКонецПроцедуры\r\n', 'utf8');
+
+  const canonJournal = await import(pathToFileURL(join(ROOT, 'tools', 'run-journal.mjs')).href);
+  const expected = outsideFile.split(sep).join('/').toLowerCase();
+  const canonical = canonJournal.normalizePath(outsideFile, proj);
+  check('ключ файла вне корня — абсолютный, без «..»', canonical === expected && !canonical.includes('..'), canonical);
+  const inRoot = join(proj, 'src', 'Module.bsl');
+  check('ключ файла в корне остаётся относительным', canonJournal.normalizePath(inRoot, proj) === 'src/module.bsl', canonJournal.normalizePath(inRoot, proj));
+
+  // Правило ключа живёт в двух языках: JS (run-journal.mjs) и Python (_qg_journal.py —
+  // валидаторы XML пишут журнал сами). Расхождение между ними — тот же дефект, что и
+  // исходный, только между языками; реализации сверяются на одних примерах.
+  if (python.ok) {
+    const pyCanon = (p) =>
+      execFileSync(
+        'python',
+        [join(ROOT, 'tools', 'xml', '_qg_journal.py'), '--canon-check', p, proj],
+        { encoding: 'utf8', stdio: 'pipe' }
+      ).trim();
+    check('python-канонизатор согласен: вне корня', pyCanon(outsideFile) === canonical, `${pyCanon(outsideFile)} != ${canonical}`);
+    check('python-канонизатор согласен: в корне', pyCanon(inRoot) === canonJournal.normalizePath(inRoot, proj), pyCanon(inRoot));
+  }
+
+  // Взвод файла вне корня: подсказка заявляет границы применимости проверок.
+  const armOut = (() => {
+    try {
+      return execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-arm.mjs')], {
+        input: JSON.stringify({ session_id: 'OUT', cwd: proj, tool_input: { file_path: outsideFile } }),
+        encoding: 'utf8',
+        env: { ...process.env, ...env },
+      });
+    } catch {
+      return '';
+    }
+  })();
+  let hint = '';
+  try {
+    hint = String(JSON.parse(armOut)?.hookSpecificOutput?.additionalContext || '');
+  } catch {
+    /* останется пустым */
+  }
+  check('подсказка заявляет файл вне корня', hint.includes('вне корня'), hint.slice(0, 260));
+  check('подсказка называет судьбу проектных проверок', hint.includes('not_verified'), hint.slice(-260));
+
+  // Сквозной случай: инструмент прогнан по файлу вне корня — покрытие сходится,
+  // гейт снимается честным следом applied, без переписывания в not_verified.
+  run('tools/hygiene-check.mjs', [outsideFile], { env });
+  const evOut = writeBytes(
+    'ev-outside-root.md',
+    '## quality evidence\n\n' +
+      '[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, config=default]\n' +
+      '[qg sentinel: target=v8std, id=std454, status=found]\n' +
+      '[qg applied: layer=hygiene, scope=file-encoding, ids=[qg:HYG-BOM], verdict=clean]\n' +
+      '[qg not_verified: dimension=compilation, reason=no_platform]\n'
+  );
+  const val = run('tools/evidence-validator.mjs', [evOut, '--gate', '--session', 'OUT'], { env });
+  check('покрытие по файлу вне корня сходится', val.code === 0, val.out.trim().slice(0, 220));
+  const relOut = run('tools/gate.mjs', ['release', '--evidence', evOut, '--session', 'OUT'], { env });
+  check('гейт по файлу вне корня снимается следом', relOut.code === 0, relOut.out.trim().slice(0, 160));
+
+  // Корень и способ опознания печатаются: «гейт не взведён» из чужого каталога перестаёт
+  // быть неотличимым от честного ответа — resolveProjectRoot возвращает via ровно для этого.
+  const st = run('tools/gate.mjs', ['status'], { env });
+  check('status называет корень проекта', st.out.includes('Корень проекта:'), st.out.trim().slice(0, 220));
+  check('status называет способ опознания (env)', st.out.includes('переменн'), st.out.trim().slice(0, 220));
+
+  const relNothing = run('tools/gate.mjs', ['release', '--class', 'C0', '--reason', 'снимать нечего, гейт пуст'], { env });
+  check('«снимать нечего» называет корень', relNothing.out.includes('Корень проекта:'), relNothing.out.trim().slice(0, 200));
+
+  // Запуск из каталога чужого репозитория: корень уезжает к его .git — и это видно.
+  mkdirSync(join(other, '.git'), { recursive: true });
+  let alien = '';
+  try {
+    alien = execFileSync(process.execPath, [join(ROOT, 'tools', 'gate.mjs'), 'status'], {
+      encoding: 'utf8',
+      stdio: 'pipe',
+      cwd: other,
+      env: { ...process.env, CLAUDE_PROJECT_DIR: '', QG_PROJECT_DIR: '', OPENCODE_PROJECT_DIR: '' },
+    });
+  } catch (e) {
+    alien = `${e.stdout || ''}${e.stderr || ''}`;
+  }
+  check(
+    'status из чужого каталога называет чужой корень',
+    alien.includes('Корень проекта:') && alien.toLowerCase().includes('canon-other'),
+    alien.trim().slice(0, 220)
+  );
+  check('и способ опознания — маркер .git', alien.includes('.git'), alien.trim().slice(0, 220));
 }
 
 // ---------------------------------------------------------------------------

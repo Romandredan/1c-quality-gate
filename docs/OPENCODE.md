@@ -1,6 +1,6 @@
 # 1c-quality-gate в OpenCode
 
-Плагин работает в двух харнесса: Claude Code (хуки `hooks/gate-arm.mjs` +
+Плагин работает в двух харнессах: Claude Code (хуки `hooks/gate-arm.mjs` +
 `hooks/gate-check.mjs`) и OpenCode (плагин `opencode/plugin/quality-gate.js`). Механика
 гейта одна и та же — общее ядро `hooks/gate-core.mjs`, общие инструменты `tools/`, общий
 skill `skills/quality-gate`. Различаются способ взвода, поведение при завершении сессии и
@@ -13,7 +13,7 @@ skill `skills/quality-gate`. Различаются способ взвода, �
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["1c-quality-gate@git+https://github.com/Romandredan/1c-quality-gate.git#v3.1.0"]
+  "plugin": ["1c-quality-gate@git+https://github.com/Romandredan/1c-quality-gate.git#v3.2.1"]
 }
 ```
 

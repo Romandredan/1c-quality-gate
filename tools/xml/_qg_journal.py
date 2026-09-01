@@ -104,11 +104,17 @@ def target_from_argv(argv=None):
 
 
 def normalize_path(path, root):
-    """Путь в той же форме, в какой состав правки хранит гейт: от корня, слэши, нижний регистр.
+    """Канонический ключ файла: внутри корня — относительный путь, ВНЕ корня — абсолютный;
+    слэши вперёд, нижний регистр.
 
     Регистр гасится намеренно: на Windows один файл приходит то как `src/CF/...`, то как
     `src/cf/...`, и сверка покрытия по-разному записанных путей дала бы находку на
     проверенном файле.
+
+    «..» в ключе не бывает: относительный путь наружу — нестабильный адрес, не совпадающий
+    с ключом состояния гейта (там абсолютный путь), и сверка покрытия по нему не сходилась
+    ни для одной проверки. Правило общее с tools/run-journal.mjs; реализации сверяет
+    межъязыковой тест через `--canon-check`.
     """
     text = str(path)
     if os.path.isabs(text):
@@ -122,6 +128,8 @@ def normalize_path(path, root):
     # превратив путь за пределы проекта в путь внутри него.
     if text.startswith("./"):
         text = text[2:]
+    if text == ".." or text.startswith("../") or os.path.isabs(text):
+        return os.path.abspath(os.path.join(root, text)).replace("\\", "/").lower()
     return text.lower()
 
 
@@ -157,3 +165,17 @@ def record_run(scope, tool, verdict=None, files=None, root=None):
     except OSError:
         return entry
     return entry
+
+
+if __name__ == "__main__":
+    # Самопроверка канонизатора: печатает ключ для пары (путь, корень проекта). Нужна
+    # межъязыковому тесту, который сверяет эту реализацию с tools/run-journal.mjs, — правило
+    # ключа живёт в двух языках, и молчаливое расхождение между ними воспроизвело бы дефект,
+    # ради которого канонизатор написан.
+    if len(sys.argv) == 4 and sys.argv[1] == "--canon-check":
+        # Явная utf-8: консоль Windows иначе перекодирует кириллицу в путях, и сверка
+        # с JS-реализацией падает не по делу.
+        sys.stdout.reconfigure(encoding="utf-8")
+        print(normalize_path(sys.argv[2], sys.argv[3]))
+    else:
+        sys.exit("использование: _qg_journal.py --canon-check <путь> <корень>")

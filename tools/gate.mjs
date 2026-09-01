@@ -31,8 +31,28 @@ const DONE = 'qg-done.json';
  * `status` отвечал «гейт не взведён», а `release` — «снимать нечего» с кодом 0, не сняв
  * ничего. Обе фразы неотличимы от честной работы.
  */
+function rootInfo() {
+  return resolveProjectRoot(process.cwd(), process.env);
+}
+
 function root() {
-  return resolveProjectRoot(process.cwd(), process.env).root;
+  return rootInfo().root;
+}
+
+/**
+ * Строка «где мы и почему». «Гейт не взведён» из каталога другого репозитория дословно
+ * совпадает с честным ответом — различить их можно только по названному корню. Способ
+ * опознания resolveProjectRoot возвращает ровно для этого; раньше он здесь выбрасывался.
+ */
+function rootLine() {
+  const { root: r, via, marker } = rootInfo();
+  const how =
+    via === 'env'
+      ? 'задан переменной окружения'
+      : via === 'marker'
+        ? `опознан по маркеру ${marker}`
+        : 'маркер не найден — взят каталог запуска';
+  return `Корень проекта: ${String(r).split('\\').join('/')} (${how})\n`;
 }
 
 function paths() {
@@ -57,16 +77,42 @@ function readPending() {
 /**
  * Выбирает сессию, с которой работаем.
  *
- * Явный --session надёжнее всего: его печатает сообщение блокировки. Без него берём
- * единственную (обычный случай) либо самую свежую. Наугад по нескольким сессиям не
- * работаем: снять чужой гейт значит объявить проверенной чужую работу.
+ * Явный --session надёжнее всего: его печатают подсказка при взводе и сообщение блокировки.
+ * Без него берём единственную (обычный случай). При нескольких — НЕ выбираем: прежний выбор
+ * «самой свежей» в живой работе означал чужую, потому что параллельная сессия правит позже
+ * своей. verify тогда привязывался к чужому охвату и отвечал «файл не найден», а release
+ * снимал чужой гейт — объявлял проверенной работу, которую никто не смотрел.
+ * Неоднозначность закрывается отказом с перечнем, а не эвристикой.
  */
 function pickSession(state, explicit) {
   const ids = Object.keys(state.sessions || {});
   if (explicit) return ids.includes(explicit) ? explicit : null;
-  if (ids.length === 0) return null;
-  if (ids.length === 1) return ids[0];
-  return ids.sort((a, b) => String(state.sessions[b].updatedAt || '').localeCompare(String(state.sessions[a].updatedAt || '')))[0];
+  return ids.length === 1 ? ids[0] : null;
+}
+
+/** Перечень сессий для отказа: по составу правок модель находит свою. */
+function sessionsListing(state) {
+  return Object.entries(state.sessions || {})
+    .map(([id, s]) => {
+      const files = Object.keys(s.files || {});
+      const lines = [`  ${id} — файлов: ${files.length}, обновлена ${s.updatedAt || s.armedAt || '?'}`];
+      lines.push(...files.slice(0, 5).map((f) => `      ${f}`));
+      if (files.length > 5) lines.push(`      … и ещё ${files.length - 5}`);
+      return lines.join('\n');
+    })
+    .join('\n');
+}
+
+/** Текст отказа, когда сессия не названа, а их несколько. */
+function ambiguousSessionMessage(state) {
+  return (
+    'Сессий несколько, а --session не указан — утилита не выбирает сама: взять чужую значит\n' +
+    'объявить проверенной работу, которую никто не смотрел. Взведены:\n' +
+    sessionsListing(state) +
+    '\n' +
+    'Укажи --session <id>: идентификатор напечатан в подсказке при взводе гейта и в сообщении\n' +
+    'о блокировке; свою сессию видно по составу правок.\n'
+  );
 }
 
 function parseArgs(args) {
@@ -93,6 +139,7 @@ function cmdStatus() {
   // Версия печатается первой строкой: прогон устаревшей версией из кэша плагинов иначе
   // неотличим от прогона актуальной — вплоть до «таких проверок не существует».
   process.stdout.write(`1c-quality-gate v${pluginVersion() || '?'}\n`);
+  process.stdout.write(rootLine());
   const state = readPending();
   if (!state) {
     process.stdout.write('Гейт не взведён: изменений в файлах 1С не зафиксировано.\n');
@@ -121,8 +168,8 @@ function cmdStatus() {
 
   if (ids.length > 1) {
     process.stdout.write(
-      'Сессий несколько: снимай гейт только своей — укажи --session <id>.\n' +
-        'Снятие чужого гейта объявляет проверенной чужую работу.\n'
+      'Сессий несколько: verify и release без --session <id> откажут. Свою сессию видно по составу\n' +
+        'правок, идентификатор напечатан при взводе. Снятие чужого гейта объявляет проверенной чужую работу.\n'
     );
   }
   process.stdout.write('Снять: node gate.mjs release --evidence <файл отчёта> [--session <id>]\n');
@@ -185,7 +232,7 @@ function staleArtifacts(rootDir) {
 function cmdRelease(args) {
   const state = readPending();
   if (!state || Object.keys(state.sessions || {}).length === 0) {
-    process.stdout.write('Гейт не взведён — снимать нечего.\n');
+    process.stdout.write('Гейт не взведён — снимать нечего.\n' + rootLine());
     return 0;
   }
 
@@ -195,7 +242,7 @@ function cmdRelease(args) {
     process.stderr.write(
       explicit
         ? `Сессия "${explicit}" в состоянии гейта не найдена. Доступны: ${Object.keys(state.sessions).join(', ')}\n`
-        : 'Не удалось определить сессию — укажи --session <id>.\n'
+        : ambiguousSessionMessage(state)
     );
     return 2;
   }
@@ -361,7 +408,7 @@ function cmdRelease(args) {
 function cmdVerify(args) {
   const state = readPending();
   if (!state || state.corrupt) {
-    process.stdout.write('Гейт не взведён — отмечать нечего.\n');
+    process.stdout.write('Гейт не взведён — отмечать нечего.\n' + rootLine());
     return 0;
   }
 
@@ -372,9 +419,17 @@ function cmdVerify(args) {
     return 2;
   }
 
-  const sessionId = pickSession(state, typeof args.session === 'string' ? args.session : null);
+  const explicit = typeof args.session === 'string' ? args.session : null;
+  const sessionId = pickSession(state, explicit);
   if (!sessionId) {
-    process.stderr.write('Не удалось определить сессию — укажи --session <id> из сообщения о блокировке.\n');
+    const ids = Object.keys(state.sessions || {});
+    process.stderr.write(
+      explicit
+        ? `Сессия "${explicit}" в состоянии гейта не найдена. Доступны: ${ids.join(', ')}\n`
+        : ids.length === 0
+          ? 'Гейт не взведён — отмечать нечего.\n'
+          : ambiguousSessionMessage(state)
+    );
     return 2;
   }
 
@@ -391,7 +446,13 @@ function cmdVerify(args) {
   }
 
   if (marked === 0) {
-    process.stdout.write('Ни один из указанных файлов не найден в охвате гейта этой сессии.\n');
+    process.stdout.write(
+      `В охвате сессии ${sessionId} нет ни одного из указанных файлов. Её состав:\n` +
+        Object.keys(session.files || {})
+          .map((f) => `  ${f}`)
+          .join('\n') +
+        '\n'
+    );
     return 1;
   }
 

@@ -215,16 +215,17 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
         if (!['write', 'edit', 'multiedit', 'patch', 'notebookedit'].includes(tool)) return;
 
         const abs = isAbsolute(file) ? file : resolve(root, file);
+        const sessionId = String(input.sessionID || 'unknown-session');
         const armed = core.armGate({
           root,
           filePath: abs,
-          sessionId: String(input.sessionID || 'unknown-session'),
+          sessionId,
           ensureConfig,
           env: stateEnv,
         });
         if (!armed) return;
 
-        const hint = core.gateHint({ ...armed, packageRoot, mode: 'opencode' });
+        const hint = core.gateHint({ ...armed, sessionId, packageRoot, mode: 'opencode' });
         // Аналог additionalContext хука Claude Code: подсказка уходит модели вместе
         // с результатом инструмента — о взводе узнают немедленно, а не на паузе.
         if (output && typeof output.output === 'string') {
