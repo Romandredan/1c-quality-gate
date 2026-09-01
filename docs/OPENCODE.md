@@ -13,7 +13,7 @@ skill `skills/quality-gate`. Различаются способ взвода, �
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["1c-quality-gate@git+https://github.com/Romandredan/1c-quality-gate.git#v3.2.1"]
+  "plugin": ["1c-quality-gate@git+https://github.com/Romandredan/1c-quality-gate.git#v3.3.0"]
 }
 ```
 
