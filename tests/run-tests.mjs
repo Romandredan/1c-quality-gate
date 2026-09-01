@@ -2055,6 +2055,15 @@ section('Проектная настройка — создание, разре�
   check('в созданном файле всё числится умолчанием',
     Object.values(fromTemplate.sources).every((s) => Object.values(s).every((v) => v === 'умолчание')),
     JSON.stringify(fromTemplate.sources));
+  // Шаблон статический, а список настраиваемого — в DEFAULTS. Разъедься они, и настройка,
+  // которой нет в шаблоне, окажется работающей, но ненаходимой: новый проект о ней не узнает
+  // ниоткуда, кроме документации, которую открывают уже зная, что искать. Так едва не уехала
+  // секция platformContext.
+  {
+    const inTemplate = new Set(Object.keys(JSON.parse(config.template())).filter((k) => !k.startsWith('//')));
+    const missing = Object.keys(config.DEFAULTS).filter((k) => !inTemplate.has(k));
+    check('каждая секция настройки описана в создаваемом файле', missing.length === 0, missing.join(', '));
+  }
   check('ключи-комментарии не доходят до потребителя', !JSON.stringify(fromTemplate.values).includes('//'));
   check('комментарии снимаются на любой глубине', JSON.stringify(config.stripDocs({ a: { '//': 'x', b: [{ '//': 'y', c: 1 }] } })) === '{"a":{"b":[{"c":1}]}}');
 
@@ -2338,7 +2347,11 @@ section('Бюджет навыков и достижимость справоч�
   // ловит рост заранее, а число в нём называет долг вслух.
   const BUDGET = {
     'quality-gate': 28 * 1024,
-    'bsl-code-review': 25 * 1024,
+    // 26 вместо 25 КБ: у слоя 1а появился второй движок (сверка со справочником платформы),
+    // и его блок — команда, признак «выключен по умолчанию» и два правила чтения вывода —
+    // в справочник не выносится: без него движок просто не будет запущен. Обосновывающее
+    // при этом лежит в `references/platform-api.md`, в навыке остались только действия.
+    'bsl-code-review': 26 * 1024,
     'xml-structure-review': 24 * 1024,
     'bsl-architecture-review': 20 * 1024,
     'file-hygiene': 12 * 1024,
@@ -3936,6 +3949,932 @@ section('Файлы вне корня проекта — канонически�
     alien.trim().slice(0, 220)
   );
   check('и способ опознания — маркер .git', alien.includes('.git'), alien.trim().slice(0, 220));
+}
+
+// ---------------------------------------------------------------------------
+section('Контур платформенного API (движок bsl-context)');
+{
+  const pc = await import(pathToFileURL(join(ROOT, 'tools', 'platform-context-run.mjs')).href);
+
+  /** Успешный конверт инструмента MCP с полезной нагрузкой внутри текстового содержимого. */
+  const envelope = (payload) =>
+    JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: JSON.stringify(payload) }] } });
+
+  // --- разбор ответа --------------------------------------------------------
+  // Главная ловушка потребления: сервер сообщает об отказе ВНУТРИ успешного ответа.
+  // Потребитель, читающий только список находок, принимает отказ за «замечаний нет» — так
+  // выглядела бы непроверенная правка с зелёным вердиктом.
+  const refused = pc.parseToolResult(envelope({ ok: false, message: 'параметр repo обязателен' }));
+  check('отказ сервера не читается как успех', refused.ok === false && String(refused.refusal).includes('repo'));
+
+  const viaStream = pc.parseToolResult(`event: message\ndata: ${envelope({ errors: [], tree_parsed: true })}\n`);
+  check('ответ потоком событий разбирается', viaStream.ok === true && Array.isArray(viaStream.payload.errors));
+
+  check('битый ответ не роняет разбор', pc.parseToolResult('{ это не json').transport === 'malformed_response');
+
+  // --- нормализация находок -------------------------------------------------
+  const payload = {
+    tree_parsed: true,
+    symbols_available: true,
+    errors: [
+      { line: 10, kind: 'unknown_enum_value', confidence: 'high', message: 'нет значения' },
+      { line: 20, kind: 'unknown_type_member', confidence: 'low', message: 'нет члена' },
+      { line: 30, kind: 'wrong_argument_count', confidence: 'high', message: 'аргументов не столько' },
+      { line: 40, kind: 'or_in_join_condition', confidence: 'high', message: 'ИЛИ в соединении' },
+      { line: 50, kind: 'unknown_metadata_object', confidence: 'high', message: 'нет объекта' },
+    ],
+  };
+  const norm = pc.normalizeFindings(payload, { file: 'a/Module.bsl' });
+  check(
+    'уверенность high становится major',
+    norm.findings.find((f) => f.kind === 'unknown_enum_value')?.severity === 'major'
+  );
+  // Выбрасывать low нельзя: класс смешанный — в нём приходят и ложные (переменная названа
+  // именем платформенного типа), и настоящие (несуществующее свойство объекта платформы).
+  check(
+    'уверенность low остаётся находкой уровня info',
+    norm.findings.find((f) => f.kind === 'unknown_type_member')?.severity === 'info'
+  );
+  check(
+    'находки, дублирующие анализатор, отброшены',
+    norm.findings.length === 2 && !norm.findings.some((f) => pc.DUPLICATED_BY_ANALYZER.has(f.kind)),
+    norm.findings.map((f) => f.kind).join(',')
+  );
+  check('идентификатор находки в пространстве pc:', norm.findings.every((f) => f.code.startsWith('pc:')));
+
+  const degraded = pc.normalizeFindings(
+    { errors: [], tree_parsed: false, symbols_available: false },
+    { file: 'b.bsl' }
+  );
+  check(
+    'неполная проверка объявлена, а не выдана за чистую',
+    degraded.degraded.includes('tree_not_parsed') && degraded.degraded.includes('symbols_unavailable'),
+    degraded.degraded.join(',')
+  );
+
+  // --- контр-сигнал: на корректном коде движок обязан молчать ----------------
+  const silent = pc.normalizeFindings({ errors: [], tree_parsed: true, symbols_available: true }, { file: 'c.bsl' });
+  check('корректный код не даёт находок', silent.findings.length === 0 && silent.degraded.length === 0);
+
+  // --- след прогона ---------------------------------------------------------
+  const cleanEv = pc.toEvidence({ findings: [], sentinelResult: { status: 'found' } });
+  check(
+    'чистый прогон отчитывается одной записью',
+    cleanEv.some((l) => l.includes('scope=platform-api') && l.includes('verdict=clean'))
+  );
+  check('часовой попадает в след', cleanEv.some((l) => l.startsWith('[qg sentinel: target=platform-api')));
+
+  const dirtyEv = pc.toEvidence({
+    findings: norm.findings,
+    sentinelResult: { status: 'found' },
+    degraded: ['symbols_unavailable'],
+    unchecked: [{ file: 'x.bsl', reason: 'timeout' }],
+  });
+  check('каждый вид находки — своя запись следа', dirtyEv.filter((l) => l.includes('verdict=violation:pc:')).length === 2);
+  check(
+    'непроверенные файлы заявлены в следе',
+    dirtyEv.some((l) => l.includes('not_verified') && l.includes('reason=request_failed') && l.includes('files=1'))
+  );
+  check(
+    'деградация источника имён заявлена в следе',
+    dirtyEv.some((l) => l.includes('not_verified') && l.includes('reason=symbols_unavailable'))
+  );
+
+  // --- часовой --------------------------------------------------------------
+  // Доказывает, что справка платформы загружена, а не что сервер ответил: сервер без справки
+  // отвечает на всё, просто не находит ничего.
+  const fetchWith = (payloadOrText) => async () => ({
+    ok: true,
+    text: async () => (typeof payloadOrText === 'string' ? payloadOrText : envelope(payloadOrText)),
+  });
+  const sentinelFound = await pc.sentinel({
+    url: 'http://test',
+    repo: 'r',
+    fetchImpl: fetchWith({
+      tree_parsed: true,
+      errors: [{ line: 22, kind: 'unknown_enum_value', confidence: 'high', message: '' }],
+    }),
+  });
+  check('часовой видит посаженную находку', sentinelFound.status === 'found');
+
+  const sentinelEmpty = await pc.sentinel({
+    url: 'http://test',
+    repo: 'r',
+    fetchImpl: fetchWith({ tree_parsed: true, errors: [] }),
+  });
+  check(
+    'пустой ответ не выдаётся за исправность',
+    sentinelEmpty.status === 'not_found' && sentinelEmpty.reason === 'finding_absent'
+  );
+
+  const sentinelRefused = await pc.sentinel({
+    url: 'http://test',
+    repo: 'r',
+    fetchImpl: fetchWith({ ok: false, message: 'конфигурация не настроена' }),
+  });
+  check('отказ отличается от отсутствия находки', sentinelRefused.reason === 'request_refused', sentinelRefused.reason);
+
+  const sentinelDown = await pc.sentinel({
+    url: 'http://test',
+    repo: 'r',
+    fetchImpl: async () => {
+      throw Object.assign(new Error('нет связи'), { name: 'TypeError' });
+    },
+  });
+  check('недоступный сервер назван причиной', sentinelDown.status === 'not_found' && sentinelDown.reason === 'unreachable');
+
+  // --- версия движка и платформы в следе -------------------------------------
+  // Состав системных перечислений и сигнатуры между релизами платформы отличаются, поэтому
+  // без отметки два прогона против разных версий дают побайтово одинаковый след.
+  check(
+    'отметка движка называет версию сервера и версию платформы',
+    pc.engineStamp({ version: '0.16.0', platform: '8.3.27.1688' }) === 'bsl-context@0.16.0/8.3.27.1688'
+  );
+  check('без ответа /health отметка остаётся без версии', pc.engineStamp(null) === 'bsl-context');
+  check(
+    'версия платформы вынимается из пути установки',
+    (
+      await pc.serverInfo({
+        url: 'http://test/mcp',
+        fetchImpl: async (u) => ({
+          ok: true,
+          text: async () =>
+            JSON.stringify({ version: '0.16.0', platform_path: 'C:\\Program Files (x86)\\1cv8\\8.3.27.1688' }),
+        }),
+      })
+    )?.platform === '8.3.27.1688'
+  );
+  check(
+    'недоступный /health не роняет прогон',
+    (await pc.serverInfo({ url: 'http://test/mcp', fetchImpl: async () => { throw new Error('нет связи'); } })) === null
+  );
+  const stamped = pc.toEvidence({
+    findings: [],
+    sentinelResult: { status: 'found' },
+    info: { version: '0.16.0', platform: '8.3.27.1688' },
+  });
+  check(
+    'отметка попадает в запись часового',
+    stamped[0].includes('engine=bsl-context@0.16.0/8.3.27.1688'),
+    stamped[0]
+  );
+
+  // --- закрепление версии платформы ------------------------------------------
+  // Один сервер справки — одна версия платформы, а проектов на машине несколько. Без
+  // закрепления проект на другой версии молча проверяется чужой справкой, и находка
+  // «значения не существует» означает не дефект кода, а расхождение версий.
+  {
+    const verProj = join(WORK, 'pc-version-pin');
+    rmSync(verProj, { recursive: true, force: true });
+    mkdirSync(join(verProj, 'src'), { recursive: true });
+    writeFileSync(
+      join(verProj, '.1c-quality-gate.json'),
+      JSON.stringify({
+        platformContext: {
+          enabled: true,
+          url: 'http://127.0.0.1:1/mcp',
+          repo: 'x',
+          platformVersion: '8.3.25.1257',
+        },
+      }),
+      'utf8'
+    );
+    const bslFile = join(verProj, 'src', 'Module.bsl');
+    writeFileSync(bslFile, 'Процедура П() Экспорт\nКонецПроцедуры\n', 'utf8');
+    // Сервера нет: /health не ответит, версия неизвестна — закрепление не должно
+    // превращаться в отказ на ровном месте, иначе выключить его можно будет только удалением.
+    const res = run('tools/platform-context-run.mjs', ['--changed', bslFile], {
+      env: { CLAUDE_PROJECT_DIR: verProj },
+    });
+    check(
+      'неизвестная версия сервера не выдаётся за несовпадение',
+      !res.out.includes('platform_version_mismatch'),
+      res.out.trim().slice(0, 160)
+    );
+  }
+  check(
+    'чужая версия справки останавливает прогон',
+    pc.platformMismatch({ platformVersion: '8.3.25.1257' }, { platform: '8.3.27.1688' }) === true
+  );
+  check(
+    'совпадение версий прогону не мешает',
+    pc.platformMismatch({ platformVersion: '8.3.27.1688' }, { platform: '8.3.27.1688' }) === false
+  );
+  check(
+    'без закрепления версия сервера не проверяется',
+    pc.platformMismatch({ platformVersion: null }, { platform: '8.3.27.1688' }) === false
+  );
+  // Регрессия, стоившая полного заведения впустую: закрепление по ветке выбирало каталог
+  // 8.3.27.1688, ставило сервер, поднимало демон — и следующая же проверка объявляла его
+  // чужой версией, потому что сравнивала строки точно. Сравнение теперь одно на все места.
+  check(
+    'закрепление по ветке не выдаётся за несовпадение',
+    pc.platformMismatch({ platformVersion: '8.3.27' }, { platform: '8.3.27.1688' }) === false
+  );
+  check(
+    'соседняя ветка платформы остаётся несовпадением',
+    pc.platformMismatch({ platformVersion: '8.3.25' }, { platform: '8.3.27.1688' }) === true
+  );
+  check(
+    'неизвестная версия сервера не считается несовпадением',
+    pc.platformMismatch({ platformVersion: '8.3.25.1257' }, null) === false
+  );
+  check(
+    'версия платформы читается из любой ветки, не только 8.3',
+    (
+      await pc.serverInfo({
+        url: 'http://test/mcp',
+        fetchImpl: async () => ({
+          ok: true,
+          text: async () => JSON.stringify({ version: '0.16.0', platform_path: '/opt/1cv8/8.4.1.100' }),
+        }),
+      })
+    )?.platform === '8.4.1.100'
+  );
+
+  // --- правка без единого .bsl не выдаётся за проверенную ---------------------
+  // Цикл идёт по отфильтрованному списку, а проверка стояла на исходном: набор из одних XML
+  // давал ноль итераций и verdict=clean — ложный зелёный вердикт в движке, написанном
+  // против ложных зелёных вердиктов.
+  {
+    const xmlProj = join(WORK, 'pc-xml-only');
+    rmSync(xmlProj, { recursive: true, force: true });
+    mkdirSync(xmlProj, { recursive: true });
+    writeFileSync(
+      join(xmlProj, '.1c-quality-gate.json'),
+      // Порт 1 — соединение отвергается мгновенно: тест не должен зависеть от живого сервера.
+      JSON.stringify({ platformContext: { enabled: true, url: 'http://127.0.0.1:1/mcp', repo: 'x' } }),
+      'utf8'
+    );
+    const xmlFile = join(xmlProj, 'Catalog.xml');
+    writeFileSync(xmlFile, '<?xml version="1.0"?><MetaDataObject/>', 'utf8');
+    const res = run('tools/platform-context-run.mjs', ['--changed', xmlFile], {
+      env: { CLAUDE_PROJECT_DIR: xmlProj },
+    });
+    check(
+      'правка без .bsl отмечается пропуском, а не «чисто»',
+      res.out.includes('scope=platform-api') && res.out.includes('reason=no_bsl_files') && !res.out.includes('verdict=clean'),
+      res.out.trim().slice(0, 200)
+    );
+  }
+
+  // --- фикстуры -------------------------------------------------------------
+  const sentinelFixture = readFileSync(join(ROOT, 'assets', 'platform-context', 'sentinel-fixture.bsl'), 'utf8');
+  check(
+    'фикстура часового содержит несуществующее значение перечисления',
+    /ТипГруппыЭлементовОтбораКомпоновкиДанных\.Группа[^ИиЛлНн]/.test(sentinelFixture),
+    sentinelFixture.split('\n').find((l) => l.includes('ТипГруппыЭлементов')) || ''
+  );
+  check('контр-фикстура на месте', existsSync(join(ROOT, 'assets', 'platform-context', 'clean-fixture.bsl')));
+
+  // --- включённость и обязательность ----------------------------------------
+  // Контур заводит себя сам, поэтому «не настроен» перестало быть состоянием: выключение
+  // одно — явное `false`. Умолчание `'auto'` обязано означать РАБОТУ, иначе самозаведение
+  // не наступает никогда и мы возвращаемся к тихому пропуску.
+  check('умолчание auto означает работу', pc.isEnabled({ enabled: 'auto' }) === true);
+  check('явное true означает работу', pc.isEnabled({ enabled: true }) === true);
+  check('выключить можно только явным false', pc.isEnabled({ enabled: false }) === false);
+  check('пустая настройка не выключает контур', pc.isEnabled({}) === true);
+
+  check('required: true требует всегда', pc.isRequired({ required: true }, { enforceable: false }) === true);
+  check('required: false не требует никогда', pc.isRequired({ required: false }, { enforceable: true }) === false);
+  check(
+    'auto требует там, где контур выполним',
+    pc.isRequired({ required: 'auto' }, { enforceable: true }) === true
+  );
+  check(
+    'auto не требует там, где заводить нечем',
+    pc.isRequired({ required: 'auto' }, { enforceable: false }) === false
+  );
+  // Список невыполнимого закрытый: попади сюда «сервер не поднялся», и требование `auto`
+  // снималось бы любой поломкой — то есть не существовало бы.
+  check(
+    'невыполнимость — только отсутствие платформы и неподдержанная система',
+    [...pc.NOT_PROVISIONABLE].sort().join(',') === 'no_platform_install,unsupported_platform',
+    [...pc.NOT_PROVISIONABLE].join(',')
+  );
+  // Разделение по причине отказа, а не по строгости: незакрытое требование проекта и сорванная
+  // установка — разные вещи. Блокировать вторую значит ронять гейт команды на чужом сбое сети,
+  // а анализатор в такой ситуации всего лишь пишет `analyzer_unavailable` и возвращает код 1.
+  check(
+    'срыв установки и запуска под auto не блокирует',
+    !pc.blocksUnderAuto('download_failed') && !pc.blocksUnderAuto('start_timeout') && !pc.blocksUnderAuto('no_free_port')
+  );
+  check('отсутствие платформы под auto не блокирует', !pc.blocksUnderAuto('no_platform_install'));
+  check(
+    'незакрытое требование проекта блокирует',
+    pc.blocksUnderAuto('repo_required') &&
+      pc.blocksUnderAuto('platform_version_absent') &&
+      pc.blocksUnderAuto('server_unreachable')
+  );
+
+  // --- алиас конфигурации у чужого сервера ----------------------------------
+  check(
+    'сервер с источниками имён без алиаса не запускается',
+    pc.repoRequired({ sources: ['ut', 'bp'] }, { repo: null }) === true
+  );
+  check(
+    'заданный алиас снимает вопрос',
+    pc.repoRequired({ sources: ['ut'] }, { repo: 'ut' }) === false
+  );
+  check('сервер без источников алиаса не требует', pc.repoRequired({ sources: [] }, { repo: null }) === false);
+
+  // Пропуск обязан называть следующий шаг: машинная причина в следе адресована валидатору,
+  // а человеку, который про контур не знал, она не говорит ничего.
+  check(
+    'пропуск без платформы называет, чем его починить',
+    pc.explainFailure({ reason: 'no_platform_install' }, {}).includes('platformPath'),
+    pc.explainFailure({ reason: 'no_platform_install' }, {})
+  );
+  check(
+    'отказ по закреплённой версии перечисляет, что есть на машине',
+    pc.explainFailure({ reason: 'platform_version_absent', available: ['8.3.25.1257'] }, { platformVersion: '8.3.27' })
+      .includes('8.3.25.1257')
+  );
+
+  const scopesMod = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-scopes.mjs')).href);
+  check(
+    'скоуп зарегистрирован и назвал свой инструмент',
+    scopesMod.SCOPES['platform-api']?.tool === 'tools/platform-context-run.mjs',
+    JSON.stringify(scopesMod.SCOPES['platform-api'] || null)
+  );
+
+  // --- валидатор следа принимает то, что печатает инструмент -----------------
+  // Ровно та поломка, которую комментарий к DIMENSIONS называет вслух: список пополняется
+  // вместе с инструментом, иначе плагин ругается на собственный вывод. Проверяем весь
+  // напечатанный блок целиком, а не по одной строке.
+  {
+    const evProj = join(WORK, 'pc-evidence');
+    rmSync(evProj, { recursive: true, force: true });
+    mkdirSync(evProj, { recursive: true });
+    writeFileSync(
+      join(evProj, '.1c-quality-gate.json'),
+      JSON.stringify({ platformContext: { enabled: true, url: 'http://127.0.0.1:1/mcp', repo: 'x' } }),
+      'utf8'
+    );
+    const report = join(evProj, 'evidence.md');
+    writeFileSync(
+      report,
+      '## quality evidence\n\n' +
+        '[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, config=custom:platformContext]\n' +
+        '[qg sentinel: target=v8std, id=std454, status=found]\n' +
+        pc
+          .toEvidence({
+            findings: norm.findings,
+            sentinelResult: { status: 'found' },
+            degraded: ['symbols_unavailable'],
+            unchecked: [{ file: 'x.bsl', reason: 'timeout' }],
+          })
+          .join('\n') +
+        '\n',
+      'utf8'
+    );
+    const res = run('tools/evidence-validator.mjs', [report], { env: { CLAUDE_PROJECT_DIR: evProj } });
+    check(
+      'валидатор принимает след, напечатанный движком',
+      !/ОШИБКА|ПРЕДУПРЕЖДЕНИЕ/.test(res.out),
+      res.out.trim().slice(0, 300)
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+section('Самозаведение контура платформенного API');
+{
+  const boot = await import(pathToFileURL(join(ROOT, 'tools', 'platform-context-bootstrap.mjs')).href);
+
+  // --- закреплённый релиз ----------------------------------------------------
+  // Закрепление здесь значит ровно то же, что у анализатора: движок, меняющийся между
+  // прогонами, делает вердикт невоспроизводимым. Сумма проверяется до запуска, а не после.
+  const man = boot.readManifest();
+  check('версия сервера закреплена', /^\d+\.\d+\.\d+$/.test(man.version), man.version);
+  for (const key of ['win32-x64', 'linux-x64', 'darwin-arm64']) {
+    const t = man.targets[key];
+    check(
+      `цель ${key} закреплена суммой, размером и именем каталога в архиве`,
+      Boolean(t) && /^[0-9a-f]{64}$/.test(t.sha256) && Number(t.size) > 0 && Boolean(t.asset) && Boolean(t.dir),
+      JSON.stringify(t || null)
+    );
+  }
+  check(
+    'адрес архива собирается из манифеста, а не зашит',
+    boot.assetUrl(man, man.targets['win32-x64']) ===
+      `https://github.com/Regsorm/bsl-context/releases/download/v${man.version}/${man.targets['win32-x64'].asset}`
+  );
+
+  // --- распаковка ------------------------------------------------------------
+  // Тот `tar`, что приходит с Git for Windows, — GNU, и на zip отвечает «This does not look
+  // like a tar archive». Системный bsdtar zip читает, поэтому путь берётся явно, а не по PATH:
+  // в PATH разработчика первым стоит как раз GNU.
+  const winCmds = boot.extractCommands('a.zip', 'dst', 'win32', { SystemRoot: String.raw`C:\Windows` });
+  check(
+    'на Windows распаковка идёт системным tar, а не первым из PATH',
+    winCmds[0].cmd.toLowerCase().includes('system32') && winCmds[0].cmd.toLowerCase().endsWith('tar.exe'),
+    winCmds[0].cmd
+  );
+  check('у распаковки есть запасной путь через PowerShell', winCmds[1]?.cmd === 'powershell.exe');
+  check(
+    'на posix архив распаковывается tar -xzf',
+    boot.extractCommands('a.tar.gz', 'dst', 'linux', {})[0].args.join(' ') === '-xzf a.tar.gz -C dst'
+  );
+
+  // --- поиск установленной платформы -----------------------------------------
+  // Признак — не имя каталога, а лежащая рядом справка: клиентская установка без `hbk`
+  // подняла бы сервер, который на любой вопрос отвечает «индекс не загружен».
+  const helpAt = new Set([
+    join('R', '8.3.27.1688', boot.HELP_FILE),
+    join('R', '8.3.25.1257', 'bin', boot.HELP_FILE),
+  ]);
+  const found = boot.discoverPlatforms({
+    roots: ['R'],
+    list: () => ['8.3.27.1688', '8.3.25.1257', '8.3.9.9', 'common'],
+    exists: (p) => helpAt.has(p),
+  });
+  check('версия без справки платформы не годится', !found.some((p) => p.version === '8.3.9.9'), JSON.stringify(found));
+  check('каталог не-версия пропускается', !found.some((p) => p.version === 'common'));
+  check('справка ищется и в каталоге версии, и в bin', found.length === 2, JSON.stringify(found));
+  check('старшая версия идёт первой', found[0]?.version === '8.3.27.1688');
+  check(
+    'на Windows просматриваются обе ветки Program Files',
+    boot.platformRoots('win32', { ProgramFiles: 'A', 'ProgramFiles(x86)': 'B' }).join('|') ===
+      [join('A', '1cv8'), join('B', '1cv8')].join('|')
+  );
+
+  const two = [
+    { version: '8.3.27.1688', path: 'b' },
+    { version: '8.3.25.1257', path: 'a' },
+  ];
+  check('без закрепления берётся старшая', boot.choosePlatform(two)?.version === '8.3.27.1688');
+  check('закрепление до сборки работает точным совпадением', boot.choosePlatform(two, '8.3.25.1257')?.path === 'a');
+  check('закрепление без номера сборки работает префиксом', boot.choosePlatform(two, '8.3.27')?.path === 'b');
+  // Подстановка старшей вместо закреплённой — это проверка чужой справкой: находки будут
+  // выглядеть дефектами кода, хотя расходятся версии.
+  check('закреплённая версия не подменяется имеющейся', boot.choosePlatform(two, '8.3.24') === null);
+
+  // --- конфигурация своего сервера -------------------------------------------
+  const toml = boot.renderConfigToml({
+    port: 8107,
+    platformPath: String.raw`C:\Program Files\1cv8\8.3.27.1688`,
+    logDir: String.raw`C:\logs`,
+  });
+  check(
+    'путь Windows пишется литералом TOML, без экранирования слэшей',
+    toml.includes(String.raw`platform_path = 'C:\Program Files\1cv8\8.3.27.1688'`),
+    toml.split('\n').find((l) => l.startsWith('platform_path')) || ''
+  );
+  check('порт попадает в конфиг', toml.includes('port = 8107'));
+  {
+    // Демонов бывает несколько — по одному на версию платформы. С общим файлом второй запуск
+    // переписывал бы конфиг первого, и запись в реестре описывала бы чужой сервер.
+    const cfgRoot = join(WORK, 'pc-configs');
+    rmSync(cfgRoot, { recursive: true, force: true });
+    const first = boot.ensureConfigFile({ root: cfgRoot, port: 8007, platformPath: 'ПерваяПлатформа', level: 2 });
+    const second = boot.ensureConfigFile({ root: cfgRoot, port: 8008, platformPath: 'ВтораяПлатформа', level: 2 });
+    check('у каждого демона свой файл конфигурации', first.path !== second.path, `${first.path} | ${second.path}`);
+    check(
+      'запуск соседа не переписывает конфиг первого',
+      readFileSync(first.path, 'utf8').includes('ПерваяПлатформа') &&
+        readFileSync(second.path, 'utf8').includes('ВтораяПлатформа')
+    );
+    check('повторная запись того же содержимого не считается изменением', boot.ensureConfigFile({ root: cfgRoot, port: 8007, platformPath: 'ПерваяПлатформа', level: 2 }).changed === false);
+  }
+  // Источников имён конфигурации в своём конфиге нет намеренно: они потребовали бы `repo` в
+  // каждом запросе, а имена конфигурации закрывает анализатор — здесь нужна платформа.
+  check('свой сервер поднимается без источников имён конфигурации', !/symbol_source/.test(toml), toml);
+
+  // --- пригодность найденного сервера ----------------------------------------
+  const okHealth = { version: '0.16.0', index_loaded: true, platform_path: String.raw`C:\1cv8\8.3.27.1688` };
+  check('сервер с разобранной справкой годится', boot.healthSuitable(okHealth).ok === true);
+  check(
+    'сервер без разобранной справки не годится',
+    boot.healthSuitable({ ...okHealth, index_loaded: false }).reason === 'index_not_loaded'
+  );
+  check(
+    'сервер чужой версии платформы не годится',
+    boot.healthSuitable(okHealth, { platformVersion: '8.3.25.1257' }).reason === 'platform_version_mismatch'
+  );
+  check(
+    'закрепление без номера сборки принимает сервер той же ветки',
+    boot.healthSuitable(okHealth, { platformVersion: '8.3.27' }).ok === true
+  );
+  check('молчащий сервер не годится', boot.healthSuitable(null).reason === 'unreachable');
+  check(
+    'сервер с чужими конфигурациями без алиаса не годится',
+    boot.healthSuitable({ ...okHealth, symbol_sources: { ut: 'x' } }).reason === 'repo_required'
+  );
+  check(
+    'тот же сервер с указанным алиасом годится',
+    boot.healthSuitable({ ...okHealth, symbol_sources: { ut: 'x' } }, { repo: 'ut' }).ok === true
+  );
+  check('алиасы конфигураций читаются из /health', boot.sourcesOf({ symbol_sources: { ut: 'x', bp: 'y' } }).join(',') === 'ut,bp');
+  check('сервер без источников имён отдаёт пустой список', boot.sourcesOf({}).length === 0);
+
+  // --- порт и состояние демона -----------------------------------------------
+  check('берётся первый свободный порт', (await boot.pickPort(8100, { probe: async (p) => p === 8102 })) === 8102);
+  check('всё занято — честный отказ, а не молчаливый ноль', (await boot.pickPort(8100, { probe: async () => false })) === null);
+
+  {
+    const stRoot = join(WORK, 'pc-state');
+    rmSync(stRoot, { recursive: true, force: true });
+    // Реестр по версиям платформы, а не одна запись: один сервер отдаёт справку одной версии,
+    // и с единственной записью два проекта на разных версиях вытесняли бы демон друг друга,
+    // оставляя предыдущий жить процессом, за которым уже никто не следит.
+    boot.saveServer(stRoot, { pid: 4242, url: 'http://127.0.0.1:8107/mcp', platform: '8.3.27.1688' });
+    boot.saveServer(stRoot, { pid: 4343, url: 'http://127.0.0.1:8108/mcp', platform: '8.3.25.1257' });
+    check('демоны разных версий платформы живут парой', boot.readServers(stRoot).length === 2, JSON.stringify(boot.readServers(stRoot)));
+    boot.saveServer(stRoot, { pid: 4444, url: 'http://127.0.0.1:8109/mcp', platform: '8.3.27.1688' });
+    check('перезапуск той же версии заменяет её запись, а не добавляет', boot.readServers(stRoot).length === 2);
+    const killed = [];
+    const alive = async ({ url }) => ({
+      version: '0.16.0',
+      index_loaded: true,
+      platform_path: url.includes('8108') ? 'C:\\1cv8\\8.3.25.1257' : 'C:\\1cv8\\8.3.27.1688',
+    });
+    const stopped = await boot.stopServer({ root: stRoot, killImpl: (pid) => { killed.push(pid); }, probe: alive });
+    check(
+      'гасятся все процессы из реестра',
+      stopped.ok === true && killed.sort().join(',') === '4343,4444',
+      killed.join(',')
+    );
+    check('после остановки реестр пуст', boot.readServers(stRoot).length === 0);
+
+    // Номер процесса система переиспользует: после перезагрузки записанный pid принадлежит
+    // постороннему. Убивать по записи, за которой уже никто не отвечает, — это убить чужое.
+    const deadRoot = join(WORK, 'pc-state-dead');
+    rmSync(deadRoot, { recursive: true, force: true });
+    boot.saveServer(deadRoot, { pid: 5555, url: 'http://127.0.0.1:8110/mcp', platform: '8.3.27.1688', version: '0.16.0' });
+    const deadRes = await boot.stopServer({
+      root: deadRoot,
+      killImpl: () => { throw new Error('гасить было нечего, а вызов случился'); },
+      probe: async () => null,
+    });
+    check(
+      'мёртвая запись не убивает переиспользованный номер процесса',
+      deadRes.ok === true && deadRes.stopped.length === 0 && deadRes.stale.join(',') === '5555',
+      JSON.stringify(deadRes)
+    );
+
+    // На том же порту мог подняться чужой сервер — по адресу отвечает не наш.
+    const otherRoot = join(WORK, 'pc-state-other');
+    rmSync(otherRoot, { recursive: true, force: true });
+    boot.saveServer(otherRoot, { pid: 6666, url: 'http://127.0.0.1:8111/mcp', platform: '8.3.27.1688', version: '0.16.0' });
+    const otherRes = await boot.stopServer({
+      root: otherRoot,
+      killImpl: () => { throw new Error('чужой сервер гасить нельзя'); },
+      probe: async () => ({ version: '0.16.0', index_loaded: true, platform_path: 'C:\\1cv8\\8.3.25.1257' }),
+    });
+    check('чужой сервер на нашем порту не гасится', otherRes.ok === true && otherRes.stale.join(',') === '6666');
+    // Чужой сервер мог быть поднят на машину целиком: погасить его ради своей уборки значит
+    // сломать работу соседа.
+    check(
+      'чужой сервер гасить нечем',
+      (await boot.stopServer({ root: join(WORK, 'pc-state-none') })).reason === 'not_started_by_us'
+    );
+  }
+
+  // --- решение о заведении: чей сервер брать и когда поднимать свой -----------
+  {
+    const health = (platform, extra = {}) => ({
+      ok: true,
+      text: async () => JSON.stringify({ version: '0.16.0', platform_path: `C:\\1cv8\\${platform}`, index_loaded: true, ...extra }),
+    });
+    const fetchFor = (map) => async (u) => {
+      const hit = map[String(u)];
+      if (hit) return hit;
+      throw new Error('нет связи');
+    };
+    const bare = join(WORK, 'pc-ensure');
+    rmSync(bare, { recursive: true, force: true });
+    mkdirSync(bare, { recursive: true });
+
+    const explicit = await boot.ensureServer(
+      { url: 'http://server:1/mcp' },
+      { root: bare, fetchImpl: fetchFor({ 'http://server:1/health': health('8.3.27.1688') }) }
+    );
+    check('явный адрес используется как есть', explicit.ok === true && explicit.own === false, JSON.stringify(explicit));
+
+    let startedInstead = false;
+    const explicitDead = await boot.ensureServer(
+      { url: 'http://server:2/mcp' },
+      {
+        root: bare,
+        fetchImpl: fetchFor({}),
+        discover: () => [{ version: '8.3.27.1688', path: 'P' }],
+        installImpl: async () => ({ ok: true, path: 'bin' }),
+        startImpl: async () => { startedInstead = true; return { ok: true, url: 'http://own/mcp' }; },
+      }
+    );
+    // Подменить чужой адрес своим демоном значит проверить код не тем, чем просил проект.
+    check(
+      'адрес, заданный проектом, не подменяется своим демоном',
+      explicitDead.ok === false && explicitDead.reason === 'server_unreachable' && startedInstead === false,
+      JSON.stringify(explicitDead)
+    );
+
+    const shared = await boot.ensureServer(
+      {},
+      { root: bare, fetchImpl: fetchFor({ 'http://127.0.0.1:8007/health': health('8.3.27.1688') }) }
+    );
+    check(
+      'уже поднятый сервер на общем порту подхватывается без установки',
+      shared.ok === true && shared.own === false && shared.url === 'http://127.0.0.1:8007/mcp',
+      JSON.stringify(shared)
+    );
+
+    // Машина с несколькими проектами: общий сервер настроен на ЧУЖИЕ конфигурации и без
+    // алиаса отвечает отказом. Подставить чужой алиас нельзя, сдаться — значит оставить
+    // контур невыполненным там, где он выполним. Поднимается свой, которому алиас не нужен.
+    let ownStarted = false;
+    const foreignRepo = await boot.ensureServer(
+      {},
+      {
+        root: bare,
+        fetchImpl: fetchFor({ 'http://127.0.0.1:8007/health': health('8.3.27.1688', { symbol_sources: { ut: 'x' } }) }),
+        discover: () => [{ version: '8.3.27.1688', path: 'P' }],
+        installImpl: async () => ({ ok: true, path: 'bin' }),
+        portImpl: async () => 8108,
+        startImpl: async (opts) => {
+          ownStarted = true;
+          return { ok: true, url: boot.urlForPort(opts.port), health: { version: '0.16.0', index_loaded: true } };
+        },
+      }
+    );
+    check(
+      'чужой сервер, требующий алиас, не отменяет заведения своего',
+      foreignRepo.ok === true && ownStarted === true && foreignRepo.own === true,
+      JSON.stringify(foreignRepo)
+    );
+
+    let downloaded = false;
+    const noPlatform = await boot.ensureServer(
+      {},
+      {
+        root: bare,
+        fetchImpl: fetchFor({}),
+        discover: () => [],
+        installImpl: async () => { downloaded = true; return { ok: true, path: 'bin' }; },
+      }
+    );
+    check(
+      'без установленной платформы контур не заводится и ничего не качает',
+      noPlatform.reason === 'no_platform_install' && downloaded === false,
+      JSON.stringify(noPlatform)
+    );
+
+    const wrongVersion = await boot.ensureServer(
+      { platformVersion: '8.3.27' },
+      { root: bare, fetchImpl: fetchFor({}), discover: () => [{ version: '8.3.25.1257', path: 'P' }] }
+    );
+    check(
+      'закреплённая версия не подменяется той, что есть на машине',
+      wrongVersion.reason === 'platform_version_absent' && wrongVersion.available.join(',') === '8.3.25.1257',
+      JSON.stringify(wrongVersion)
+    );
+
+    // Чужой сервер на общем порту может быть поднят под другую версию платформы: подхватить
+    // его значит получить находки, которых в коде нет.
+    const foreignVersion = await boot.ensureServer(
+      { platformVersion: '8.3.25.1257' },
+      {
+        root: bare,
+        fetchImpl: fetchFor({ 'http://127.0.0.1:8007/health': health('8.3.27.1688') }),
+        discover: () => [],
+      }
+    );
+    check(
+      'чужой сервер с другой версией платформы не подхватывается',
+      foreignVersion.ok === false && foreignVersion.reason === 'no_platform_install',
+      JSON.stringify(foreignVersion)
+    );
+
+    const noInstall = await boot.ensureServer(
+      { autoInstall: false },
+      { root: bare, fetchImpl: fetchFor({}), discover: () => [{ version: '8.3.27.1688', path: 'P' }] }
+    );
+    check('запрет автоустановки соблюдается', noInstall.reason === 'not_installed', JSON.stringify(noInstall));
+
+    const noStart = await boot.ensureServer(
+      { autoStart: false },
+      { root: bare, fetchImpl: fetchFor({}), discover: () => [{ version: '8.3.27.1688', path: 'P' }] }
+    );
+    check('запрет автозапуска соблюдается', noStart.reason === 'server_absent', JSON.stringify(noStart));
+
+    const provRoot = join(WORK, 'pc-provision');
+    rmSync(provRoot, { recursive: true, force: true });
+    mkdirSync(provRoot, { recursive: true });
+    let configSeen = null;
+    const provisioned = await boot.ensureServer(
+      { level: 2 },
+      {
+        root: provRoot,
+        fetchImpl: fetchFor({}),
+        discover: () => [{ version: '8.3.27.1688', path: join('P', '8.3.27.1688') }],
+        installImpl: async () => ({ ok: true, path: join(provRoot, 'bin') }),
+        portImpl: async () => 8107,
+        startImpl: async (opts) => {
+          configSeen = opts.configFile;
+          return { ok: true, url: boot.urlForPort(opts.port), health: { version: '0.16.0', index_loaded: true } };
+        },
+      }
+    );
+    check(
+      'на чистой машине контур заводит себя сам',
+      provisioned.ok === true && provisioned.started === true && provisioned.url === 'http://127.0.0.1:8107/mcp',
+      JSON.stringify(provisioned)
+    );
+    check(
+      'в конфиг своего сервера уходит найденная платформа',
+      configSeen && readFileSync(configSeen, 'utf8').includes(join('P', '8.3.27.1688')),
+      configSeen ? readFileSync(configSeen, 'utf8') : 'конфиг не записан'
+    );
+  }
+
+  // --- движок назван там, где его будут искать -------------------------------
+  // Контур, о котором не знает оркестратор, не запускается: таблица инструментов — это и есть
+  // список того, что прогон обязан прогнать. А субагент верификации без явного указания на
+  // движок уходит в ручную сверку через MCP: модель проверяет то, о чём догадалась спросить.
+  {
+    const gateSkill = readFileSync(join(ROOT, 'skills', 'quality-gate', 'SKILL.md'), 'utf8');
+    check(
+      'оркестратор называет движок в таблице инструментов',
+      /\|\s*`platform-api`\s*\|\s*`tools\/platform-context-run\.mjs`/.test(gateSkill),
+      gateSkill.split('\n').filter((l) => l.includes('platform-api')).join(' / ') || 'упоминаний нет'
+    );
+    check(
+      'оркестратор требует отчёта о сверке с платформой',
+      /сверка со справочником платформы обязательна/i.test(gateSkill)
+    );
+    const verifier = readFileSync(join(ROOT, 'agents', 'bsl-verifier.md'), 'utf8');
+    check(
+      'субагент верификации гоняет движок, а не спрашивает MCP',
+      verifier.includes('tools/platform-context-run.mjs') && /запасной путь/.test(verifier),
+      verifier.split('\n').filter((l) => l.includes('platform-context-run')).join(' / ') || 'упоминаний нет'
+    );
+  }
+
+  // --- гейт опирается на движок, а не только упоминает его -------------------
+  // Пока молчание о контуре ничего не стоит, контур не выполняется: отчёт без единого
+  // упоминания движка неотличим от отчёта, где движок промолчал. Требуется отчёт, а не успех.
+  {
+    const armProj = join(WORK, 'pc-required');
+    rmSync(armProj, { recursive: true, force: true });
+    mkdirSync(join(armProj, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+    const armEnv = { CLAUDE_PROJECT_DIR: armProj };
+    const armFile = join(armProj, 'src', 'cf', 'CommonModules', 'М', 'Ext', 'Module.bsl');
+    writeFileSync(armFile, 'Процедура Пример()\nКонецПроцедуры\n', 'utf8');
+    execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-arm.mjs')], {
+      input: JSON.stringify({ session_id: 'PC1', cwd: armProj, tool_input: { file_path: armFile } }),
+      encoding: 'utf8',
+      env: { ...process.env, ...armEnv },
+    });
+
+    const head =
+      '## quality evidence\n\n' +
+      '[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, config=default]\n' +
+      '[qg sentinel: target=v8std, id=std454, status=found]\n' +
+      '[qg not_verified: dimension=compilation, reason=no_platform]\n' +
+      '[qg applied: layer=code, scope=naming-std454, ids=[std454], verdict=clean]\n';
+    const write = (name, body) => {
+      const path = join(armProj, name);
+      writeFileSync(path, body, 'utf8');
+      return path;
+    };
+
+    // Требование живёт в строгом режиме: именно им проверяется след при снятии гейта.
+    const silent = run('tools/evidence-validator.mjs', [write('ev-silent.md', head), '--session', 'PC1', '--gate'], { env: armEnv });
+    check(
+      'отчёт по модулю без единого упоминания движка отвергается',
+      /ОШИБКА/.test(silent.out) && silent.out.includes('справочником платформы'),
+      silent.out.trim().slice(0, 200)
+    );
+
+    // Пропуск с причиной — законный исход: на машине без 1С сверять нечем, и движок пишет об
+    // этом сам. Требование к отчёту, а не к успеху.
+    const skipped = run(
+      'tools/evidence-validator.mjs',
+      [
+        write(
+          'ev-skipped.md',
+          head + '[qg skipped: layer=code, scope=platform-api, planned=[pc:*], reason=no_platform_install]\n'
+        ),
+        '--session',
+        'PC1',
+        '--gate',
+      ],
+      { env: armEnv }
+    );
+    check(
+      'заявленный пропуск движка отчёт не портит',
+      !/справочником платформы/.test(skipped.out),
+      skipped.out.trim().slice(0, 200)
+    );
+  }
+
+  // --- гонка за порт: чужой процесс успел раньше -----------------------------
+  // Наш демон падает на bind, а отвечает чужой. Записать его pid в состояние нельзя: при
+  // остановке этот номер уже принадлежал бы другой программе, и уборка убила бы постороннее.
+  {
+    const raceRoot = join(WORK, 'pc-race');
+    rmSync(raceRoot, { recursive: true, force: true });
+    mkdirSync(raceRoot, { recursive: true });
+    const binStub = join(raceRoot, 'stub.exe');
+    writeFileSync(binStub, 'не исполняется, важен факт наличия', 'utf8');
+    const started = await boot.startServer({
+      root: raceRoot,
+      binary: binStub,
+      configFile: join(raceRoot, 'config.toml'),
+      port: 8109,
+      spawnImpl: () => ({ pid: 999999, exitCode: 1, signalCode: null, unref() {} }),
+      fetchImpl: async () => ({ ok: true, text: async () => JSON.stringify({ version: '0.16.0', index_loaded: true }) }),
+    });
+    check('упавший демон при живом порте не выдаётся за свой', started.ok === true && started.own === false, JSON.stringify(started));
+    check('состояние на чужой процесс не записывается', boot.readServers(raceRoot).length === 0);
+  }
+
+  // --- сквозной прогон против поддельного сервера ----------------------------
+  // Весь путь целиком: заведение по адресу, часовой, разбор ответа, след, код возврата.
+  // Сервер поддельный и локальный — тесты не должны зависеть ни от сети, ни от установленной
+  // платформы, иначе они зелены ровно на машине разработчика.
+  {
+    const { createServer } = await import('node:http');
+    const { execFile } = await import('node:child_process');
+    const seen = [];
+    const srv = createServer((req, res) => {
+      if (String(req.url).startsWith('/health')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ version: '0.16.0', platform_path: 'C:\\1cv8\\8.3.27.1688', index_loaded: true }));
+        return;
+      }
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        let rpc = {};
+        try { rpc = JSON.parse(body); } catch { /* ниже ответим отказом разбора */ }
+        const source = String(rpc?.params?.arguments?.module || '');
+        seen.push(rpc?.params?.arguments?.module_path || '');
+        const errors = source.includes('ТипГруппыЭлементовОтбораКомпоновкиДанных')
+          ? [{ line: 5, kind: 'unknown_enum_value', confidence: 'high', message: 'значения перечисления нет' }]
+          : [{ line: 3, kind: 'unknown_type_member', confidence: 'high', message: 'у типа Массив нет члена Сортировать' }];
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: rpc?.id ?? 1,
+            result: {
+              content: [
+                { type: 'text', text: JSON.stringify({ ok: true, errors, tree_parsed: true, symbols_available: true }) },
+              ],
+            },
+          })
+        );
+      });
+    });
+    await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    const port = srv.address().port;
+
+    const e2eProj = join(WORK, 'pc-e2e');
+    rmSync(e2eProj, { recursive: true, force: true });
+    mkdirSync(join(e2eProj, 'src'), { recursive: true });
+    const module = join(e2eProj, 'src', 'Module.bsl');
+    writeFileSync(module, 'Процедура П() Экспорт\n\tМассив = Новый Массив;\n\tМассив.Сортировать();\nКонецПроцедуры\n', 'utf8');
+
+    // Запуск асинхронный намеренно: execFileSync блокирует цикл событий, и поддельный сервер
+    // в этом же процессе не успел бы ответить.
+    const done = await new Promise((resolve) => {
+      execFile(
+        process.execPath,
+        [join(ROOT, 'tools', 'platform-context-run.mjs'), '--changed', module],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            CLAUDE_PROJECT_DIR: e2eProj,
+            QG_PLATFORM_CONTEXT_URL: `http://127.0.0.1:${port}/mcp`,
+          },
+        },
+        (err, stdout, stderr) => resolve({ code: err?.code ?? 0, out: `${stdout}${stderr}` })
+      );
+    });
+    srv.close();
+
+    check(
+      'сквозной прогон: часовой подтверждён по живому ответу',
+      done.out.includes('[qg sentinel: target=platform-api, id=unknown_enum_value, status=found'),
+      done.out.trim().slice(0, 300)
+    );
+    check(
+      'сквозной прогон: находка платформы попала в след',
+      done.out.includes('verdict=violation:pc:unknown_type_member'),
+      done.out.trim().slice(0, 300)
+    );
+    check('сквозной прогон: версия платформы сервера отмечена', done.out.includes('engine=bsl-context@0.16.0/8.3.27.1688'));
+    // Код возврата с выводом: падение уже отработавшего процесса (весь след напечатан, а код
+    // ненулевой) без вывода не разобрать — именно так выглядел обрыв на сборочном агенте.
+    check('сквозной прогон завершается кодом 0', done.code === 0, `код ${done.code}; вывод: ${done.out.trim().slice(-300)}`);
+    // Путь модуля обязателен в запросе: без него сервер не отличает модуль объекта от
+    // произвольного фрагмента и выдаёт ложные находки по реквизитам.
+    check('сквозной прогон: путь модуля передан серверу', seen.some((p) => p && p.includes('Module.bsl')), JSON.stringify(seen));
+  }
 }
 
 // ---------------------------------------------------------------------------
