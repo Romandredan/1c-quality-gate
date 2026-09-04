@@ -292,6 +292,7 @@ export const QG_IDS = {
   'qg:SKD-PARAM-VT-COLLISION': { tool: 'tools/xml/skd-validate.py' },
   'qg:SKD-GROUP-NONAGGREGATE-FIELD': { tool: 'tools/xml/skd-validate.py' },
   'qg:SKD-GROUP-EMPTY-SELECTION': { tool: 'tools/xml/skd-validate.py' },
+  'qg:CFE-TYPE-REF-NOT-ADOPTED': { tool: 'tools/xml/cfe-validate.py' },
 
   // --- код, инструментальные -----------------------------------------------
   'qg:QRY-ALIAS-SHADOWS-FIELD': { tool: 'tools/query-lint.mjs' },
