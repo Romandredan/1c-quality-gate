@@ -183,6 +183,24 @@ export const SCOPES = {
     tool: null,
     about: 'состязательный аудит слоя 3 (запускается только по согласию пользователя)',
   },
+  // Проходы по каталогу антипаттернов. До этой записи два самых объёмных справочника
+  // контура читались «всегда», но след не оставляли: в 25 живых отчётах ни одной находки
+  // и ни одной записи — отличить «код чист» от «проход не делался» было нечем.
+  // `tool: null` временно: аттестацию результата читателя вводит tools/catalog.mjs.
+  'ai-antipatterns': {
+    layer: 'code',
+    tool: null,
+    about: 'антипаттерны кода, порождаемого моделью (карточки qg:AI-*)',
+    granularity: 'files',
+    applies: ['.bsl', '.os'],
+  },
+  'platform-antipatterns': {
+    layer: 'code',
+    tool: null,
+    about: 'антипаттерны производительности и механики платформы без инструмента (карточки qg:BSL-* с tool: null)',
+    granularity: 'files',
+    applies: ['.bsl', '.os'],
+  },
 
   // --- контур arch ---------------------------------------------------------
   'module-responsibility': {
@@ -331,6 +349,22 @@ export const QG_IDS = {
   'qg:QRY-EXECUTED': { tool: null },
   'qg:API-MODULE': { tool: null },
   'qg:API-SIGNATURE': { tool: null },
+
+  // Платформенные антипаттерны, у которых инструмента нет: до появления каталога они
+  // существовали только заголовками справочника и в след попасть не могли.
+  'qg:BSL-QUERY-IN-LOOP': { tool: null },
+  'qg:BSL-SUBQUERY-IN-SELECT': { tool: null },
+  'qg:BSL-CORRELATED-SUBQUERY': { tool: null },
+  'qg:BSL-TEMPTABLE-NO-INDEX': { tool: null },
+  'qg:BSL-VT-FILTER-IN-WHERE': { tool: null },
+  'qg:BSL-NO-TOP-LIMIT': { tool: null },
+  'qg:BSL-MULTI-SERVER-CALLS': { tool: null },
+  'qg:BSL-CONTEXT-CALL-UNNEEDED': { tool: null },
+  'qg:BSL-TXN-INSIDE-TRY': { tool: null },
+  'qg:BSL-MESSAGE-AS-NOTIFY': { tool: null },
+  'qg:BSL-NO-CACHE': { tool: null },
+  'qg:BSL-NESTED-LOOP-SEARCH': { tool: null },
+  'qg:BSL-DEEP-NESTING': { tool: null },
 
   // --- архитектура: состав сверяется тестом с signs-map.json ---------------
   ...Object.fromEntries(ARCH_SIGNS),

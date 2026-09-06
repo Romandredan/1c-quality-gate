@@ -3768,6 +3768,21 @@ section('Словарь проверок — закрытый список scope
     Object.values(scopes.RENAMED).every((v) => scopes.isKnownScope(v)), Object.values(scopes.RENAMED).join(', '));
 }
 
+{
+  const scopesMod = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-scopes.mjs')).href);
+  for (const s of ['ai-antipatterns', 'platform-antipatterns']) {
+    check(`scope ${s} есть в словаре и относится к слою code`, scopesMod.SCOPES[s]?.layer === 'code');
+  }
+  const PLATFORM_MODEL_IDS = [
+    'qg:BSL-QUERY-IN-LOOP', 'qg:BSL-SUBQUERY-IN-SELECT', 'qg:BSL-CORRELATED-SUBQUERY',
+    'qg:BSL-TEMPTABLE-NO-INDEX', 'qg:BSL-VT-FILTER-IN-WHERE', 'qg:BSL-NO-TOP-LIMIT',
+    'qg:BSL-MULTI-SERVER-CALLS', 'qg:BSL-CONTEXT-CALL-UNNEEDED', 'qg:BSL-TXN-INSIDE-TRY',
+    'qg:BSL-MESSAGE-AS-NOTIFY', 'qg:BSL-NO-CACHE', 'qg:BSL-NESTED-LOOP-SEARCH', 'qg:BSL-DEEP-NESTING',
+  ];
+  const missing = PLATFORM_MODEL_IDS.filter((id) => !scopesMod.isKnownQgId(id));
+  check('платформенные антипаттерны без инструмента получили идентификаторы', missing.length === 0, missing.join(', '));
+}
+
 // ---------------------------------------------------------------------------
 section('Голый вызов метода, объявление которого исчезло в этой правке');
 
