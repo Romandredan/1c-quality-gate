@@ -143,6 +143,16 @@ export const SCOPES = {
     granularity: 'files',
     applies: ['.bsl']
   },
+  // Полнота разбора, а не его форма: `ARCH-A2` контура архитектуры судит о том, стоило ли
+  // вообще писать цепочку вместо диспетчера, здесь же спрашивается только одно — закрыт ли
+  // перебор веткой на случай значения, которого автор не предусмотрел.
+  'dispatch-fallback': {
+    layer: 'code',
+    tool: 'tools/bsl-lint.mjs',
+    about: 'перебор значений перечисления или типов по веткам, не закрытый веткой «Иначе»',
+    granularity: 'files',
+    applies: ['.bsl', '.os']
+  },
   'api-verification': {
     layer: 'code',
     tool: null,
@@ -271,8 +281,8 @@ export function isKnownScope(scope) {
  * `tool` — тот же смысл, что в SCOPES: непустой означает «строку печатает инструмент,
  * заявлять её руками нельзя»; null — признак проверяет модель по чеклисту.
  */
-const ARCH_SIGNS = Array.from({ length: 11 }, (_, i) => [`qg:ARCH-A${i + 1}`, { tool: null }]);
-const AI_SIGNS = Array.from({ length: 21 }, (_, i) => [`qg:AI-${String(i + 1).padStart(2, '0')}`, { tool: null }]);
+const ARCH_SIGNS = Array.from({ length: 12 }, (_, i) => [`qg:ARCH-A${i + 1}`, { tool: null }]);
+const AI_SIGNS = Array.from({ length: 22 }, (_, i) => [`qg:AI-${String(i + 1).padStart(2, '0')}`, { tool: null }]);
 
 /** @type {Record<string, { tool: string|null }>} */
 export const QG_IDS = {
@@ -303,6 +313,7 @@ export const QG_IDS = {
   'qg:BSL-UNBOUNDED-STRING-COLUMN': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-REF-DOT-ACCESS': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-FORM-ATTR-SHADOW': { tool: 'tools/bsl-lint.mjs' },
+  'qg:BSL-DISPATCH-NO-FALLBACK': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-STALE-LOCAL-CALL': { tool: 'tools/rename-check.mjs' },
 
   // --- код, модельные ------------------------------------------------------
