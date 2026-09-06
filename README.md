@@ -461,8 +461,8 @@ node "$QG/tools/evidence-validator.mjs" <файл отчёта> --gate   # ст�
 сверяет с ним каждую запись `applied`, у чьей проверки инструмент есть: `static-analysis`,
 `platform-api`, `query-alias-shadowing`, `query-alias-vs-nested-table`, `query-top-order`,
 `transaction-nesting`, `enum-string-assign`, `unbounded-string-column`, `attribute-access`,
-`form-attribute-shadowing`, `dispatch-fallback`, `stale-local-calls`, `file-encoding`,
-`registration-check`,
+`form-attribute-shadowing`, `dispatch-fallback`, `db-read-in-loop`, `stale-local-calls`,
+`file-encoding`, `registration-check`,
 `uuid-uniqueness`, `structure-validation`, `form-binding`. Отметка должна быть не старше
 последней правки файлов своей сессии — прогон до правки описывает состояние, которого уже нет.
 

@@ -1118,6 +1118,207 @@ export function parseIfChains(masked) {
   return chains;
 }
 
+/**
+ * Чтение базы данных, достижимое из тела цикла через вызов метода.
+ *
+ * Штатная диагностика `bslls:CreateQueryInCycle` ловит `Новый Запрос` прямо внутри `Для Каждого`
+ * в одном методе. Как только цикл и чтение разъезжаются по методам — а это обычный вид
+ * декомпозированного кода, — она молчит: цикл перебирает записи, вызывает обработчик, тот
+ * вызывает проверку, и уже проверка читает базу помощником библиотеки. Число обращений то же
+ * самое, вид другой. Правило закрывает именно этот разрыв и потому срабатывает ТОЛЬКО когда
+ * чтение найдено в вызванном методе, а не в теле самого цикла: прямую форму уже покрывает
+ * анализатор, и две находки на одну строку читались бы как дубль.
+ *
+ * Сигнал: из тела цикла достижим (через вызовы, глубина до 4) метод, в теле которого есть
+ * обращение к базе — `Новый Запрос`, чтение реквизитов помощником библиотеки, поиск по коду
+ * или наименованию, `ПолучитьОбъект`, чтение константы, среза регистра или менеджера записи.
+ *
+ * Контр-сигналы, на которых инструмент молчит:
+ *   - цикл идёт по коллекции, собранной здесь же (`Новый Массив` плюс `Добавить`): это уже
+ *     свёрнутый набор различных ключей, и обращений в нём столько, сколько различных значений,
+ *     а не столько, сколько строк;
+ *   - вызванный метод живёт в модуле с повторным использованием возвращаемых значений
+ *     (`…ПовтИсп`): повторный вызов в цикле дёшев. Первый при этом платный, а результат живёт
+ *     до конца сеанса — если значение должно быть строго на момент выполнения, кэш не подходит
+ *     (#std724, тот же разбор в `references/ai-antipatterns.md`, `AI-09`);
+ *   - чтение лежит в теле самого цикла: это случай `bslls:CreateQueryInCycle`.
+ *
+ * Приближения:
+ *   - граф вызовов строится ТОЛЬКО по файлам одного прогона. Метод из модуля, который в прогон
+ *     не попал, инструменту не виден, и молчание правила о нём ничего не доказывает;
+ *   - вызовы по вычисляемому имени (`Выполнить`, `ОбщийМодуль(Имя)`) не видны;
+ *   - сколько раз выполнится цикл, инструмент не знает: перебор трёх строк и перебор
+ *     документа на тысячу строк для него одинаковы. Отсюда важность 🟠, а не 🔴.
+ */
+const DB_READ_MARKERS = [
+  { re: word('Новый\\s+Запрос', 'iu'), what: 'Новый Запрос' },
+  {
+    re: new RegExp(`ОбщегоНазначения\\s*\\.\\s*Значени[ея]Реквизит[аов]+Объект[аов]+\\s*\\(`, 'iu'),
+    what: 'чтение реквизитов помощником библиотеки',
+  },
+  { re: /\.\s*НайтиПо(Коду|Наименованию|Реквизиту)\s*\(/iu, what: 'поиск элемента справочника' },
+  { re: new RegExp(`Константы\\s*\\.\\s*${IDENT}\\s*\\.\\s*Получить\\s*\\(`, 'iu'), what: 'чтение константы' },
+  {
+    re: new RegExp(`РегистрыСведений\\s*\\.\\s*${IDENT}\\s*\\.\\s*(Получить|СрезПоследних|СрезПервых)\\s*\\(`, 'iu'),
+    what: 'чтение регистра сведений',
+  },
+];
+
+/**
+ * Чего в списке нет намеренно: `ПолучитьОбъект` и `Прочитать()`. Обработка, которая меняет
+ * каждый элемент набора, обязана прочитать каждый объект — это не повторное чтение одних и
+ * тех же данных, а работа над разными. На корпусе в 114 модулей эти два маркера дали больше
+ * половины находок, и все они были формой «прочитать документ, чтобы его записать».
+ */
+
+const MAX_CALL_DEPTH = 4;
+
+/** Циклы модуля с границами тела: `Для`, `Для Каждого` и `Пока` закрываются одним `КонецЦикла`. */
+function parseLoops(masked) {
+  const loops = [];
+  const stack = [];
+  const keywords = new RegExp(`(?<![${W}])(КонецЦикла|Цикл)(?![${W}])`, 'giu');
+
+  let m;
+  while ((m = keywords.exec(masked)) !== null) {
+    if (m[1].toLowerCase() === 'цикл') {
+      stack.push({ headerEnd: m.index, bodyStart: m.index + m[0].length });
+      continue;
+    }
+    const loop = stack.pop();
+    if (loop) {
+      loop.end = m.index;
+      loops.push(loop);
+    }
+  }
+  return loops;
+}
+
+/** Выражение, по которому идёт перебор: `Для Каждого <имя> Из <выражение> Цикл`. */
+function loopCollection(masked, loop) {
+  const header = masked.slice(Math.max(0, loop.headerEnd - 400), loop.headerEnd);
+  const m = new RegExp(`(?<![${W}])Для\\s+Каждого\\s+${IDENT}\\s+Из\\s+([^\\n]+?)\\s*$`, 'iu').exec(header);
+  return m ? m[1].trim() : null;
+}
+
+/**
+ * Коллекция собрана в этом же методе: объявлена `Новый Массив` (или другой контейнер) и
+ * наполнена `Добавить`/`Вставить`. Перебор такого набора — это перебор различных ключей,
+ * ради которого его и собирали.
+ */
+function assembledLocally(masked, routine, expression) {
+  if (!expression || !new RegExp(`^${IDENT}$`, 'u').test(expression)) return false;
+  const body = masked.slice(routine.bodyStart, routine.end);
+  const declared = new RegExp(
+    `(?<![${W}])${expression}\\s*=\\s*Новый\\s+(Массив|Соответствие|СписокЗначений|ТаблицаЗначений|Структура)`,
+    'iu'
+  );
+  const filled = new RegExp(`(?<![${W}])${expression}\\s*\\.\\s*(Добавить|Вставить)\\s*\\(`, 'iu');
+  return declared.test(body) && filled.test(body);
+}
+
+function routineKey(moduleKey, name) {
+  return `${moduleKey} ${name.toLowerCase()}`;
+}
+
+/** Имя общего модуля из пути выгрузки; для прочих модулей — сам путь, чтобы имена не смешались. */
+function moduleKeyOf(path) {
+  const parts = path.replace(/\\/g, '/').split('/');
+  const index = parts.lastIndexOf('CommonModules');
+  if (index >= 0 && parts[index + 1]) return parts[index + 1].toLowerCase();
+  return path.toLowerCase();
+}
+
+export function lintDbReadsInLoops(units) {
+  const index = new Map();
+  for (const unit of units) {
+    for (const routine of parseRoutines(unit.masked)) {
+      index.set(routineKey(unit.moduleKey, routine.name), { ...routine, unit });
+    }
+  }
+
+  const callRe = new RegExp(`(?<![${W}.])(?:(${IDENT})\\s*\\.\\s*)?(${IDENT})\\s*\\(`, 'giu');
+  const calleesOf = (text, ownModuleKey) => {
+    const found = [];
+    callRe.lastIndex = 0;
+    let m;
+    while ((m = callRe.exec(text)) !== null) {
+      const moduleName = m[1];
+      // Модуль с повторным использованием возвращаемых значений: повторный вызов в цикле дёшев.
+      if (moduleName && /повтисп/iu.test(moduleName)) continue;
+      const key = routineKey(moduleName ? moduleName.toLowerCase() : ownModuleKey, m[2]);
+      const routine = index.get(key);
+      if (routine) found.push({ name: m[2], routine });
+    }
+    return found;
+  };
+
+  const readIn = (text) => {
+    for (const marker of DB_READ_MARKERS) {
+      marker.re.lastIndex = 0;
+      if (marker.re.test(text)) return marker.what;
+    }
+    return null;
+  };
+
+  const findings = [];
+  for (const unit of units) {
+    const routines = parseRoutines(unit.masked);
+    for (const loop of parseLoops(unit.masked)) {
+      const routine = routines.find((r) => loop.headerEnd >= r.bodyStart && loop.headerEnd < r.end);
+      if (!routine) continue;
+      if (assembledLocally(unit.masked, routine, loopCollection(unit.masked, loop))) continue;
+
+      // Обход в ширину от тела цикла. Глубина 0 — сам цикл: чтение в нём покрывает анализатор,
+      // поэтому в находку идут только вызванные методы.
+      const visited = new Set([routineKey(unit.moduleKey, routine.name)]);
+      let frontier = calleesOf(unit.masked.slice(loop.bodyStart, loop.end), unit.moduleKey).map((c) => ({
+        ...c,
+        chain: [c.name],
+      }));
+      let hit = null;
+      for (let depth = 0; depth < MAX_CALL_DEPTH && frontier.length && !hit; depth++) {
+        const next = [];
+        for (const step of frontier) {
+          const key = routineKey(step.routine.unit.moduleKey, step.routine.name);
+          if (visited.has(key)) continue;
+          visited.add(key);
+
+          const body = step.routine.unit.masked.slice(step.routine.bodyStart, step.routine.end);
+          const what = readIn(body);
+          if (what) {
+            hit = { chain: step.chain, what };
+            break;
+          }
+          for (const callee of calleesOf(body, step.routine.unit.moduleKey)) {
+            next.push({ ...callee, chain: [...step.chain, callee.name] });
+          }
+        }
+        frontier = next;
+      }
+      if (!hit) continue;
+
+      findings.push({
+        file: unit.path,
+        severity: 'warn',
+        rule: 'qg:BSL-DB-READ-IN-LOOP',
+        line: lineAt(unit.source, loop.headerEnd),
+        message:
+          `из тела цикла достижимо обращение к базе: ${hit.chain.join(' → ')} — ${hit.what}. ` +
+          'Метод вызывается на каждом витке, поэтому обращений будет столько, сколько витков: на ' +
+          'документе в тысячу строк это тысяча чтений вместо одного. Собери данные по всему набору ' +
+          'до цикла — одним запросом либо пакетным методом библиотеки — и передавай внутрь готовыми ' +
+          '(#std436). Инструмент показывает достижимость, а не место: чтение может стоять в любой ' +
+          'части вызванного метода, в том числе до его собственного цикла — проверь по цепочке, ' +
+          'выполняется ли оно на каждом витке внешнего. Прямую форму («Новый Запрос» в теле самого ' +
+          'цикла) ловит анализатор',
+      });
+    }
+  }
+
+  return findings;
+}
+
 function checkFile(path) {
   if (!existsSync(path)) {
     return {
@@ -1145,7 +1346,7 @@ function checkFile(path) {
     const attributes = primitiveFormAttributes(readFileSync(formXml, 'utf8').replace(/^﻿/, ''));
     findings.push(...lintFormAttrShadow(source, attributes));
   }
-  return { findings, metaResolved, formResolved };
+  return { findings, metaResolved, formResolved, source };
 }
 
 function evidenceBlock(findings, modulesSeen, metaResolved, files = [], formsSeen = false, formResolved = false) {
@@ -1215,6 +1416,21 @@ function evidenceBlock(findings, modulesSeen, metaResolved, files = [], formsSee
       `verdict=${hitDispatch ? 'violation:qg:BSL-DISPATCH-NO-FALLBACK' : 'clean'}]`
   );
 
+  // Вердикт по одному файлу здесь означает меньше, чем по нескольким: граф вызовов строится
+  // по файлам прогона, и чем их меньше, тем короче видимые цепочки. «Чисто» читается как
+  // «в переданном составе цепочки не нашлось», и это сказано в тексте правила.
+  const hitLoopRead = findings.some((f) => f.rule === 'qg:BSL-DB-READ-IN-LOOP');
+  recordRun({
+    scope: 'db-read-in-loop',
+    tool: 'tools/bsl-lint.mjs',
+    verdict: hitLoopRead ? 'violation' : 'clean',
+    files,
+  });
+  lines.push(
+    '[qg applied: layer=code, scope=db-read-in-loop, ids=[qg:BSL-DB-READ-IN-LOOP,std436], ' +
+      `verdict=${hitLoopRead ? 'violation:qg:BSL-DB-READ-IN-LOOP' : 'clean'}]`
+  );
+
   // `attribute-access` до этого правила был проверкой без инструмента: строку следа писала
   // модель, и валидатору нечем было отличить прогон от чтения глазами. Теперь строку печатает
   // инструмент и отмечается в журнале — рукописный «clean» по этому имени больше не проходит.
@@ -1266,6 +1482,18 @@ function main(argv) {
   }
 
   const report = files.map((f) => ({ file: f, ...checkFile(f) }));
+
+  // Правило про чтение базы из цикла — единственное, которому мало одного файла: цикл и
+  // чтение обычно лежат в разных методах, а нередко и в разных модулях. Граф строится по
+  // файлам ЭТОГО прогона, и то, что модуль в него не попал, ничего не доказывает.
+  const units = report
+    .filter((r) => typeof r.source === 'string')
+    .map((r) => ({ path: r.file, source: r.source, masked: maskModule(r.source), moduleKey: moduleKeyOf(r.file) }));
+  for (const finding of lintDbReadsInLoops(units)) {
+    const target = report.find((r) => r.file === finding.file);
+    if (target) target.findings.push(finding);
+  }
+
   const findings = report.flatMap((r) => r.findings);
   const errors = findings.filter((f) => f.severity === 'error').length;
   const warns = findings.filter((f) => f.severity === 'warn').length;

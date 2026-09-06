@@ -153,6 +153,16 @@ export const SCOPES = {
     granularity: 'files',
     applies: ['.bsl', '.os']
   },
+  // Дополняет `query-in-loop`, а не заменяет его: там имя для разбора глазами, здесь — то, что
+  // считается механически по графу вызовов файлов прогона. Прямую форму (`Новый Запрос` в теле
+  // цикла) закрывает анализатор, поэтому правило начинается с первого вызова.
+  'db-read-in-loop': {
+    layer: 'code',
+    tool: 'tools/bsl-lint.mjs',
+    about: 'обращение к базе, достижимое из тела цикла через вызов метода (#std436)',
+    granularity: 'files',
+    applies: ['.bsl', '.os']
+  },
   'api-verification': {
     layer: 'code',
     tool: null,
@@ -314,6 +324,7 @@ export const QG_IDS = {
   'qg:BSL-REF-DOT-ACCESS': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-FORM-ATTR-SHADOW': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-DISPATCH-NO-FALLBACK': { tool: 'tools/bsl-lint.mjs' },
+  'qg:BSL-DB-READ-IN-LOOP': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-STALE-LOCAL-CALL': { tool: 'tools/rename-check.mjs' },
 
   // --- код, модельные ------------------------------------------------------
