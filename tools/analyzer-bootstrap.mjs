@@ -83,11 +83,19 @@ export async function sha256(file) {
   return hash.digest('hex');
 }
 
+/** Разрешённый хост загрузки бинарников — релизы GitHub, как у лаунчера автора. */
+const ALLOWED_DOWNLOAD_HOST = 'github.com';
+
 export function assetUrl(manifest, target) {
-  return manifest.urlTemplate
+  const url = manifest.urlTemplate
     .replace('{repo}', manifest.repo)
     .replace('{version}', manifest.version)
     .replace('{asset}', target.asset);
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'https:' || parsed.hostname !== ALLOWED_DOWNLOAD_HOST) {
+    throw new Error(`недопустимый источник загрузки: ${parsed.origin}`);
+  }
+  return url;
 }
 
 /**
