@@ -11,4 +11,6 @@
 [qg skipped: layer=code, scope=platform-api, planned=[pc:*], reason=no_platform_install]
 [qg skipped: layer=arch, reason=volume_below_threshold]
 [qg skipped: layer=xml, reason=not_applicable]
+[qg skipped: layer=code, scope=ai-antipatterns, reason=not_applicable]
+[qg skipped: layer=code, scope=platform-antipatterns, reason=not_applicable]
 [qg not_verified: dimension=compilation, reason=no_platform]

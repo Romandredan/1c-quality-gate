@@ -30,6 +30,13 @@ const FIXTURES = join(ROOT, 'tests', 'fixtures');
 const WORK = join(tmpdir(), 'qg-tests');
 const VERBOSE = process.argv.includes('--verbose');
 
+// Контур кода запущен — валидатор требует заявить проходы по каталогу антипаттернов
+// (ai-antipatterns, platform-antipatterns), иначе предупреждает. Инструментов у них нет,
+// поэтому в тестах, которые собирают след вручную, оба прохода заявляются пропуском.
+const CATALOG_DECLARED =
+  '[qg skipped: layer=code, scope=ai-antipatterns, reason=not_applicable]\n' +
+  '[qg skipped: layer=code, scope=platform-antipatterns, reason=not_applicable]\n';
+
 let passed = 0;
 const failures = [];
 
@@ -340,7 +347,8 @@ section('Запросы — НЕ придирается к корректным 
     '[qg sentinel: target=v8std, id=std454, status=found]\n' +
     printed + '\n' +
     '[qg not_verified: dimension=compilation, reason=no_platform]\n' +
-    '[qg not_verified: dimension=query-execution, reason=no_platform]\n');
+    '[qg not_verified: dimension=query-execution, reason=no_platform]\n' +
+    CATALOG_DECLARED);
   const r = run('tools/evidence-validator.mjs', [report, '--gate']);
   check('запись следа из query-lint проходит валидатор', r.code === 0, `${printed} → ${r.out.trim().slice(0, 140)}`);
 }
@@ -737,7 +745,8 @@ section('Транзакция внутри обработчика с неявн�
     '[qg scope: volume=C1, files=1, archetypes=[object-event], driver=archetype:object-event, resolved=code:L1, config=default]\n' +
     '[qg sentinel: target=v8std, id=std454, status=found]\n' +
     printed + '\n' +
-    '[qg not_verified: dimension=compilation, reason=no_platform]\n');
+    '[qg not_verified: dimension=compilation, reason=no_platform]\n' +
+    CATALOG_DECLARED);
   const r = run('tools/evidence-validator.mjs', [report, '--gate']);
   check('запись следа из bsl-lint проходит валидатор', r.code === 0, `${printed} → ${r.out.trim().slice(0, 140)}`);
 }
@@ -1049,7 +1058,8 @@ section('Строковая колонка без квалификатора д�
     '[qg scope: volume=C1, files=1, archetypes=[object-event], driver=archetype:object-event, resolved=code:L1, config=default]\n' +
     '[qg sentinel: target=v8std, id=std454, status=found]\n' +
     printed + '\n' +
-    '[qg not_verified: dimension=compilation, reason=no_platform]\n');
+    '[qg not_verified: dimension=compilation, reason=no_platform]\n' +
+    CATALOG_DECLARED);
   const r = run('tools/evidence-validator.mjs', [report, '--gate']);
   check('запись следа о колонках проходит валидатор', r.code === 0, `${printed} → ${r.out.trim().slice(0, 200)}`);
 }
@@ -1230,7 +1240,8 @@ function writeFormFixture(dir, moduleLines) {
     '[qg scope: volume=C1, files=1, archetypes=[form-module], driver=archetype:form-module, resolved=code:L1, config=default]\n' +
     '[qg sentinel: target=v8std, id=std454, status=found]\n' +
     printed + '\n' +
-    '[qg not_verified: dimension=compilation, reason=no_platform]\n');
+    '[qg not_verified: dimension=compilation, reason=no_platform]\n' +
+    CATALOG_DECLARED);
   const r = run('tools/evidence-validator.mjs', [report, '--gate']);
   check('запись следа о реквизитах формы проходит валидатор', r.code === 0,
     `${printed} → ${r.out.trim().slice(0, 200)}`);
@@ -1389,7 +1400,8 @@ section('Разбор значения по веткам без завершаю
     '[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, config=default]\n' +
     '[qg sentinel: target=v8std, id=std454, status=found]\n' +
     printed + '\n' +
-    '[qg not_verified: dimension=compilation, reason=no_platform]\n');
+    '[qg not_verified: dimension=compilation, reason=no_platform]\n' +
+    CATALOG_DECLARED);
   const r = run('tools/evidence-validator.mjs', [report, '--gate']);
   check('запись следа о разборе по веткам проходит валидатор', r.code === 0,
     `${printed} → ${r.out.trim().slice(0, 200)}`);
@@ -1535,7 +1547,8 @@ section('Чтение базы, достижимое из цикла через 
     '[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, config=default]\n' +
     '[qg sentinel: target=v8std, id=std454, status=found]\n' +
     printed + '\n' +
-    '[qg not_verified: dimension=compilation, reason=no_platform]\n');
+    '[qg not_verified: dimension=compilation, reason=no_platform]\n' +
+    CATALOG_DECLARED);
   const r = run('tools/evidence-validator.mjs', [report, '--gate']);
   check('запись следа о чтении из цикла проходит валидатор', r.code === 0,
     `${printed} → ${r.out.trim().slice(0, 200)}`);
@@ -2008,6 +2021,7 @@ const evProj = { env: { CLAUDE_PROJECT_DIR: EV_PROJ } };
   const body =
     '[qg sentinel: target=v8std, id=std454, status=found]\n' +
     '[qg applied: layer=hygiene, scope=file-encoding, ids=[qg:HYG-BOM], verdict=clean]\n' +
+    CATALOG_DECLARED +
     '[qg not_verified: dimension=compilation, reason=no_platform]\n';
   const scoped = (extra) =>
     `## quality evidence\n\n[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1${extra}]\n`;
@@ -2059,18 +2073,18 @@ const evProj = { env: { CLAUDE_PROJECT_DIR: EV_PROJ } };
   check('в нестрогом режиме молчание об исполнении — предупреждение', rLint.code === 1, rLint.out.trim().slice(0, 140));
 
   const declared = writeBytes('ev-query-declared.md',
-    head('query') + violation + compilation + '[qg not_verified: dimension=query-execution, reason=no_platform]\n');
+    head('query') + violation + compilation + '[qg not_verified: dimension=query-execution, reason=no_platform]\n' + CATALOG_DECLARED);
   check('заявленная непроверяемость исполнения принимается',
     run('tools/evidence-validator.mjs', [declared, '--gate']).code === 0);
 
   const executed = writeBytes('ev-query-executed.md',
     head('query') + violation + compilation +
-    '[qg applied: layer=code, scope=query-execution, ids=[qg:QRY-EXECUTED], verdict=clean]\n');
+    '[qg applied: layer=code, scope=query-execution, ids=[qg:QRY-EXECUTED], verdict=clean]\n' + CATALOG_DECLARED);
   check('фактическое исполнение запроса закрывает требование',
     run('tools/evidence-validator.mjs', [executed, '--gate']).code === 0);
 
   // Требование адресное: без архетипа query отчитываться об исполнении не с чего.
-  const noQuery = writeBytes('ev-no-query.md', head('transaction') + violation + compilation);
+  const noQuery = writeBytes('ev-no-query.md', head('transaction') + violation + compilation + CATALOG_DECLARED);
   check('без архетипа query требование не предъявляется',
     run('tools/evidence-validator.mjs', [noQuery, '--gate']).code === 0);
 
@@ -2109,7 +2123,7 @@ const evProj = { env: { CLAUDE_PROJECT_DIR: EV_PROJ } };
   const customArch = writeBytes('ev-archetype-custom.md',
     '## quality evidence\n\n' +
     '[qg scope: volume=C2, files=1, archetypes=[exchange], driver=archetype:exchange, resolved=code:L2, config=custom:archetypes]\n' +
-    '[qg sentinel: target=v8std, id=std454, status=found]\n' + violation + compilation);
+    '[qg sentinel: target=v8std, id=std454, status=found]\n' + violation + compilation + CATALOG_DECLARED);
   const rCustom = run('tools/evidence-validator.mjs', [customArch, '--gate'], { env: { CLAUDE_PROJECT_DIR: archProj } });
   check('проектный архетип принимается как метка', rCustom.code === 0, rCustom.out.trim().slice(0, 160));
 
@@ -2135,6 +2149,17 @@ const evProj = { env: { CLAUDE_PROJECT_DIR: EV_PROJ } };
   const known = (validatorSrc.match(/const DIMENSIONS = \[([^\]]+)\]/) || [, ''])[1];
   const unknown = [...printed].filter((d) => !known.includes(`'${d}'`));
   check('валидатор знает все измерения, которые печатают инструменты', unknown.length === 0, unknown.join(', '));
+}
+
+{
+  const v = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+  const text = readFileSync(join(FIXTURES, 'evidence', 'code-without-catalog.md'), 'utf8');
+  const res = v.validate(text, { gate: false });
+  const warns = res.problems.filter((p) => p.severity === 'warn' && /ai-antipatterns/.test(p.message));
+  check('контур кода без записи о проходе по каталогу получает предупреждение', warns.length === 1, JSON.stringify(res.problems));
+  const withRecord = text + '\n[qg applied: layer=code, scope=ai-antipatterns, ids=[qg:AI-01], verdict=clean]\n[qg skipped: layer=code, scope=platform-antipatterns, reason=not_applicable]\n';
+  const res2 = v.validate(withRecord, { gate: false });
+  check('с записями о проходах предупреждения нет', !res2.problems.some((p) => /ai-antipatterns|platform-antipatterns/.test(p.message)), JSON.stringify(res2.problems));
 }
 
 // ---------------------------------------------------------------------------
@@ -2455,6 +2480,7 @@ section('Проектная настройка — создание, разре�
     `## quality evidence\n\n[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, ${config.evidenceField(overridden)}]\n` +
       '[qg sentinel: target=v8std, id=std454, status=found]\n' +
       '[qg applied: layer=hygiene, scope=file-encoding, ids=[qg:HYG-BOM], verdict=clean]\n' +
+      CATALOG_DECLARED +
       '[qg not_verified: dimension=compilation, reason=no_platform]\n'
   );
   // Проверка гигиены в следе есть — значит инструмент обязан быть прогнан по-настоящему.
@@ -3115,7 +3141,7 @@ section('Часовой проверяется по целям, а не «хот
   const r1 = run('tools/evidence-validator.mjs', [masked, '--gate'], sp);
   check('живой v8std НЕ маскирует отсутствие часового по анализатору', r1.code === 2, r1.out.trim().slice(0, 120));
 
-  const ok = writeBytes('ev-both.md', head + v8 + bslls + clean + notVerified);
+  const ok = writeBytes('ev-both.md', head + v8 + bslls + clean + CATALOG_DECLARED + notVerified);
   const r2 = run('tools/evidence-validator.mjs', [ok, '--gate'], sp);
   check('оба часовых подтверждены — след принят', r2.code === 0, r2.out.trim().slice(0, 120));
 
@@ -3143,7 +3169,7 @@ section('Часовой проверяется по целям, а не «хот
   check('односегментный идентификатор по-прежнему отвергается', rb.out.includes('не из реестра признаков'));
 
   // Нарушения не требуют часового: «нашли» самодостаточно, недостоверно только «не нашли».
-  const onlyViolations = writeBytes('ev-viol.md', head + v8 + '[qg applied: layer=code, scope=static-analysis, ids=[bslls:MagicNumber], verdict=violation:bslls:MagicNumber]\n');
+  const onlyViolations = writeBytes('ev-viol.md', head + v8 + '[qg applied: layer=code, scope=static-analysis, ids=[bslls:MagicNumber], verdict=violation:bslls:MagicNumber]\n' + CATALOG_DECLARED);
   const r4 = run('tools/evidence-validator.mjs', [onlyViolations, '--gate'], sp);
   check('вердикт с нарушениями не требует часового по анализатору', r4.code === 0, r4.out.trim().slice(0, 120));
 }
@@ -3337,7 +3363,7 @@ section('Журнал прогонов — вердикт без прогона 
 
   const withHygiene = writeBytes(
     'ev-journal-hygiene.md',
-    head + '[qg applied: layer=hygiene, scope=file-encoding, ids=[qg:HYG-BOM], verdict=clean]\n' + tail
+    head + '[qg applied: layer=hygiene, scope=file-encoding, ids=[qg:HYG-BOM], verdict=clean]\n' + CATALOG_DECLARED + tail
   );
 
   const before = run('tools/evidence-validator.mjs', [withHygiene, '--gate'], { env });
@@ -3405,7 +3431,7 @@ section('Журнал прогонов — вердикт без прогона 
   // единственная возможная форма.
   const modelOnly = writeBytes(
     'ev-journal-model.md',
-    head + '[qg applied: layer=arch, scope=module-responsibility, ids=[qg:ARCH-A1], verdict=clean]\n' + tail
+    head + '[qg applied: layer=arch, scope=module-responsibility, ids=[qg:ARCH-A1], verdict=clean]\n' + CATALOG_DECLARED + tail
   );
   const mo = run('tools/evidence-validator.mjs', [modelOnly, '--gate'], { env: { CLAUDE_PROJECT_DIR: join(WORK, 'journal-empty') } });
   check('проверка без инструмента журнала не требует', mo.code === 0, mo.out.trim().slice(0, 130));
@@ -3413,7 +3439,7 @@ section('Журнал прогонов — вердикт без прогона 
   // Пропуск заявлен с причиной — доказывать нечего.
   const skipped = writeBytes(
     'ev-journal-skipped.md',
-    head + '[qg skipped: layer=hygiene, scope=file-encoding, reason=contour_not_installed]\n' + tail
+    head + '[qg skipped: layer=hygiene, scope=file-encoding, reason=contour_not_installed]\n' + CATALOG_DECLARED + tail
   );
   const sk = run('tools/evidence-validator.mjs', [skipped, '--gate'], { env: { CLAUDE_PROJECT_DIR: join(WORK, 'journal-empty') } });
   check('пропуск с причиной журнала не требует', sk.code === 0, sk.out.trim().slice(0, 130));
@@ -3488,7 +3514,7 @@ section('Покрытие: прогон по одному файлу не зак
   const tail = '[qg not_verified: dimension=compilation, reason=no_platform]\n';
   const evFile = writeBytes(
     'ev-coverage.md',
-    head + '[qg applied: layer=hygiene, scope=file-encoding, ids=[qg:HYG-BOM], verdict=clean]\n' + tail
+    head + '[qg applied: layer=hygiene, scope=file-encoding, ids=[qg:HYG-BOM], verdict=clean]\n' + CATALOG_DECLARED + tail
   );
 
   run('tools/hygiene-check.mjs', [first], { env });
@@ -3512,7 +3538,7 @@ section('Покрытие: прогон по одному файлу не зак
   armed(['src/cf/Catalogs/Товары.xml']);
   const xmlOnly = writeBytes(
     'ev-coverage-xml.md',
-    head + '[qg applied: layer=code, scope=query-top-order, ids=[qg:QRY-TOP-WITHOUT-ORDER], verdict=clean]\n' + tail
+    head + '[qg applied: layer=code, scope=query-top-order, ids=[qg:QRY-TOP-WITHOUT-ORDER], verdict=clean]\n' + CATALOG_DECLARED + tail
   );
   run('tools/query-lint.mjs', [first], { env });
   const notCovered = run('tools/evidence-validator.mjs', [xmlOnly, '--gate'], { env });
@@ -3530,7 +3556,7 @@ section('Покрытие: прогон по одному файлу не зак
   armed(['src/cf/Roles/QG_Роль/Ext/Rights.xml']);
   const roleEv = writeBytes(
     'ev-coverage-role.md',
-    head + '[qg applied: layer=xml, scope=structure-validation, ids=[qg:XML-STRUCT], verdict=clean]\n' + tail
+    head + '[qg applied: layer=xml, scope=structure-validation, ids=[qg:XML-STRUCT], verdict=clean]\n' + CATALOG_DECLARED + tail
   );
   writeFileSync(
     join(proj, '.claude', '.state', 'qg-runs.jsonl'),
@@ -3638,7 +3664,7 @@ section('«Не применимо» — тоже утверждение о пр
 
   const na = writeBytes(
     'ev-not-applicable.md',
-    head + '[qg skipped: layer=code, scope=transaction-nesting, reason=not_applicable]\n' + tail
+    head + '[qg skipped: layer=code, scope=transaction-nesting, reason=not_applicable]\n' + CATALOG_DECLARED + tail
   );
   const before = run('tools/evidence-validator.mjs', [na, '--gate'], { env });
   check('«не применимо» без прогона отклонено', before.code === 2, before.out.trim().slice(0, 170));
@@ -3656,7 +3682,7 @@ section('«Не применимо» — тоже утверждение о пр
   // Недоступность инструмента отметки не требует: ставить её некому.
   const unavailable = writeBytes(
     'ev-unavailable.md',
-    head + '[qg skipped: layer=code, scope=static-analysis, planned=[bslls:*], reason=analyzer_unavailable]\n' + tail
+    head + '[qg skipped: layer=code, scope=static-analysis, planned=[bslls:*], reason=analyzer_unavailable]\n' + CATALOG_DECLARED + tail
   );
   const un = run('tools/evidence-validator.mjs', [unavailable, '--gate'], { env: { CLAUDE_PROJECT_DIR: join(WORK, 'na-empty') } });
   check('недоступность инструмента журнала не требует', un.code === 0, un.out.trim().slice(0, 170));
@@ -3915,6 +3941,7 @@ section('Непроанализированные файлы не выдаютс
     'ev-unanalyzed-declared.md',
     head +
       '[qg not_verified: dimension=static-analysis, reason=not_in_analyzer_report, files=2]\n' +
+      CATALOG_DECLARED +
       '[qg not_verified: dimension=compilation, reason=no_platform]\n'
   );
   const rd = run('tools/evidence-validator.mjs', [declared, '--gate'], { env });
@@ -4232,6 +4259,7 @@ section('Несколько сессий — без --session утилита о�
       '[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, config=default]\n' +
       '[qg sentinel: target=v8std, id=std454, status=found]\n' +
       '[qg applied: layer=hygiene, scope=file-encoding, ids=[qg:HYG-BOM], verdict=clean]\n' +
+      CATALOG_DECLARED +
       '[qg not_verified: dimension=compilation, reason=no_platform]\n'
   );
   const anon = run('tools/evidence-validator.mjs', [evFile, '--gate'], { env });
@@ -4314,6 +4342,7 @@ section('Файлы вне корня проекта — канонически�
       '[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, config=default]\n' +
       '[qg sentinel: target=v8std, id=std454, status=found]\n' +
       '[qg applied: layer=hygiene, scope=file-encoding, ids=[qg:HYG-BOM], verdict=clean]\n' +
+      CATALOG_DECLARED +
       '[qg not_verified: dimension=compilation, reason=no_platform]\n'
   );
   const val = run('tools/evidence-validator.mjs', [evOut, '--gate', '--session', 'OUT'], { env });
@@ -4726,7 +4755,8 @@ section('Контур платформенного API (движок bsl-context
             unchecked: [{ file: 'x.bsl', reason: 'timeout' }],
           })
           .join('\n') +
-        '\n',
+        '\n' +
+        CATALOG_DECLARED,
       'utf8'
     );
     const res = run('tools/evidence-validator.mjs', [report], { env: { CLAUDE_PROJECT_DIR: evProj } });

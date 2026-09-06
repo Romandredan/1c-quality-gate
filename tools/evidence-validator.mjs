@@ -452,6 +452,30 @@ export function validate(text, { gate = false, root = null, session = null } = {
     );
   }
 
+  // Контур кода запущен хотя бы на L1 — значит, два прохода по каталогу антипаттернов
+  // обязаны быть заявлены: applied, skipped или not_verified. До этого требования два самых
+  // объёмных справочника контура читались «всегда», а следа не оставляли, и отличить «код
+  // чист» от «проход не делался» было нечем. Пока предупреждение: блокирующим станет
+  // следующим MINOR (docs/RELEASING.md, переходное окно).
+  const codeDepth = (() => {
+    const s = records.find((r) => r.type === 'scope');
+    const resolved = String(s?.fields?.resolved || '');
+    const m = resolved.match(/(?:^|\|)code:([^|]+)/);
+    return m ? m[1].trim() : null;
+  })();
+  if (codeDepth && codeDepth !== 'skip') {
+    const skippedScopes = new Set(records.filter((r) => r.type === 'skipped' && r.fields.scope).map((r) => String(r.fields.scope).trim()));
+    for (const s of ['ai-antipatterns', 'platform-antipatterns']) {
+      if (closes.has(s) || skippedScopes.has(s)) continue;
+      add(
+        'warn',
+        records.find((r) => r.type === 'scope')?.line || 0,
+        `контур code запущен (${codeDepth}), но о проходе ${s} не заявлено: нужна запись ` +
+          `[qg applied: layer=code, scope=${s}, ...] либо [qg skipped: layer=code, scope=${s}, reason=...]`
+      );
+    }
+  }
+
   if (!gate) {
     return { records, problems, exitCode: problems.some((p) => p.severity === 'error') ? 2 : problems.length ? 1 : 0 };
   }
