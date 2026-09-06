@@ -18,7 +18,7 @@
  *   node tests/run-tests.mjs [--verbose]
  */
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { removeTreeSync } from '../tools/fs-safe.mjs';
 import { join, dirname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -2761,11 +2761,50 @@ section('Бюджет навыков и достижимость справоч�
       // из своей человекочитаемой версии, а её называет навык. Сам файл из списка соседей
       // исключён: упоминание собственного имени внутри себя достижимостью не является и
       // делало бы проверку тождественно истинной.
-      const siblings = refs.filter((r) => r !== ref).map((r) => readFileSync(join(refDir, r), 'utf8')).join('\n');
+      //
+      // Каталог карточек (`references/catalog/`) — подкаталог, а не файл: его нельзя читать
+      // как текст ни в роли проверяемого ref (у него нет собственного содержимого-строки),
+      // ни в роли соседа для чужого ref (readFileSync на директории падает EISDIR). Его
+      // достижимость проверяется только упоминанием имени в навыке.
+      const siblings = refs
+        .filter((r) => r !== ref && !statSync(join(refDir, r)).isDirectory())
+        .map((r) => readFileSync(join(refDir, r), 'utf8'))
+        .join('\n');
       const reachable = skillText.includes(ref) || siblings.includes(ref);
       check(`${name}: справочник ${ref} достижим`, reachable, 'на него не ссылается ни навык, ни соседний справочник');
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+section('Каталог антипаттернов — формат карточек и индекс');
+
+{
+  const gen = await import(pathToFileURL(join(ROOT, 'tools', 'gen-catalog-index.mjs')).href);
+  const dir = join(ROOT, 'skills', 'bsl-code-review', 'references', 'catalog');
+  const cards = gen.readCatalog(dir);
+  check('каталог читается и не пуст', cards.length >= 1, String(cards.length));
+  const SECTIONS = ['Триггер', 'Почему', 'Как чинить', 'Когда это не дефект', 'Что проверяет инструмент'];
+  for (const c of cards) {
+    const text = readFileSync(c.file, 'utf8');
+    const h2 = [...text.matchAll(/^## (.+)$/gm)].map((m) => m[1].trim());
+    check(`${c.id}: пять секций в заданном порядке`, JSON.stringify(h2) === JSON.stringify(SECTIONS), JSON.stringify(h2));
+    check(`${c.id}: severity из списка`, ['critical', 'major', 'minor'].includes(c.severity), c.severity);
+    check(`${c.id}: group из списка`, ['model', 'platform'].includes(c.group), c.group);
+    check(`${c.id}: триггер непустой и короче 600 байт`, c.trigger.length > 20 && Buffer.byteLength(c.trigger) < 600, String(Buffer.byteLength(c.trigger)));
+    check(`${c.id}: имя файла совпадает с id`, c.file.endsWith(`${c.id.replace(/^qg:/, '')}.md`), c.file);
+    check(`${c.id}: «Когда это не дефект» — список`, /## Когда это не дефект\n\n- /.test(text));
+  }
+  const md = gen.renderIndex(cards);
+  check('индекс содержит каждый id', cards.every((c) => md.includes(c.id)));
+  // Проекция на 46 карточек считается отдельно для заголовка (фиксированная надпись и шапка
+  // таблицы, не растёт со строками) и для строк (растут линейно с числом карточек) — иначе
+  // при малом числе карточек, как сейчас, единоразовый заголовок умножился бы на 46 вместе
+  // со строками и требовал бы от него быть тоньше самого себя.
+  const headBytes = Buffer.byteLength(gen.renderIndex([]));
+  const rowsBytes = Buffer.byteLength(md) - headBytes;
+  const projected = headBytes + (rowsBytes / Math.max(cards.length, 1)) * 46;
+  check('индекс укладывается в 12 КБ на 46 карточек', projected <= 12 * 1024, String(Math.round(projected)));
 }
 
 // Регрессия, которая в репозитории уже была: справочник языка подавал РАЗРЕШЕННЫЕ как выбор
