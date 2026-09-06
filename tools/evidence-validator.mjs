@@ -685,9 +685,16 @@ export function validate(text, { gate = false, root = null, session = null } = {
   // То же требование для остальных инструментов, которые считают непроверенные файлы. Правило
   // общее намеренно: правило под одно имя (`static-analysis` выше) пришлось бы дописывать на
   // каждый новый инструмент, а пока оно не дописано — молчание о непроверенном снова проходит.
-  for (const scope of new Set(fresh.filter((r) => Number(r.unanalyzed) > 0).map((r) => r.scope))) {
+  // Спрашивается ПОСЛЕДНИЙ прогон каждой проверки — так же, как у `static-analysis` выше.
+  // Раньше набор имён собирался по любому прогону с непроверенными файлами, а требование
+  // предъявлялось всё равно к последнему: один частичный прогон пятнал имя проверки навсегда,
+  // и повторный прогон по всему составу правки пятно не смывал. Симптом узнаваем — валидатор
+  // требовал заявить «не проверил 0 файлов», а такой записи инструмент не печатает.
+  const lastByScope = new Map();
+  for (const rec of fresh) lastByScope.set(rec.scope, rec);
+  for (const [scope, last] of lastByScope) {
     if (scope === 'static-analysis') continue; // разобрано выше, со своим текстом
-    const last = [...fresh].reverse().find((r) => r.scope === scope);
+    if (!(Number(last.unanalyzed) > 0)) continue;
     // Признаётся обе формы: `skipped` носит имя проверки в поле `scope`, а `not_verified` —
     // в поле `dimension` (поля `scope` у него нет по схеме REQUIRED). Раньше правило искало
     // только `scope`, то есть `not_verified` не засчитывался никогда, и инструмент, честно

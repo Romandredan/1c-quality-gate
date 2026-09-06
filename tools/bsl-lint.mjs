@@ -13,6 +13,10 @@
  *     `КвалификаторыСтроки`, у таблицы, которая в том же модуле уходит в
  *     `УстановитьПараметр`. Поле неограниченной длины движок запросов не умеет сравнивать:
  *     `РАЗЛИЧНЫЕ`, `СГРУППИРОВАТЬ ПО`, соединение, `ГДЕ` (#std432 п. 3.1).
+ *   - `qg:BSL-DISPATCH-NO-FALLBACK` — цепочка `Если … ИначеЕсли …` перебирает значения
+ *     перечисления или типы документа в трёх и более ветках и не закрыта веткой `Иначе`.
+ *     Значение, не попавшее ни в одну ветку, проходит цепочку молча, и метод продолжает
+ *     работу так, будто разбор состоялся.
  *   - `qg:BSL-FORM-ATTR-SHADOW` — в модуле формы локальная переменная названа именем реквизита
  *     примитивного типа. Присваивание уходит В РЕКВИЗИТ и приводится к его типу, обращение
  *     через точку падает в рантайме. В `&НаСервереБезКонтекста` контекста формы нет, и там тот
@@ -951,6 +955,169 @@ export function lintFormAttrShadow(source, attributes) {
   return findings;
 }
 
+/**
+ * Разбор значения по веткам: `Если … ИначеЕсли …` без завершающего `Иначе`.
+ *
+ * Цепочка, которая перебирает значения перечисления или типы документа, — это диспетчер:
+ * автор перечислил известные ему случаи. Значение, не попавшее ни в одну ветку (новое значение
+ * перечисления, незаполненная ссылка, запись, поставленная вручную), проходит такую цепочку
+ * молча, и метод продолжает работу так, будто разбор состоялся. В коде, который дальше
+ * совершает необратимое действие — пробивает фискальный документ, проводит, отправляет
+ * запрос во внешнюю систему, — это тихий пропуск проверки, а не отказ.
+ *
+ * Сигнал: одно и то же выражение сравнивается со значениями перечисления
+ * (`Перечисления.<Тип>.<Значение>`) либо с типом (`ТипЗнч(<выражение>) = Тип("…")`) в трёх и
+ * более ветках одной цепочки, а ветки `Иначе` у цепочки нет.
+ *
+ * Порог — три ветки: две ветки без `Иначе` это обычная двоичная развилка («если аванс — так,
+ * если нет — иначе»), и требовать у неё закрытия значило бы ругаться на нормальный код.
+ *
+ * Контр-сигналы, на которых инструмент молчит:
+ *   - у цепочки есть `Иначе` — неважно, что в нём;
+ *   - охранная форма: КАЖДАЯ ветка заканчивается `Возврат`, а после `КонецЕсли` в том же методе
+ *     стоит `Возврат` или `ВызватьИсключение` — значение по умолчанию там и живёт;
+ *   - веток меньше трёх либо в них сравниваются разные выражения: это не перебор одного
+ *     признака, а последовательность независимых условий.
+ *
+ * Приближения:
+ *   - сравнение узнаётся только в прямом порядке (`Признак = Перечисления.…`); обратный
+ *     (`Перечисления.… = Признак`) не разбирается — в прикладном коде он не встречается;
+ *   - перебор строковых кодов и чисел не покрыт: у них нет признака, отличающего диспетчер от
+ *     обычного условия, и правило дало бы находку на каждом сравнении с литералом;
+ *   - что делает ветка, инструмент не смотрит: цепочка, после которой метод сразу возвращает
+ *     готовое значение, и цепочка перед записью в базу для него одинаковы.
+ */
+export function lintDispatchFallback(source) {
+  const masked = maskModule(source);
+  const findings = [];
+  const routines = parseRoutines(masked);
+
+  const enumSubject = new RegExp(
+    `(${IDENT}(?:\\s*\\.\\s*${IDENT})*)\\s*=\\s*Перечисления\\s*\\.\\s*(${IDENT})\\s*\\.\\s*${IDENT}`,
+    'giu'
+  );
+  const typeSubject = new RegExp(`ТипЗнч\\s*\\(\\s*(${IDENT}(?:\\s*\\.\\s*${IDENT})*)\\s*\\)\\s*=\\s*Тип\\s*\\(`, 'giu');
+  const hasReturn = word('Возврат', 'iu');
+  const hasRaise = word('ВызватьИсключение', 'iu');
+
+  for (const chain of parseIfChains(masked)) {
+    if (chain.hasElse || chain.branches.length < 3) continue;
+
+    // Ключ — текст выражения без пробелов: `Запись.ТипЧека` и `Запись . ТипЧека` это одно
+    // и то же выражение, а `Запись.ТипЧека` и `Основание` — разные.
+    const perSubject = new Map();
+    for (const branch of chain.branches) {
+      if (branch.condEnd === -1) continue;
+      const condition = masked.slice(branch.condStart, branch.condEnd);
+      const seen = new Map();
+      for (const re of [enumSubject, typeSubject]) {
+        re.lastIndex = 0;
+        let m;
+        while ((m = re.exec(condition)) !== null) {
+          const text = m[1].replace(/\s+/g, '');
+          const key = (re === typeSubject ? 'типзнч:' : '') + text.toLowerCase();
+          if (!seen.has(key)) seen.set(key, { text, kind: re === typeSubject ? 'тип' : m[2] });
+        }
+      }
+      for (const [key, info] of seen) {
+        if (!perSubject.has(key)) perSubject.set(key, { text: info.text, kinds: new Set(), branches: 0 });
+        const entry = perSubject.get(key);
+        entry.kinds.add(info.kind);
+        entry.branches++;
+      }
+    }
+
+    let subject = null;
+    for (const entry of perSubject.values()) if (!subject || entry.branches > subject.branches) subject = entry;
+    if (!subject || subject.branches < 3) continue;
+
+    // Охранная форма: разбор возвращает значение из каждой ветки, а умолчание стоит после
+    // цепочки. Формально `Иначе` нет, по существу оно есть — и находка была бы ложной.
+    const routine = routines.find((r) => chain.start >= r.bodyStart && chain.start < r.end);
+    const everyBranchReturns = chain.branches.every(
+      (b) => b.bodyStart !== -1 && hasReturn.test(masked.slice(b.bodyStart, b.bodyEnd))
+    );
+    const tail = routine ? masked.slice(chain.end, routine.end) : '';
+    if (everyBranchReturns && (hasReturn.test(tail) || hasRaise.test(tail))) continue;
+
+    const kinds = [...subject.kinds].filter((k) => k !== 'тип');
+    findings.push({
+      severity: 'warn',
+      rule: 'qg:BSL-DISPATCH-NO-FALLBACK',
+      line: lineAt(source, chain.start),
+      message:
+        `разбор «${subject.text}» по ${subject.branches} веткам` +
+        (kinds.length ? ` (${kinds.map((k) => `Перечисления.${k}`).join(', ')})` : '') +
+        ' закрыт без «Иначе»: значение, не попавшее ни в одну ветку — новое значение ' +
+        'перечисления, незаполненная ссылка, запись, поставленная вручную, — проходит цепочку ' +
+        'молча, и метод работает дальше так, будто разбор состоялся. Добавь «Иначе», который ' +
+        'фиксирует причину и отказывает в действии; если умолчание допустимо, оно тоже пишется ' +
+        'в «Иначе» явно',
+    });
+  }
+
+  return findings;
+}
+
+/**
+ * Цепочки `Если … КонецЕсли` с границами условий и тел веток.
+ *
+ * Вложенность держится стеком: `Если` внутри ветки — своя цепочка со своим `Иначе`, и путать
+ * их нельзя. Порядок ключевых слов в шаблоне значим: `ИначеЕсли` проверяется раньше `Иначе`
+ * и `Если`, иначе он разобрался бы на два разных слова.
+ */
+export function parseIfChains(masked) {
+  const chains = [];
+  const stack = [];
+  const keywords = new RegExp(`(?<![${W}])(ИначеЕсли|КонецЕсли|Если|Иначе|Тогда)(?![${W}])`, 'giu');
+
+  let m;
+  while ((m = keywords.exec(masked)) !== null) {
+    const keyword = m[1].toLowerCase();
+    const after = m.index + m[0].length;
+
+    if (keyword === 'если') {
+      stack.push({
+        start: m.index,
+        end: masked.length,
+        hasElse: false,
+        branches: [{ condStart: after, condEnd: -1, bodyStart: -1, bodyEnd: -1 }],
+      });
+      continue;
+    }
+
+    const chain = stack[stack.length - 1];
+    if (!chain) continue; // «КонецЕсли» без пары: разбирать нечего, файл всё равно не соберётся
+    const current = chain.branches[chain.branches.length - 1];
+
+    if (keyword === 'тогда') {
+      if (current.condEnd === -1) {
+        current.condEnd = m.index;
+        current.bodyStart = after;
+      }
+      continue;
+    }
+    if (keyword === 'иначеесли') {
+      if (current.bodyEnd === -1) current.bodyEnd = m.index;
+      chain.branches.push({ condStart: after, condEnd: -1, bodyStart: -1, bodyEnd: -1 });
+      continue;
+    }
+    if (keyword === 'иначе') {
+      if (current.bodyEnd === -1) current.bodyEnd = m.index;
+      chain.hasElse = true;
+      continue;
+    }
+    if (keyword === 'конецесли') {
+      if (current.bodyEnd === -1) current.bodyEnd = m.index;
+      chain.end = after;
+      chains.push(chain);
+      stack.pop();
+    }
+  }
+
+  return chains;
+}
+
 function checkFile(path) {
   if (!existsSync(path)) {
     return {
@@ -963,6 +1130,7 @@ function checkFile(path) {
   const findings = lintSource(source, basename(path));
   findings.push(...lintUnboundedColumns(source));
   findings.push(...lintRefDotAccess(source));
+  findings.push(...lintDispatchFallback(source));
   const objectXml = findObjectXml(path);
   let metaResolved = false;
   if (objectXml) {
@@ -1030,6 +1198,21 @@ function evidenceBlock(findings, modulesSeen, metaResolved, files = [], formsSee
   lines.push(
     '[qg applied: layer=code, scope=unbounded-string-column, ids=[qg:BSL-UNBOUNDED-STRING-COLUMN], ' +
       `verdict=${hitCols ? 'violation:qg:BSL-UNBOUNDED-STRING-COLUMN' : 'clean'}]`
+  );
+
+  // Пропуска тоже нет: разбор по веткам возможен в любом модуле, метаданные правилу не нужны,
+  // и модуль без цепочек — это проверенный модуль. Порог в три ветки и контр-сигналы живут
+  // внутри правила, вердикт же говорит ровно об одном: незакрытых цепочек не найдено.
+  const hitDispatch = findings.some((f) => f.rule === 'qg:BSL-DISPATCH-NO-FALLBACK');
+  recordRun({
+    scope: 'dispatch-fallback',
+    tool: 'tools/bsl-lint.mjs',
+    verdict: hitDispatch ? 'violation' : 'clean',
+    files,
+  });
+  lines.push(
+    '[qg applied: layer=code, scope=dispatch-fallback, ids=[qg:BSL-DISPATCH-NO-FALLBACK], ' +
+      `verdict=${hitDispatch ? 'violation:qg:BSL-DISPATCH-NO-FALLBACK' : 'clean'}]`
   );
 
   // `attribute-access` до этого правила был проверкой без инструмента: строку следа писала
