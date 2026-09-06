@@ -74,7 +74,12 @@ function packageFiles() {
   return walk(ROOT);
 }
 
-const files = packageFiles();
+// Планы и разборы в docs/superpowers/ — рабочие документы о будущих правках: они называют
+// проверки и файлы, которых в пакете ещё нет, и цитируют примеры из проекта пользователя.
+// Проверять их как поставляемый состав значило бы запрещать планировать изменение до того,
+// как оно сделано. Навыки, агенты, справочники и README проверяются как прежде.
+const PLANNING_DIR = join(ROOT, 'docs', 'superpowers') + sep;
+const files = packageFiles().filter((p) => !p.startsWith(PLANNING_DIR));
 const rel = (p) => relative(ROOT, p).replace(/\\/g, '/');
 
 // --- 1. Манифесты ------------------------------------------------------------
