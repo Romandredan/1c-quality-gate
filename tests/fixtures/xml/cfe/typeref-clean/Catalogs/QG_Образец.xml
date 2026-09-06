@@ -1,0 +1,61 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Catalog uuid="6f0c9d40-5c1e-4a2b-8f31-000000000001">
+		<InternalInfo>
+			<xr:GeneratedType name="CatalogObject.QG_Образец" category="Object">
+				<xr:TypeId>6f0c9d40-5c1e-4a2b-8f31-000000000011</xr:TypeId>
+				<xr:ValueId>6f0c9d40-5c1e-4a2b-8f31-000000000012</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="CatalogRef.QG_Образец" category="Ref">
+				<xr:TypeId>6f0c9d40-5c1e-4a2b-8f31-000000000013</xr:TypeId>
+				<xr:ValueId>6f0c9d40-5c1e-4a2b-8f31-000000000014</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="CatalogSelection.QG_Образец" category="Selection">
+				<xr:TypeId>6f0c9d40-5c1e-4a2b-8f31-000000000015</xr:TypeId>
+				<xr:ValueId>6f0c9d40-5c1e-4a2b-8f31-000000000016</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="CatalogList.QG_Образец" category="List">
+				<xr:TypeId>6f0c9d40-5c1e-4a2b-8f31-000000000017</xr:TypeId>
+				<xr:ValueId>6f0c9d40-5c1e-4a2b-8f31-000000000018</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="CatalogManager.QG_Образец" category="Manager">
+				<xr:TypeId>6f0c9d40-5c1e-4a2b-8f31-000000000019</xr:TypeId>
+				<xr:ValueId>6f0c9d40-5c1e-4a2b-8f31-00000000001a</xr:ValueId>
+			</xr:GeneratedType>
+		</InternalInfo>
+		<Properties>
+			<Name>QG_Образец</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Образец</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+			<CodeLength>9</CodeLength>
+			<DescriptionLength>25</DescriptionLength>
+			<CodeType>String</CodeType>
+			<CodeAllowedLength>Variable</CodeAllowedLength>
+		</Properties>
+		<ChildObjects>
+			<Attribute uuid="6f0c9d40-5c1e-4a2b-8f31-000000000021">
+				<Properties>
+					<Name>Примечание</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Примечание</v8:content>
+						</v8:item>
+					</Synonym>
+					<Type>
+						<v8:Type>xs:string</v8:Type>
+						<v8:StringQualifiers>
+							<v8:Length>150</v8:Length>
+							<v8:AllowedLength>Variable</v8:AllowedLength>
+						</v8:StringQualifiers>
+					</Type>
+				</Properties>
+			</Attribute>
+		</ChildObjects>
+	</Catalog>
+</MetaDataObject>

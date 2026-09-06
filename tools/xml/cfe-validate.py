@@ -96,6 +96,23 @@ VALID_ENUM_VALUES = {
 
 EXPECTED_NS = 'http://v8.1c.ru/8.3/MDClasses'
 
+# Пространство имён ссылок на типы конфигурации и корень макета схемы компоновки данных
+CURRENT_CONFIG_NS = 'http://v8.1c.ru/8.1/data/enterprise/current-config'
+DCS_SCHEMA_NS = 'http://v8.1c.ru/8.1/data-composition-system/schema'
+
+# Ссылочный тип -> тип объекта в составе расширения (ChildObjects)
+REF_TYPE_TO_CHILD = {
+    'CatalogRef': 'Catalog',
+    'DocumentRef': 'Document',
+    'EnumRef': 'Enum',
+    'ChartOfAccountsRef': 'ChartOfAccounts',
+    'ChartOfCharacteristicTypesRef': 'ChartOfCharacteristicTypes',
+    'ChartOfCalculationTypesRef': 'ChartOfCalculationTypes',
+    'ExchangePlanRef': 'ExchangePlan',
+    'BusinessProcessRef': 'BusinessProcess',
+    'TaskRef': 'Task',
+}
+
 
 class Reporter:
     def __init__(self, max_errors, detailed=False):
@@ -886,6 +903,72 @@ def main():
         r.ok('13. TypeLink: no borrowed forms with tree')
     elif check13_ok:
         r.ok('13. TypeLink: clean')
+
+    # --- Check 14: DCS template type references resolve inside the extension ---
+    # Ссылка на тип конфигурации (CatalogRef.X и подобные) в макете схемы компоновки данных
+    # разрешается в границах расширения. Объект вне состава расширения платформа при загрузке
+    # не находит и молча выбрасывает весь блок <valueType>: XML остаётся валидным, файл на
+    # диске тип содержит, а в базе поле оказывается нетипизированным.
+    check14_ok = True
+    dcs_templates = 0
+    type_refs_checked = 0
+
+    for dp, _dn, files in os.walk(config_dir):
+        for fn in files:
+            if fn != 'Template.xml':
+                continue
+            tpl_path = os.path.join(dp, fn)
+            try:
+                tpl_root = etree.parse(tpl_path).getroot()
+            except (etree.XMLSyntaxError, OSError):
+                continue
+            if etree.QName(tpl_root.tag).namespace != DCS_SCHEMA_NS:
+                continue
+
+            dcs_templates += 1
+            rel_path = os.path.relpath(tpl_path, config_dir).replace('\\', '/')
+            seen_missing = {}
+
+            for type_node in tpl_root.iter(f'{{{NS["v8"]}}}Type'):
+                raw = (type_node.text or '').strip()
+                if ':' not in raw:
+                    continue
+                prefix, local = raw.split(':', 1)
+                # Примитивы (xs:string, xs:dateTime) и типы платформы ссылок на состав не несут
+                if type_node.nsmap.get(prefix) != CURRENT_CONFIG_NS:
+                    continue
+                if '.' not in local:
+                    continue
+                ref_type, obj_name = local.split('.', 1)
+                child_type = REF_TYPE_TO_CHILD.get(ref_type)
+                # Форма ссылки вне таблицы соответствий не проверяется: находки не выдумываем
+                if child_type is None:
+                    continue
+
+                type_refs_checked += 1
+                if obj_name in child_object_index.get(child_type, {}):
+                    continue
+
+                key = f'{child_type}.{obj_name}'
+                if key in seen_missing:
+                    continue
+                seen_missing[key] = True
+                r.warn(
+                    f'14. {rel_path}: [qg:CFE-TYPE-REF-NOT-ADOPTED] type "{raw}" references '
+                    f'{key} вне состава расширения — при загрузке в базу платформа молча '
+                    f'выбросит <valueType>, и поле останется без типа. Заимствуйте {key} '
+                    f'в расширение либо уберите ссылку на этот тип'
+                )
+                check14_ok = False
+
+    if dcs_templates == 0:
+        r.ok('14. DCS type references: no data composition templates')
+    elif check14_ok:
+        r.ok(f'14. DCS type references: {type_refs_checked} checked in {dcs_templates} template(s)')
+
+    if r.stopped:
+        r.finalize(out_file)
+        sys.exit(1)
 
     # --- Breadcrumb: controlled methods (&ИзменениеИКонтроль) drift is not checked here ---
     ctrl_count = 0
