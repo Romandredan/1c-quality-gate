@@ -5564,6 +5564,13 @@ section('Профиль изменения считает инструмент')
     const fromValidator = ev.ARCHETYPES.filter((l) => l !== 'none').sort();
     check('метки архетипов совпадают в profile.mjs и evidence-validator.mjs', JSON.stringify(fromProfile) === JSON.stringify(fromValidator),
       `profile: ${fromProfile.join(',')}\nvalidator: ${fromValidator.join(',')}`);
+    // Равенство двух списков не ловит их СОВМЕСТНОЕ усечение — правку, которая случайно
+    // роняет строку в обоих файлах разом (например, при слиянии веток), и оба списка
+    // молча остаются "равны" на укороченном множестве. До Task 14 нижний порог держал
+    // тест, вычитывавший таблицу «Ось 2» из SKILL.md (>= 10 строк); с переездом таблицы
+    // в tools/profile.mjs он переехал сюда же — рядом с проверкой равенства, а не вместо
+    // неё.
+    check('в profile.mjs заведено не меньше 10 архетипов', fromProfile.length >= 10, `${fromProfile.length}`);
   }
 
   // `form-module` — единственный архетип с условным минимумом arch: срабатывает всегда по
