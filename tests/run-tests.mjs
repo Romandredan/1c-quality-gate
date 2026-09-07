@@ -5494,6 +5494,140 @@ section('Самозаведение контура платформенного 
 }
 
 // ---------------------------------------------------------------------------
+section('Профиль изменения считает инструмент');
+
+{
+  const prof = await import(pathToFileURL(join(ROOT, 'tools', 'profile.mjs')).href);
+  const root = join(WORK, 'profile-root');
+  rmSync(root, { recursive: true, force: true });
+  mkdirSync(join(root, 'src', 'cf', 'CommonModules', 'Модуль', 'Ext'), { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: root });
+  const file = 'src/cf/CommonModules/Модуль/Ext/Module.bsl';
+  writeFileSync(join(root, file), '\uFEFFПроцедура П() Экспорт\n\tЗапрос = Новый Запрос;\n\tНачатьТранзакцию();\nКонецПроцедуры\n', 'utf8');
+  const config = { volume: { c1MaxLines: 40, c1MaxFiles: 1 }, complexity: { maxNesting: 4, maxMethodLines: 120, maxParams: 7 }, archetypes: { custom: [] } };
+  const p = prof.computeProfile({ files: [file], root, config, metrics: {} });
+  check('новый файл — все строки добавленные', p.loc.added >= 4, JSON.stringify(p.loc));
+  check('архетипы query и transaction найдены', p.archetypes.includes('query') && p.archetypes.includes('transaction'), p.archetypes.join(','));
+  check('объём C1, но code поднят архетипом до L2', p.volume === 'C1' && p.resolved.code === 'L2', JSON.stringify(p.resolved));
+  check('driver называет архетип', /^archetype:(query|transaction)$/.test(p.driver), p.driver);
+  check('строка scope готова и с config', /^\[qg scope: volume=C1, files=1, loc=\+\d+\/-\d+, archetypes=\[query,transaction\], .*config=default\]$/.test(p.scopeLine), p.scopeLine);
+
+  const custom = { ...config, archetypes: { custom: [{ name: 'my-arch', markers: ['ОсобыйМаркер'], minCode: 'L2', minArch: '2' }] } };
+  writeFileSync(join(root, file), '\uFEFFПроцедура П() Экспорт\n\tОсобыйМаркер();\nКонецПроцедуры\n', 'utf8');
+  const p2 = prof.computeProfile({ files: [file], root, config: custom, metrics: {} });
+  check('проектный архетип участвует', p2.archetypes.includes('my-arch') && p2.resolved.arch === 2, JSON.stringify(p2));
+
+  // Самопроверка: строка scope, которую печатает инструмент, обязана проходить валидатор
+  // следа тем же путём, каким её прочитает `evidence-validator.mjs` в живом отчёте. Без
+  // этой проверки формат `scopeLine` мог разойтись с тем, что ожидает `extractRecords` /
+  // `validate` — и разъезд обнаружился бы не здесь, а на первом снятии гейта.
+  {
+    const ev = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+    const report = `## quality evidence\n\n${p.scopeLine}\n`;
+    const recs = ev.extractRecords(report);
+    check('scopeLine разбирается валидатором в ровно одну запись scope', recs.length === 1 && recs[0].type === 'scope', JSON.stringify(recs));
+    const { problems } = ev.validate(report, { gate: false, root });
+    const scopeErrors = problems.filter((pr) => pr.severity === 'error');
+    check('валидатор не находит ошибок в записи scope (нестрогий режим)', scopeErrors.length === 0, JSON.stringify(scopeErrors));
+  }
+
+  // Метки архетипов в tools/profile.mjs и в словаре tools/evidence-validator.mjs — два
+  // источника истины об одном и том же множестве. `evidence-validator.mjs` отвергает метку
+  // не из своего списка; расхождение молча отключало бы требование, привязанное к архетипу.
+  {
+    const ev = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+    const fromProfile = prof.ARCHETYPES.map((a) => a.label).sort();
+    const fromValidator = ev.ARCHETYPES.filter((l) => l !== 'none').sort();
+    check('метки архетипов совпадают в profile.mjs и evidence-validator.mjs', JSON.stringify(fromProfile) === JSON.stringify(fromValidator),
+      `profile: ${fromProfile.join(',')}\nvalidator: ${fromValidator.join(',')}`);
+  }
+
+  // `form-module` — единственный архетип с условным минимумом arch: срабатывает всегда по
+  // пути формы, но требует уровень 1 контура arch, только когда правка большая (`loc > 400`).
+  // Маленькая правка формы не обязана тащить за собой архитектурный контур.
+  {
+    const formRoot = join(WORK, 'profile-form-root');
+    rmSync(formRoot, { recursive: true, force: true });
+    mkdirSync(join(formRoot, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+    mkdirSync(join(formRoot, 'src', 'cf', 'Catalogs', 'Каталог', 'Forms', 'Форма', 'Ext', 'Form'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: formRoot });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: formRoot });
+    const formFile = 'src/cf/Catalogs/Каталог/Forms/Форма/Ext/Form/Module.bsl';
+
+    const small = 'Процедура ПриСозданииНаСервере(Отказ)\nКонецПроцедуры\n';
+    writeFileSync(join(formRoot, formFile), small, 'utf8');
+    const pSmall = prof.computeProfile({ files: [formFile], root: formRoot, config, metrics: {} });
+    check('малая правка модуля формы: архетип найден, но arch не поднят', pSmall.archetypes.includes('form-module') && pSmall.resolved.arch === null, JSON.stringify(pSmall));
+
+    const big = 'Процедура ПриСозданииНаСервере(Отказ)\n' + '\t// строка заполнения\n'.repeat(420) + 'КонецПроцедуры\n';
+    writeFileSync(join(formRoot, formFile), big, 'utf8');
+    const pBig = prof.computeProfile({ files: [formFile], root: formRoot, config, metrics: {} });
+    check('большая правка модуля формы (loc > 400): arch поднят до 1', pBig.archetypes.includes('form-module') && pBig.resolved.arch === 1, JSON.stringify(pBig));
+  }
+
+  // `new-common-module` требует не только новый Ext/Module.bsl по пути общего модуля, но и
+  // декларацию объекта (CommonModules/<Имя>.xml) в том же составе правки — без неё это может
+  // быть перехват уже существующего базового модуля расширением (тот же путь у CFE тоже без
+  // истории), а не появление нового объекта метаданных. С декларацией правка выходит из C1
+  // безусловно, каким бы маленьким ни было содержимое, — так требует определение C1 в
+  // `quality-gate/SKILL.md` («нет новых модулей и объектов метаданных»).
+  {
+    const cmRoot = join(WORK, 'profile-common-module-root');
+    rmSync(cmRoot, { recursive: true, force: true });
+    mkdirSync(join(cmRoot, 'src', 'cf', 'CommonModules', 'НовыйМодуль', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: cmRoot });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: cmRoot });
+    const moduleFile = 'src/cf/CommonModules/НовыйМодуль/Ext/Module.bsl';
+    const declFile = 'src/cf/CommonModules/НовыйМодуль.xml';
+    writeFileSync(join(cmRoot, moduleFile), 'Процедура П() Экспорт\nКонецПроцедуры\n', 'utf8');
+
+    const withoutDecl = prof.computeProfile({ files: [moduleFile], root: cmRoot, config, metrics: {} });
+    check('новый Module.bsl без декларации объекта: архетип не срабатывает, объём по размеру',
+      !withoutDecl.archetypes.includes('new-common-module') && withoutDecl.volume === 'C1', JSON.stringify(withoutDecl));
+
+    writeFileSync(join(cmRoot, declFile), '<CommonModule/>\n', 'utf8');
+    const cfg2 = { ...config, volume: { c1MaxFiles: 2, c1MaxLines: 40 } };
+    const withDecl = prof.computeProfile({ files: [moduleFile, declFile], root: cmRoot, config: cfg2, metrics: {} });
+    check('новый Module.bsl с декларацией объекта: архетип срабатывает и выводит из C1 безусловно',
+      withDecl.archetypes.includes('new-common-module') && withDecl.volume === 'C3' && withDecl.resolved.arch === 2,
+      JSON.stringify(withDecl));
+  }
+
+  // Объём C2 без сработавших архетипов и без сложности не даёт контуру arch никакого пола —
+  // «ур. 1-2» в таблице «Ось 1» описывает диапазон, в котором arch работает, когда его
+  // поднял архетип или сложность, а не гарантию хотя бы уровня 1 при любом C2.
+  {
+    const plainRoot = join(WORK, 'profile-plain-c2-root');
+    rmSync(plainRoot, { recursive: true, force: true });
+    mkdirSync(join(plainRoot, 'src', 'cf', 'CommonModules', 'П', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: plainRoot });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: plainRoot });
+    const plainFile = 'src/cf/CommonModules/П/Ext/Module.bsl';
+    writeFileSync(join(plainRoot, plainFile), 'Процедура П() Экспорт\n' + '\tА = А + 1;\n'.repeat(45) + 'КонецПроцедуры\n', 'utf8');
+    const pPlain = prof.computeProfile({ files: [plainFile], root: plainRoot, config, metrics: {} });
+    check('C2 без архетипов и без сложности: arch = skip (нет пола по объёму)',
+      pPlain.volume === 'C2' && pPlain.archetypes.length === 0 && pPlain.resolved.arch === null, JSON.stringify(pPlain));
+  }
+
+  // Пути от корня проекта («src/cf/...») не получают ведущего слэша перед `src` — буквальный
+  // `\/src\/` из брифа не сработал бы никогда на раскладке этого же плагина; закрепляем
+  // `(^|\/)src\/`, которым это исправлено, отдельной проверкой на корневом объекте.
+  {
+    const metaRoot = join(WORK, 'profile-metadata-root');
+    rmSync(metaRoot, { recursive: true, force: true });
+    mkdirSync(join(metaRoot, 'src', 'cf', 'Documents'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: metaRoot });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: metaRoot });
+    const objFile = 'src/cf/Documents/НовыйДокумент.xml';
+    writeFileSync(join(metaRoot, objFile), '<MetaDataObject/>\n', 'utf8');
+    const pMeta = prof.computeProfile({ files: [objFile], root: metaRoot, config, metrics: {} });
+    check('новый XML объекта метаданных прямо под src/: архетип срабатывает, объём C3 безусловно',
+      pMeta.archetypes.includes('new-metadata-object') && pMeta.volume === 'C3' && pMeta.resolved.arch === 3, JSON.stringify(pMeta));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Изолированные наборы тестов — отдельными процессами: у них собственные счётчики
 // и временные каталоги, а их падение обязано быть видно в общем итоге CI.
 for (const suite of ['tests/gate-core.test.mjs', 'tests/opencode-plugin.test.mjs']) {

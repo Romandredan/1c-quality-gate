@@ -67,7 +67,7 @@ const DIMENSIONS = [
  *
  * `none` — законная форма «ни одна метка не сработала»: пустой список запрещён отдельно.
  */
-const ARCHETYPES = [
+export const ARCHETYPES = [
   'none',
   'query',
   'transaction',
