@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Управление гейтом качества: показать состояние, снять после прогона.
+ * Управление гейтом качества: показать состояние, снять после прогона, напечатать план прогона.
  *
  * Гейт снимается ТОЛЬКО отсюда, а не удалением файла руками, потому что снятие обязано
  * оставить след: чем закончился прогон, какой класс правки, что не проверялось и почему.
@@ -8,17 +8,27 @@
  *
  * Использование:
  *   node gate.mjs status
+ *   node gate.mjs plan [--files <f>...] [--json] [--no-analyzer]  # план прогона для модели
+ *   node gate.mjs verify --layer <code|arch|xml|hygiene> <файл>
  *   node gate.mjs release --evidence <файл>            # снять по результатам прогона
  *   node gate.mjs release --class C0 --reason "<...>"  # снять как не требующий проверки
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { validate } from './evidence-validator.mjs';
 import { resolveProjectRoot } from './project-root.mjs';
-import { readConfig, versionSuffix, pluginVersion } from './config.mjs';
+import { readConfig, resolve as resolveConfigState, versionSuffix, pluginVersion } from './config.mjs';
 import { removeFileSync } from './fs-safe.mjs';
 import { stateDirSegments } from './state-dir.mjs';
+import { computeProfile, ARCHETYPES } from './profile.mjs';
+import { SCOPES } from './evidence-scopes.mjs';
+import { readCatalog } from './gen-catalog-index.mjs';
+import { expectedExamined } from './catalog.mjs';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 const PENDING = 'qg-pending.json';
 const DONE = 'qg-done.json';
@@ -462,6 +472,403 @@ function cmdVerify(args) {
   return 0;
 }
 
+// --- gate.mjs plan -----------------------------------------------------------------------
+//
+// Печатает весь план прогона одним вызовом: профиль изменения, команды инструментов в
+// фиксированном порядке, модельные проходы контура code под сработавшую глубину, справочники
+// и разделы чеклиста под архетип, статус контуров arch/xml и то, что обязано закрыться в
+// следе. Раньше эти пять фактов модель собирала сама по трём таблицам SKILL.md — здесь их
+// вычисляет один и тот же код, что и `evidence-validator.mjs` (`computeProfile`), и разойтись
+// они не могут по определению.
+//
+// Порядок инструментов — не перечисление функций SCOPES (там порядка нет, это словарь), а
+// фиксированный порядок исполнения слоя 1: сначала дешёвая гигиена, затем статический
+// анализ и сверка с платформой (движки), затем разборы по тексту, затем каталог антипаттернов
+// (нужен список изменённых файлов, поэтому идёт последним в контуре code), затем XML.
+const TOOL_ORDER = [
+  'tools/hygiene-check.mjs',
+  'tools/analyzer-run.mjs',
+  'tools/platform-context-run.mjs',
+  'tools/query-lint.mjs',
+  'tools/bsl-lint.mjs',
+  'tools/rename-check.mjs',
+  'tools/xml/orphan-check.mjs',
+  'tools/xml/uuid-unique.mjs',
+  'tools/xml/meta-validate.py',
+  'tools/xml/form-validate.py',
+  'tools/catalog.mjs',
+];
+
+/** `<путь-инструмента> → набор расширений, к которым он относится` — из SCOPES/TOOL_BACKED. */
+function toolAppliesMap() {
+  const map = new Map();
+  for (const def of Object.values(SCOPES)) {
+    if (!def.tool) continue;
+    if (!map.has(def.tool)) map.set(def.tool, new Set());
+    for (const ext of def.applies || []) map.get(def.tool).add(ext);
+  }
+  return map;
+}
+
+/** Есть ли среди файлов хотя бы один с расширением, к которому инструмент применим. */
+function toolFires(toolPath, files, appliesMap) {
+  const set = appliesMap.get(toolPath);
+  if (!set || set.size === 0) return false;
+  return files.some((f) => {
+    const m = String(f).match(/\.[^./\\]+$/);
+    return m && set.has(m[0].toLowerCase());
+  });
+}
+
+/** Подмножество файлов с расширением, к которому инструмент применим. */
+function filesFor(toolPath, files, appliesMap) {
+  const set = appliesMap.get(toolPath);
+  if (!set) return [];
+  return files.filter((f) => {
+    const m = String(f).match(/\.[^./\\]+$/);
+    return m && set.has(m[0].toLowerCase());
+  });
+}
+
+function quoteAll(files) {
+  return files.map((f) => `"${f}"`).join(' ');
+}
+
+/**
+ * «Каталог выгрузки» для XML-инструментов дерева (orphan-check, uuid-unique): корень
+ * основной конфигурации или конкретного расширения. Разрешается по раскладке репозитория
+ * (`src/cf`, `src/cfe/<Имя>` — см. CLAUDE.md), а не по маркеру `Configuration.xml` на диске:
+ * на свежесозданном проекте (как в тесте) маркера ещё нет, а раскладка уже есть. Путь,
+ * которому раскладка не соответствует, помечается плейсхолдером — приближение заявлено,
+ * а не выдано за точный разбор.
+ */
+function xmlTreeRoot(file) {
+  const cf = file.match(/^(src\/cf)\//i);
+  if (cf) return cf[1];
+  const cfe = file.match(/^(src\/cfe\/[^/]+)\//i);
+  if (cfe) return cfe[1];
+  return '<каталог выгрузки — src/cf или src/cfe/<Имя>>';
+}
+
+/** Строит команды инструментов в порядке `TOOL_ORDER`, каждая — с буквальным `$QG`. */
+function buildToolCommands({ files, resolvedCode, archetypeLabels }) {
+  const appliesMap = toolAppliesMap();
+  const hasXmlChange = files.some((f) => /\.xml$/i.test(f));
+  const bslFiles = files.filter((f) => /\.(bsl|os)$/i.test(f));
+  const lines = [];
+
+  for (const tool of TOOL_ORDER) {
+    switch (tool) {
+      case 'tools/hygiene-check.mjs':
+        // Гигиена читает байты любого файла — фильтр по расширению здесь не нужен.
+        lines.push(`node "$QG/tools/hygiene-check.mjs" ${quoteAll(files)}`);
+        break;
+      case 'tools/analyzer-run.mjs':
+        if (toolFires(tool, files, appliesMap)) {
+          const changed = filesFor(tool, files, appliesMap);
+          lines.push(`node "$QG/tools/analyzer-run.mjs" ${changed.map((f) => `--changed "${f}"`).join(' ')}`);
+        }
+        break;
+      case 'tools/platform-context-run.mjs':
+        if (toolFires(tool, files, appliesMap)) {
+          const changed = filesFor(tool, files, appliesMap);
+          lines.push(`node "$QG/tools/platform-context-run.mjs" ${changed.map((f) => `--changed "${f}"`).join(' ')}`);
+        }
+        break;
+      case 'tools/query-lint.mjs':
+        if (toolFires(tool, files, appliesMap)) {
+          lines.push(`node "$QG/tools/query-lint.mjs" ${quoteAll(filesFor(tool, files, appliesMap))}`);
+        }
+        break;
+      case 'tools/bsl-lint.mjs':
+        if (toolFires(tool, files, appliesMap)) {
+          lines.push(`node "$QG/tools/bsl-lint.mjs" ${quoteAll(filesFor(tool, files, appliesMap))}`);
+        }
+        break;
+      case 'tools/rename-check.mjs':
+        if (toolFires(tool, files, appliesMap)) {
+          lines.push(`node "$QG/tools/rename-check.mjs" ${quoteAll(filesFor(tool, files, appliesMap))}`);
+        }
+        break;
+      case 'tools/xml/orphan-check.mjs':
+        if (hasXmlChange) {
+          const roots = [...new Set(files.filter((f) => /\.xml$/i.test(f)).map(xmlTreeRoot))].sort();
+          for (const r of roots) lines.push(`node "$QG/tools/xml/orphan-check.mjs" "${r}"`);
+        }
+        break;
+      case 'tools/xml/uuid-unique.mjs':
+        if (hasXmlChange) {
+          const roots = [...new Set(files.filter((f) => /\.xml$/i.test(f)).map(xmlTreeRoot))].sort();
+          for (const r of roots) lines.push(`node "$QG/tools/xml/uuid-unique.mjs" "${r}"`);
+        }
+        break;
+      case 'tools/xml/meta-validate.py':
+        if (hasXmlChange) {
+          for (const f of files.filter((f) => /\.xml$/i.test(f))) {
+            lines.push(`python "$QG/tools/xml/meta-validate.py" -Path "${f}"`);
+          }
+        }
+        break;
+      case 'tools/xml/form-validate.py':
+        if (hasXmlChange) {
+          // Только реальные Form.xml — form-validate проверяет связность обработчиков формы,
+          // а не любую XML.
+          for (const f of files.filter((f) => /\/Forms?\/[^/]+\/(Ext\/Form\/)?Form\.xml$/i.test(f))) {
+            lines.push(`python "$QG/tools/xml/form-validate.py" -Path "${f}"`);
+          }
+        }
+        break;
+      case 'tools/catalog.mjs':
+        // Читателю нечего проверять без изменённых .bsl/.os, и контур code, если он skip,
+        // проход не запускает вовсе.
+        if (resolvedCode !== 'skip' && bslFiles.length) {
+          const arch = archetypeLabels.length ? archetypeLabels.join(',') : 'none';
+          lines.push(`node "$QG/tools/catalog.mjs" index --archetypes ${arch}`);
+          lines.push(
+            `node "$QG/tools/catalog.mjs" attest --result <файл.json> --files ${quoteAll(bslFiles)} --archetypes ${arch}`
+          );
+        }
+        break;
+      default:
+        break;
+    }
+  }
+  return lines;
+}
+
+/** Справочники и разделы чеклиста сработавших архетипов — по данным `profile.mjs`. */
+function refsAndChecklist(archetypeLabels) {
+  const lookup = new Map(ARCHETYPES.map((a) => [a.label, a]));
+  const refs = [];
+  const checklist = new Set();
+  for (const label of archetypeLabels) {
+    const a = lookup.get(label);
+    if (!a) continue; // проектный архетип (archetypes.custom) — своих refs/checklist не несёт
+    for (const r of a.refs || []) if (!refs.includes(r)) refs.push(r);
+    for (const c of a.checklist || []) checklist.add(c);
+  }
+  return { refs, checklist: [...checklist].sort((a, b) => a - b) };
+}
+
+/**
+ * Модельные проходы контура code под фактическую глубину. Порядок и состав повторяют
+ * `bsl-code-review/SKILL.md` («Слой 1б», «Слой 2») — план не придумывает новый процесс,
+ * он лишь избавляет модель от подбора глубины и списка справочников по трём таблицам.
+ */
+function codeModelPasses({ resolvedCode, volume, archetypeLabels, bslFiles, refs, checklist }) {
+  if (resolvedCode === 'skip') return ['контур code пропущен (класс C0)'];
+
+  const passes = [];
+  if (bslFiles.length) {
+    const cards = readCatalog();
+    const active = expectedExamined(archetypeLabels, cards);
+    passes.push(`каталог антипаттернов: субагент antipattern-reader, активных признаков: ${active.length} (см. index выше)`);
+  } else {
+    passes.push('каталог антипаттернов: нет изменённых .bsl/.os — проход не применим');
+  }
+
+  passes.push(
+    refs.length || checklist.length
+      ? `стандарты под архетип: ${refs.length ? refs.join(', ') : 'нет специфичных'}; ` +
+        `чеклист checklist-code.md ${checklist.length ? `разделы ${checklist.join(', ')}` : 'разделы не заданы архетипом'}`
+      : 'стандарты под архетип: архетипы не задают ни справочников, ни разделов чеклиста'
+  );
+
+  passes.push('api-verification: субагент bsl-verifier');
+
+  if (resolvedCode === 'L2') {
+    // Холодный читатель — класс C3 либо затронуты проведение/права; «деньги» и «необратимые
+    // операции» формальным признаком не считаются — это остаётся суждением модели.
+    const coldReader = volume === 'C3' || archetypeLabels.includes('rights') || archetypeLabels.includes('object-event');
+    passes.push(
+      `слой 2: advisor(); холодный читатель — ${coldReader ? 'да (проведение/права либо класс C3)' : `нет (класс ${volume})`}` +
+        ' — «деньги»/«необратимые операции» решает модель по смыслу правки'
+    );
+  }
+  if (volume === 'C3') {
+    passes.push('слой 3 (состязательный аудит): только предложить, запускать по согласию пользователя');
+  }
+  return passes;
+}
+
+function archContourLine(resolved, archetypeLabels, complexityFired) {
+  if (resolved.arch !== null) return `уровень ${resolved.arch}`;
+  if (archetypeLabels.length === 0 && !complexityFired) {
+    return 'skip (архетипы не сработали, сложность не поднята)';
+  }
+  return 'skip (объём ниже порога, сработавшие архетипы/сложность не задают минимума по arch)';
+}
+
+function xmlContourLine(resolvedXml) {
+  const map = {
+    skip: 'skip (правка косметическая, класс C0)',
+    'n/a': 'n/a (XML не менялся)',
+    changed: 'changed (проверить изменённые файлы валидаторами структуры)',
+    'changed+registration': 'changed+registration (плюс сверка «диск ↔ состав»)',
+    full: 'full (объём C3 — полный прогон контура)',
+  };
+  return map[resolvedXml] || resolvedXml;
+}
+
+/** Что обязано закрыться в следе — список идентификаторов и поясняющая строка к каждому. */
+function mustCloseList({ archetypeLabels, resolvedCode }) {
+  const ids = ['compilation'];
+  if (archetypeLabels.includes('query')) ids.push('query-execution');
+  if (resolvedCode !== 'skip') ids.push('ai-antipatterns', 'platform-antipatterns');
+  return ids;
+}
+
+function closeNote(id) {
+  switch (id) {
+    case 'compilation':
+      return 'not_verified reason=no_platform, если платформа не запускалась';
+    case 'query-execution':
+      return '(архетип query): applied либо not_verified reason=no_platform';
+    case 'ai-antipatterns':
+    case 'platform-antipatterns':
+      return 'печатает catalog.mjs attest: applied либо skipped reason=not_applicable/unreadable';
+    default:
+      return '';
+  }
+}
+
+/** Список файлов прогона: `--files <f>...` либо файлы сессии гейта (как в `verify`). */
+function planFileList(args) {
+  const flagValue = typeof args.files === 'string' ? args.files : null;
+  if (flagValue) {
+    return { files: [flagValue, ...(args._ || []).map(String)], sessionId: null, error: null };
+  }
+
+  const state = readPending();
+  if (!state || state.corrupt || Object.keys(state.sessions || {}).length === 0) {
+    return {
+      files: [],
+      sessionId: null,
+      error:
+        'Нужен список файлов: --files <f> [<f> ...] либо взведённый гейт с зафиксированной сессией.\n' + rootLine(),
+    };
+  }
+  const explicit = typeof args.session === 'string' ? args.session : null;
+  const sessionId = pickSession(state, explicit);
+  if (!sessionId) {
+    const ids = Object.keys(state.sessions || {});
+    return {
+      files: [],
+      sessionId: null,
+      error: explicit
+        ? `Сессия "${explicit}" в состоянии гейта не найдена. Доступны: ${ids.join(', ')}\n`
+        : ambiguousSessionMessage(state),
+    };
+  }
+  return { files: Object.keys(state.sessions[sessionId].files || {}), sessionId, error: null };
+}
+
+/** Метрики сложности для `computeProfile`: реальный прогон анализатора либо явный отказ. */
+function analyzerMetrics(rootDir, files, { skip }) {
+  if (skip) return { ok: false, metrics: {}, reason: 'запуск отключён флагом --no-analyzer' };
+
+  const script = join(HERE, 'analyzer-run.mjs');
+  const r = spawnSync(
+    process.execPath,
+    [script, '--json', ...files.flatMap((f) => ['--changed', f])],
+    { cwd: rootDir, encoding: 'utf8', timeout: 120000, maxBuffer: 64 * 1024 * 1024 }
+  );
+
+  if (r.error) return { ok: false, metrics: {}, reason: `не удалось запустить: ${r.error.message}` };
+  if (r.signal) return { ok: false, metrics: {}, reason: `прерван по таймауту (120 с, сигнал ${r.signal})` };
+  if (typeof r.status !== 'number') return { ok: false, metrics: {}, reason: 'анализатор не вернул код завершения' };
+  if (r.status !== 0) {
+    return { ok: false, metrics: {}, reason: `анализатор завершился с кодом ${r.status}` };
+  }
+  try {
+    const parsed = JSON.parse(r.stdout);
+    return { ok: true, metrics: parsed.metrics || {}, reason: null };
+  } catch (e) {
+    return { ok: false, metrics: {}, reason: `вывод анализатора не разобран: ${e.message}` };
+  }
+}
+
+function cmdPlan(args) {
+  const jsonMode = args.json === true;
+  const noAnalyzer = args['no-analyzer'] === true;
+  const write = (s) => {
+    if (!jsonMode) process.stdout.write(s);
+  };
+  const diag = (s) => process.stderr.write(s);
+
+  const { files, sessionId, error } = planFileList(args);
+  if (error) {
+    process.stderr.write(error);
+    return 2;
+  }
+  if (!files.length) {
+    process.stderr.write('Список файлов пуст — план печатать не для чего.\n' + rootLine());
+    return 2;
+  }
+
+  const rootDir = root();
+  write(`1c-quality-gate v${pluginVersion() || '?'}\n`);
+  write(rootLine());
+  write(sessionId ? `Сессия: ${sessionId} (файлов: ${files.length})\n\n` : `Файлы: ${files.length} (переданы явно через --files)\n\n`);
+
+  const configState = resolveConfigState(rootDir);
+  const config = configState.values;
+
+  const { ok: analyzerOk, metrics, reason: analyzerReason } = analyzerMetrics(rootDir, files, { skip: noAnalyzer });
+  if (!analyzerOk) diag(`сложность не считалась: ${analyzerReason}\n`);
+
+  const profile = computeProfile({ files, root: rootDir, config, metrics, configState });
+  const { resolved, archetypes: archetypeLabels, volume, driver } = profile;
+  const complexityFired = analyzerOk && profile.complexity.length > 0;
+  const complexityDisplay = analyzerOk ? (profile.complexity.length ? profile.complexity.join(',') : 'none') : 'not_computed';
+
+  write('## Профиль\n');
+  write(
+    `volume=${volume} files=${profile.files} loc=+${profile.loc.added}/-${profile.loc.removed} ` +
+      `archetypes=[${archetypeLabels.length ? archetypeLabels.join(',') : 'none'}] complexity=[${complexityDisplay}] driver=${driver}\n`
+  );
+  if (!analyzerOk) write(`сложность не считалась: ${analyzerReason}\n`);
+  write(`resolved: code=${resolved.code} arch=${resolved.arch === null ? 'skip' : resolved.arch} xml=${resolved.xml} hygiene=${resolved.hygiene}\n`);
+  write(`${profile.scopeLine}\n\n`);
+
+  const tools = buildToolCommands({ files, resolvedCode: resolved.code, archetypeLabels });
+  write('## Инструменты (в этом порядке)\n');
+  for (const t of tools) write(`${t}\n`);
+  write('\n');
+
+  const { refs, checklist } = refsAndChecklist(archetypeLabels);
+  const bslFiles = files.filter((f) => /\.(bsl|os)$/i.test(f));
+  const passes = codeModelPasses({ resolvedCode: resolved.code, volume, archetypeLabels, bslFiles, refs, checklist });
+  write(`## Модельные проходы контура code (${resolved.code})\n`);
+  for (const p of passes) write(`- ${p}\n`);
+  write('\n');
+
+  const archLine = archContourLine(resolved, archetypeLabels, complexityFired);
+  const xmlLine = xmlContourLine(resolved.xml);
+  write(`## Контур arch: ${archLine}\n`);
+  write(`## Контур xml: ${xmlLine}\n\n`);
+
+  const mustClose = mustCloseList({ archetypeLabels, resolvedCode: resolved.code });
+  write('## Закрыть в следе\n');
+  for (const id of mustClose) write(`- ${id}: ${closeNote(id)}\n`);
+
+  if (jsonMode) {
+    const payload = {
+      profile,
+      scopeLine: profile.scopeLine,
+      tools,
+      references: refs,
+      checklist,
+      modelPasses: { depth: resolved.code, passes },
+      contours: { arch: archLine, xml: xmlLine },
+      mustClose,
+    };
+    process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
+  }
+
+  return 0;
+}
+
 function main(argv) {
   const [cmd, ...rest] = argv.slice(2);
   const args = parseArgs(rest);
@@ -469,6 +876,8 @@ function main(argv) {
   switch (cmd) {
     case 'status':
       return cmdStatus();
+    case 'plan':
+      return cmdPlan(args);
     case 'verify':
       return cmdVerify(args);
     case 'release':
@@ -477,6 +886,7 @@ function main(argv) {
       process.stderr.write(
         'Использование:\n' +
           '  node gate.mjs status\n' +
+          '  node gate.mjs plan [--files <f> ...] [--json] [--no-analyzer]\n' +
           '  node gate.mjs verify --layer <code|arch|xml|hygiene> <файл> [...]\n' +
           '  node gate.mjs release --evidence <файл>\n' +
           '  node gate.mjs release --class C0 --reason "<почему>"\n'

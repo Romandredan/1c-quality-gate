@@ -3126,6 +3126,11 @@ section('Установка анализатора — манифест и со�
 
   check('манифест закрепляет версию', /^\d+\.\d+\.\d+$/.test(manifest.version || ''), manifest.version);
   check('манифест называет источник', manifest.repo === 'itrous/bsl-analyzer' && manifest.urlTemplate.includes('{version}'));
+  // Источник бинарников — только релизы GitHub по https. Инвариант держится тестом, а не проверкой
+  // хоста в рантайме: манифест лежит внутри плагина, подменить его можно лишь вместе со скриптом,
+  // а подменённый файл и так отвергнет сверка sha256. Тест ловит единственный реальный риск — опечатку.
+  check('источник загрузки — релизы GitHub по https',
+    /^https:\/\/github\.com\/\{repo\}\/releases\/download\//.test(manifest.urlTemplate), manifest.urlTemplate);
   const targets = Object.entries(manifest.targets || {});
   check('поддержаны основные платформы', targets.length >= 3, targets.map(([k]) => k).join(', '));
   const badSums = targets.filter(([, t]) => !/^[0-9a-f]{64}$/.test(t.sha256 || '') || !(t.size > 0));
@@ -4964,6 +4969,8 @@ section('Самозаведение контура платформенного 
   // прогонами, делает вердикт невоспроизводимым. Сумма проверяется до запуска, а не после.
   const man = boot.readManifest();
   check('версия сервера закреплена', /^\d+\.\d+\.\d+$/.test(man.version), man.version);
+  check('источник загрузки — релизы GitHub по https',
+    /^https:\/\/github\.com\/\{repo\}\/releases\/download\//.test(man.urlTemplate), man.urlTemplate);
   for (const key of ['win32-x64', 'linux-x64', 'darwin-arm64']) {
     const t = man.targets[key];
     check(
@@ -5731,6 +5738,46 @@ section('Профиль изменения считает инструмент')
     }
     check('checklist по архетипам не разъехался с брифом Task 12', mismatches.length === 0, mismatches.join('; '));
   }
+}
+
+section('План прогона печатает инструмент');
+
+{
+  const root = join(WORK, 'plan-root');
+  rmSync(root, { recursive: true, force: true });
+  mkdirSync(join(root, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: root });
+  writeFileSync(join(root, '.1c-quality-gate.json'), '{}', 'utf8');
+  const file = 'src/cf/CommonModules/М/Ext/Module.bsl';
+  writeFileSync(join(root, file), BOM + 'Процедура П() Экспорт\n\tЗапрос = Новый Запрос;\nКонецПроцедуры\n', 'utf8');
+  const r = run('tools/gate.mjs', ['plan', '--files', file, '--no-analyzer', '--json'], { env: { QG_PROJECT_DIR: root } });
+  check('plan завершается успешно', r.code === 0, r.out.slice(0, 300));
+  const plan = JSON.parse(r.out);
+  check('в плане есть строка scope', /^\[qg scope: /.test(plan.scopeLine), plan.scopeLine);
+  check('в плане названы инструменты для .bsl', plan.tools.some((t) => /bsl-lint\.mjs/.test(t)) && plan.tools.some((t) => /query-lint\.mjs/.test(t)), plan.tools.join('\n'));
+  check('в плане есть вход читателя с архетипом query', plan.tools.some((t) => /catalog\.mjs" index --archetypes query/.test(t)), plan.tools.join('\n'));
+  check('справочники под архетип названы', plan.references.includes('bsl-query-optimization.md'), JSON.stringify(plan.references));
+  check('требования к следу перечислены', plan.mustClose.includes('query-execution') && plan.mustClose.includes('compilation'), JSON.stringify(plan.mustClose));
+  const text = run('tools/gate.mjs', ['plan', '--files', file, '--no-analyzer'], { env: { QG_PROJECT_DIR: root } });
+  check('текстовый план содержит разделы', /## Профиль/.test(text.out) && /## Инструменты/.test(text.out), text.out.slice(0, 400));
+
+  // Контракт JSON закрытый и явный: пропущенный ключ здесь неотличим от «забыли сериализовать» —
+  // тест держит форму объекта равной той, что описана в брифе задачи 12.
+  const expectedKeys = ['profile', 'scopeLine', 'tools', 'references', 'checklist', 'modelPasses', 'contours', 'mustClose'];
+  const missingKeys = expectedKeys.filter((k) => !Object.prototype.hasOwnProperty.call(plan, k));
+  check('в --json есть все ключи контракта', missingKeys.length === 0, `не хватает: ${missingKeys.join(', ')}`);
+
+  // Без --files и без взведённого гейта печатать план не для чего — отказ обязан быть
+  // однозначным (не «пустой список файлов молча»), а не падением с кодом 0.
+  const emptyRoot = join(WORK, 'plan-empty-root');
+  rmSync(emptyRoot, { recursive: true, force: true });
+  mkdirSync(emptyRoot, { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: emptyRoot });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: emptyRoot });
+  const noFiles = run('tools/gate.mjs', ['plan'], { env: { QG_PROJECT_DIR: emptyRoot } });
+  check('plan без --files и без взведённого гейта отказывает', noFiles.code !== 0, `код: ${noFiles.code}`);
+  check('отказ объясняет причину', /--files|гейт|сесси/i.test(noFiles.out), noFiles.out.slice(0, 300));
 }
 
 // ---------------------------------------------------------------------------
