@@ -5819,6 +5819,105 @@ section('План прогона печатает инструмент');
 }
 
 // ---------------------------------------------------------------------------
+section('Валидатор сверяет заявленный профиль с расчётным (Task 13)');
+
+{
+  const ev = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+
+  // Корень с git и qg-pending.json — ровно то, что видит computeProfile внутри validate()
+  // в режиме --gate: без коммита файл лежит «без истории», все его строки — добавленные.
+  const initRoot = (name) => {
+    const root = join(WORK, name);
+    rmSync(root, { recursive: true, force: true });
+    mkdirSync(root, { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: root });
+    return root;
+  };
+  const writePending = (root, fileRel, sessionId = 'S') => {
+    mkdirSync(join(root, '.claude', '.state'), { recursive: true });
+    writeFileSync(
+      join(root, '.claude', '.state', 'qg-pending.json'),
+      JSON.stringify({
+        version: 2,
+        sessions: { [sessionId]: { armedAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', files: { [fileRel]: { kind: 'bsl', edits: 1 } } } },
+      }),
+      'utf8'
+    );
+  };
+  const isVolumeWarn = (p) => p.severity === 'warn' && /ниже расчётного/.test(p.message);
+  const isArchetypeWarn = (p) => p.severity === 'warn' && /отсутствуют в archetypes=/.test(p.message);
+
+  // Step 1 брифа: файл с "Новый Запрос" в 60 строках — computeProfile по умолчаниям
+  // (c1MaxLines=40) даёт volume=C2, archetypes=[query]. Заявленный C1/[none] обязан
+  // получить оба предупреждения; заявленный C2/[query] — ни одного из них.
+  {
+    const root = initRoot('profile-check-mismatch');
+    const fileRel = 'src/cf/CommonModules/М/Ext/Module.bsl';
+    mkdirSync(join(root, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+    const lines = ['Процедура П() Экспорт', '\tЗапрос = Новый Запрос;'];
+    while (lines.length < 59) lines.push(`\t// строка ${lines.length}`);
+    lines.push('КонецПроцедуры');
+    writeFileSync(join(root, fileRel), lines.join('\n') + '\n', 'utf8');
+    writePending(root, fileRel);
+
+    const under = '## quality evidence\n\n' +
+      '[qg scope: volume=C1, files=1, loc=+60/-0, archetypes=[none], complexity=[none], driver=volume, ' +
+      'resolved=code:L1|arch:skip|xml:n/a|hygiene:full, config=default]\n';
+    const { problems } = ev.validate(under, { gate: true, root, session: 'S' });
+    check('заявленный volume ниже расчётного — предупреждение', problems.some(isVolumeWarn), JSON.stringify(problems));
+    check('заявленный archetypes без расчётной метки — предупреждение', problems.some(isArchetypeWarn), JSON.stringify(problems));
+
+    const matching = '## quality evidence\n\n' +
+      '[qg scope: volume=C2, files=1, loc=+60/-0, archetypes=[query], complexity=[none], driver=archetype:query, ' +
+      'resolved=code:L2|arch:skip|xml:n/a|hygiene:full, config=default]\n';
+    const { problems: problems2 } = ev.validate(matching, { gate: true, root, session: 'S' });
+    check('совпадающий профиль — без предупреждений этого рода', !problems2.some(isVolumeWarn) && !problems2.some(isArchetypeWarn), JSON.stringify(problems2));
+  }
+
+  // Расхождение ВВЕРХ не замечание: заявленный volume выше расчётного проходит молча.
+  {
+    const root = initRoot('profile-check-higher-volume');
+    const fileRel = 'src/cf/CommonModules/М/Ext/Module.bsl';
+    mkdirSync(join(root, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+    writeFileSync(join(root, fileRel), 'Процедура П() Экспорт\nКонецПроцедуры\n', 'utf8');
+    writePending(root, fileRel);
+
+    const text = '## quality evidence\n\n' +
+      '[qg scope: volume=C3, files=1, loc=+2/-0, archetypes=[none], complexity=[none], driver=volume, ' +
+      'resolved=code:L1|arch:skip|xml:n/a|hygiene:full, config=default]\n';
+    const { problems } = ev.validate(text, { gate: true, root, session: 'S' });
+    check('заявленный volume выше расчётного — без предупреждения', !problems.some(isVolumeWarn), JSON.stringify(problems));
+  }
+
+  // Лишняя заявленная метка (сверх расчётной) — тоже не замечание: расширение списка легально.
+  {
+    const root = initRoot('profile-check-extra-archetype');
+    const fileRel = 'src/cf/CommonModules/М/Ext/Module.bsl';
+    mkdirSync(join(root, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+    writeFileSync(join(root, fileRel), 'Процедура П() Экспорт\n\tЗапрос = Новый Запрос;\nКонецПроцедуры\n', 'utf8');
+    writePending(root, fileRel);
+
+    const text = '## quality evidence\n\n' +
+      '[qg scope: volume=C1, files=1, loc=+3/-0, archetypes=[query,transaction], complexity=[none], driver=archetype:query, ' +
+      'resolved=code:L2|arch:skip|xml:n/a|hygiene:full, config=default]\n';
+    const { problems } = ev.validate(text, { gate: true, root, session: 'S' });
+    check('лишняя заявленная метка — без предупреждения', !problems.some(isArchetypeWarn), JSON.stringify(problems));
+  }
+
+  // Без взведённого гейта (qg-pending.json отсутствует) сверять профиль не с чем — молчим
+  // полностью, а не заявляем предупреждение о нехватке данных.
+  {
+    const root = initRoot('profile-check-no-pending');
+    const text = '## quality evidence\n\n' +
+      '[qg scope: volume=C1, files=1, loc=+60/-0, archetypes=[none], complexity=[none], driver=volume, ' +
+      'resolved=code:L1|arch:skip|xml:n/a|hygiene:full, config=default]\n';
+    const { problems } = ev.validate(text, { gate: true, root, session: 'S' });
+    check('нет состояния гейта — сверка профиля пропущена молча', !problems.some(isVolumeWarn) && !problems.some(isArchetypeWarn), JSON.stringify(problems));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Изолированные наборы тестов — отдельными процессами: у них собственные счётчики
 // и временные каталоги, а их падение обязано быть видно в общем итоге CI.
 for (const suite of ['tests/gate-core.test.mjs', 'tests/opencode-plugin.test.mjs']) {

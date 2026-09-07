@@ -24,6 +24,7 @@ import { SCOPES, TOOL_BACKED, RENAMED, isKnownScope, isKnownQgId } from './evide
 import { readJournal, coveredFiles, normalizePath } from './run-journal.mjs';
 import { projectRoot } from './project-root.mjs';
 import { stateDirSegments } from './state-dir.mjs';
+import { computeProfile } from './profile.mjs';
 
 export const SECTION = '## quality evidence';
 
@@ -289,6 +290,11 @@ function ownSession(root, sessionId = null) {
       // Ключи состояния приводятся тем же канонизатором, что и журнал: для файла вне корня
       // состояние хранит абсолютный путь, и сверка обязана работать поверх этой разницы.
       files: Object.keys(s.files || {}).map((p) => normalizePath(p, root)),
+      // Те же файлы, но БЕЗ канонизации: `computeProfile` (сверка заявленного профиля с
+      // расчётным) читает git и содержимое файла по пути, а нормализованный ключ ломает
+      // это чтение регистром/разделителем — нужен путь ровно в том виде, в каком его
+      // записал `armGate` (тот же вид, что `gate.mjs status` печатает наружу).
+      rawFiles: Object.keys(s.files || {}),
     };
   } catch {
     return null;
@@ -600,6 +606,68 @@ export function validate(text, { gate = false, root = null, session = null } = {
   const since = own?.since || null;
   const fresh = journal.filter((r) => !since || String(r.ts || '') >= since);
   const runScopes = new Set(fresh.map((r) => r.scope));
+
+  // Заявленный профиль (запись scope) сверяется с расчётным — тем, что по тем же файлам
+  // сессии вернул бы `computeProfile`. Модель пишет `volume` и `archetypes` по памяти о
+  // таблицах `SKILL.md`; правило асимметрично: модель ВПРАВЕ ПОДНЯТЬ глубину (заметила
+  // контекст, которого нет в самом дифф — например, соседний архетип по просьбе
+  // пользователя), но НЕ ВПРАВЕ ПОНИЗИТЬ — заявленный C1 при расчётном C2 отправляет
+  // часть проверок в глубину, которая правку не покрывает.
+  //
+  // Метрики намеренно НЕ считаются (`metrics: {}`): прогон анализатора внутри валидатора —
+  // отдельный дорогой процесс, который сам пишет в журнал прогонов; вызвать его отсюда
+  // значило бы рекурсивно тревожить проверку, которую сам же валидатор и читает чуть выше.
+  // Ось сложности здесь не нужна — сверяются только volume и archetypes, а не resolved.
+  //
+  // Проверка молча пропускается (не предупреждение — у плагина просто нет данных для
+  // сравнения), когда: состояния гейта нет, сессия неоднозначна без --session (`own`
+  // уже обнулён выше), список файлов сессии пуст, git недоступен (`note: 'no_git'`) или
+  // запись scope не одна (это уже отдельная ошибка выше, сравнивать не с чем однозначно).
+  // Весь блок обёрнут в try/catch: сбой чтения git или файла не обязан ронять валидатор —
+  // тогда сверка просто не состоялась, как и при отсутствующих данных.
+  //
+  // Пока предупреждение в обе стороны: следующим MINOR понижение станет ошибкой
+  // (docs/RELEASING.md, переходное окно).
+  if (scopes.length === 1 && own?.rawFiles?.length) {
+    try {
+      const computed = computeProfile({
+        files: own.rawFiles,
+        root: projectDir,
+        config: project?.values,
+        metrics: {},
+        configState: project,
+      });
+      if (computed.note !== 'no_git') {
+        const scopeRec = scopes[0];
+        const declaredVolume = String(scopeRec.fields.volume || '');
+        if (
+          VOLUMES.includes(declaredVolume) &&
+          VOLUMES.indexOf(declaredVolume) < VOLUMES.indexOf(computed.volume)
+        ) {
+          add(
+            'warn',
+            scopeRec.line,
+            `volume="${declaredVolume}" в записи scope ниже расчётного: computeProfile по файлам сессии ` +
+              `даёт ${computed.volume}. Модель вправе поднять глубину, но не понизить — в следующем MINOR ` +
+              'несоответствие станет ошибкой (docs/RELEASING.md)'
+          );
+        }
+        const declaredArchetypes = Array.isArray(scopeRec.fields.archetypes) ? scopeRec.fields.archetypes : [];
+        const missing = computed.archetypes.filter((a) => !declaredArchetypes.includes(a));
+        if (missing.length) {
+          add(
+            'warn',
+            scopeRec.line,
+            `архетипы расчётного профиля (computeProfile) — ${missing.join(', ')} — отсутствуют в ` +
+              `archetypes=[${declaredArchetypes.join(',') || 'none'}] записи scope. Модель вправе расширить ` +
+              'список, но не сузить — в следующем MINOR несоответствие станет ошибкой (docs/RELEASING.md)'
+          );
+        }
+      }
+    } catch {
+      /* профиль не посчитан (нечитаемый файл, сбой git) — сверять не с чем, молчим */
+    }
+  }
 
   // Контур платформенного API обязан отчитаться, если в правке есть модули.
   //
