@@ -58,10 +58,20 @@ const args = Object.fromEntries(
     .map((a, i, all) => (a.startsWith('--') ? [a.slice(2), all[i + 1] ?? true] : []))
     .filter((e) => e.length)
 );
+
+/** Числовой флаг с проверкой: молчаливый NaN хуже явной ошибки — порог, который никогда
+ * не выполняется, неотличим от прогона, где всё найдено, пока не прочитаешь код. */
+function numArg(name, def) {
+  const raw = args[name];
+  const v = raw === undefined ? def : Number(raw);
+  if (!Number.isFinite(v)) throw new Error(`--${name}: ожидалось число, получено ${JSON.stringify(raw)}`);
+  return v;
+}
+
 const MODEL = args.model || 'sonnet';
-const MIN_RECALL = Number(args['min-recall'] ?? 0.8);
-const MAX_FP = Number(args['max-false-positive'] ?? 0.1);
-const CONCURRENCY = Math.max(1, Number(args.concurrency ?? 4));
+const MIN_RECALL = numArg('min-recall', 0.8);
+const MAX_FP = numArg('max-false-positive', 0.1);
+const CONCURRENCY = Math.max(1, numArg('concurrency', 4));
 const glob = args.cases ? new RegExp('^' + String(args.cases).replace(/\*/g, '.*') + '$') : null;
 
 const SCHEMA = {
