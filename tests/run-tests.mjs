@@ -2850,27 +2850,60 @@ section('Аттестация результата читателя катало
   const runs = journal.readJournal(root).filter((r) => r.tool === 'tools/catalog.mjs');
   check('успешная аттестация оставила записи в журнале для обоих скоупов', new Set(runs.map((r) => r.scope)).size === 2, JSON.stringify(runs));
 
-  // Правило 4 брифа: файл, который читатель не смог прочитать, не считается проверенным.
-  // `not_verified: dimension=<scope>` тут не годится — список измерений в evidence-validator.mjs
-  // закрытый и имён скоупов каталога не содержит, такая строка была бы отвергнута собственным
-  // валидатором плагина. Печатается `skipped ... reason=unreadable`, и именно это проверяем —
-  // круглым рейсом через сам валидатор в строгом режиме (--gate), а не только по форме строки.
-  const unreadableResult = { ...good, unreadable: ['src/Module.bsl'] };
-  const ur = cat.attest({ result: unreadableResult, files: ['src/Module.bsl'], archetypes: [], root });
-  check('непрочитанный файл не закрывает проверку', ur.ok === true, ur.problems.join('; '));
-  check('вместо applied печатается skipped reason=unreadable',
-    ur.evidence.every((l) => /scope=(ai|platform)-antipatterns, reason=unreadable, files=1/.test(l)),
-    ur.evidence.join('\n'));
-  check('запись не использует закрытый список dimension', ur.evidence.every((l) => !l.includes('not_verified')), ur.evidence.join('\n'));
+  // Правило 4 (уточнено ревью): unreadable — тоже утверждение о работе инструмента и требует
+  // отметки в журнале наравне с not_applicable; иначе читатель объявляет любой файл нечитаемым
+  // и уходит от правила 3 (настоящая цитата) без единого прогона. attest не верит заявлению
+  // на слово — сам проверяет, что файл входит в --files и на диске действительно не читается
+  // (не существует или readFileSync бросает).
+  const uRoot = join(WORK, 'attest-root-unreadable');
+  mkdirSync(join(uRoot, 'src'), { recursive: true });
+  writeFileSync(join(uRoot, '.1c-quality-gate.json'), '{}', 'utf8');
+  const readableBsl = join(uRoot, 'src', 'Readable.bsl');
+  writeFileSync(readableBsl, 'Функция Тест()\n\tВозврат 1;\nКонецФункции\n', 'utf8');
 
-  const fixture =
-    '## quality evidence\n\n' +
-    '[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, config=default]\n' +
-    '[qg sentinel: target=v8std, id=std454, status=found]\n' +
-    ur.evidence.join('\n') + '\n';
-  const fixturePath = writeBytes('ev-catalog-unreadable.md', fixture);
-  const gated = run('tools/evidence-validator.mjs', [fixturePath, '--gate']);
-  check('строка skipped reason=unreadable проходит валидатор в строгом режиме', gated.code === 0, gated.out.trim().slice(0, 300));
+  // (a1) читаемый файл, объявленный нечитаемым, — отвергается: иначе это обход правила 3.
+  const lying = { examined: expectedExamined, files: ['src/Readable.bsl'], findings: [], unreadable: ['src/Readable.bsl'] };
+  const badLie = cat.attest({ result: lying, files: ['src/Readable.bsl'], archetypes: [], root: uRoot });
+  check('читаемый файл, объявленный нечитаемым, отвергается',
+    badLie.ok === false && badLie.problems.some((p) => /читается/.test(p)), badLie.problems.join('; '));
+
+  // (a2) файл вне --files, объявленный нечитаемым, — тоже отвергается.
+  const outOfScope = { ...lying, unreadable: ['src/Other.bsl'] };
+  const badScope = cat.attest({ result: outOfScope, files: ['src/Readable.bsl'], archetypes: [], root: uRoot });
+  check('файл вне состава прогона, объявленный нечитаемым, отвергается',
+    badScope.ok === false && badScope.problems.some((p) => /вне состава/.test(p)), badScope.problems.join('; '));
+
+  // (b) настоящий нечитаемый файл — никогда не создавался на диске.
+  const realUnreadable = { examined: expectedExamined, files: ['src/Missing.bsl'], findings: [], unreadable: ['src/Missing.bsl'] };
+  const urOk = cat.attest({ result: realUnreadable, files: ['src/Missing.bsl'], archetypes: [], root: uRoot });
+  check('настоящий нечитаемый файл аттестуется', urOk.ok === true, urOk.problems.join('; '));
+  check('печатается skipped reason=unreadable для обоих скоупов',
+    urOk.evidence.every((l) => /scope=(ai|platform)-antipatterns, reason=unreadable, files=1/.test(l)), urOk.evidence.join('\n'));
+  check('запись не использует закрытый список dimension', urOk.evidence.every((l) => !l.includes('not_verified')), urOk.evidence.join('\n'));
+
+  const uJournal = journal.readJournal(uRoot).filter((r) => r.tool === 'tools/catalog.mjs' && r.verdict === 'unreadable');
+  check('unreadable-прогон оставил отметку в журнале для обоих скоупов',
+    new Set(uJournal.map((r) => r.scope)).size === 2, JSON.stringify(uJournal));
+
+  // (c) круглый рейс через сам валидатор в строгом режиме — обходной путь из замечания ревью
+  // (skipped reason=unreadable без единого прогона) должен быть закрыт, а настоящий прогон —
+  // приниматься.
+  const scopeLine = '[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, config=default]\n';
+  const sentinelLine = '[qg sentinel: target=v8std, id=std454, status=found]\n';
+  const evidenceBody = urOk.evidence.join('\n') + '\n';
+
+  const bypassRoot = join(WORK, 'attest-root-unreadable-bypass');
+  mkdirSync(bypassRoot, { recursive: true });
+  writeFileSync(join(bypassRoot, '.1c-quality-gate.json'), '{}', 'utf8');
+  const bypassFixture = writeBytes('ev-catalog-unreadable-bypass.md', '## quality evidence\n\n' + scopeLine + sentinelLine + evidenceBody);
+  const bypassed = run('tools/evidence-validator.mjs', [bypassFixture, '--gate'], { env: { CLAUDE_PROJECT_DIR: bypassRoot } });
+  check('skipped reason=unreadable без прогона в журнале отклонён (--gate)',
+    bypassed.code === 2, bypassed.out.trim().slice(0, 300));
+
+  const gatedFixture = writeBytes('ev-catalog-unreadable.md', '## quality evidence\n\n' + scopeLine + sentinelLine + evidenceBody);
+  const gatedOk = run('tools/evidence-validator.mjs', [gatedFixture, '--gate'], { env: { CLAUDE_PROJECT_DIR: uRoot } });
+  check('skipped reason=unreadable с отметкой в журнале принят (--gate)',
+    gatedOk.code === 0, gatedOk.out.trim().slice(0, 300));
 }
 
 // Регрессия, которая в репозитории уже была: справочник языка подавал РАЗРЕШЕННЫЕ как выбор

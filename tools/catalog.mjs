@@ -61,10 +61,30 @@ export function attest({ result, files, archetypes = [], root = projectRoot() })
     problems.push(`files результата не совпадают с переданными: ${JSON.stringify(declared)} против ${JSON.stringify(wanted)}`);
   }
 
+  // Читаем каждый файл сами, а не на слово читателя: без этого читатель объявляет
+  // «unreadable» любой файл и уходит от правила 3 (настоящая цитата) — заявленная нечитаемость
+  // дешевле выдуманной находки, если её никто не проверяет.
   const contents = new Map();
+  const actuallyUnreadable = new Set();
   for (const f of files) {
     const abs = resolve(root, f);
-    if (existsSync(abs)) contents.set(normalizePath(f, root), readFileSync(abs, 'utf8').split(/\r?\n/));
+    const key = normalizePath(f, root);
+    try {
+      if (!existsSync(abs)) { actuallyUnreadable.add(key); continue; }
+      contents.set(key, readFileSync(abs, 'utf8').split(/\r?\n/));
+    } catch {
+      actuallyUnreadable.add(key);
+    }
+  }
+
+  const declaredUnreadable = Array.isArray(result?.unreadable) ? result.unreadable : [];
+  const unreadable = [];
+  for (const [i, f] of declaredUnreadable.entries()) {
+    const where = `unreadable[${i}] (${f})`;
+    const key = normalizePath(String(f || ''), root);
+    if (!wanted.includes(key)) { problems.push(`${where}: файл вне состава прогона (--files)`); continue; }
+    if (!actuallyUnreadable.has(key)) { problems.push(`${where}: файл объявлен нечитаемым, но читается`); continue; }
+    unreadable.push(f);
   }
 
   const findings = Array.isArray(result?.findings) ? result.findings : [];
@@ -83,7 +103,6 @@ export function attest({ result, files, archetypes = [], root = projectRoot() })
     if (!window.includes(quote)) problems.push(`${where}: цитата не найдена в строках ${line - 2}…${line + 2} файла ${f.file}`);
   }
 
-  const unreadable = Array.isArray(result?.unreadable) ? result.unreadable : [];
   if (problems.length) return { ok: false, problems, evidence: [] };
 
   const evidence = [];
@@ -97,9 +116,10 @@ export function attest({ result, files, archetypes = [], root = projectRoot() })
     // `not_verified: dimension=<scope>` не годится: список измерений в evidence-validator.mjs
     // закрытый (compilation, query-execution, static-analysis, cross-config-resolution,
     // artifact-freshness, platform-api) и не включает имена скоупов каталога — такая запись
-    // была бы отвергнута собственным валидатором плагина. `skipped ... reason=unreadable`
-    // остаётся в открытом пространстве причин и, как analyzer_unavailable, отметки в журнале
-    // не требует; запись в журнал всё равно оставляем — она не мешает и фиксирует факт прохода.
+    // была бы отвергнута собственным валидатором плагина. `skipped ... reason=unreadable` —
+    // тоже утверждение о работе инструмента («attest посмотрел файлы, часть не читается»), и
+    // валидатор требует по нему отметку в журнале наравне с `not_applicable`: иначе читатель
+    // объявляет unreadable без единого прогона и уходит от всех проверок разом.
     if (unreadable.length) {
       evidence.push(`[qg skipped: layer=code, scope=${scope}, reason=unreadable, files=${unreadable.length}]`);
       recordRun({ scope, tool: TOOL, verdict: 'unreadable', files, root });
