@@ -2849,6 +2849,28 @@ section('Аттестация результата читателя катало
   const journal = await import(pathToFileURL(join(ROOT, 'tools', 'run-journal.mjs')).href);
   const runs = journal.readJournal(root).filter((r) => r.tool === 'tools/catalog.mjs');
   check('успешная аттестация оставила записи в журнале для обоих скоупов', new Set(runs.map((r) => r.scope)).size === 2, JSON.stringify(runs));
+
+  // Правило 4 брифа: файл, который читатель не смог прочитать, не считается проверенным.
+  // `not_verified: dimension=<scope>` тут не годится — список измерений в evidence-validator.mjs
+  // закрытый и имён скоупов каталога не содержит, такая строка была бы отвергнута собственным
+  // валидатором плагина. Печатается `skipped ... reason=unreadable`, и именно это проверяем —
+  // круглым рейсом через сам валидатор в строгом режиме (--gate), а не только по форме строки.
+  const unreadableResult = { ...good, unreadable: ['src/Module.bsl'] };
+  const ur = cat.attest({ result: unreadableResult, files: ['src/Module.bsl'], archetypes: [], root });
+  check('непрочитанный файл не закрывает проверку', ur.ok === true, ur.problems.join('; '));
+  check('вместо applied печатается skipped reason=unreadable',
+    ur.evidence.every((l) => /scope=(ai|platform)-antipatterns, reason=unreadable, files=1/.test(l)),
+    ur.evidence.join('\n'));
+  check('запись не использует закрытый список dimension', ur.evidence.every((l) => !l.includes('not_verified')), ur.evidence.join('\n'));
+
+  const fixture =
+    '## quality evidence\n\n' +
+    '[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, config=default]\n' +
+    '[qg sentinel: target=v8std, id=std454, status=found]\n' +
+    ur.evidence.join('\n') + '\n';
+  const fixturePath = writeBytes('ev-catalog-unreadable.md', fixture);
+  const gated = run('tools/evidence-validator.mjs', [fixturePath, '--gate']);
+  check('строка skipped reason=unreadable проходит валидатор в строгом режиме', gated.code === 0, gated.out.trim().slice(0, 300));
 }
 
 // Регрессия, которая в репозитории уже была: справочник языка подавал РАЗРЕШЕННЫЕ как выбор

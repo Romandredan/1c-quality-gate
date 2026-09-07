@@ -94,8 +94,15 @@ export function attest({ result, files, archetypes = [], root = projectRoot() })
       recordRun({ scope, tool: TOOL, verdict: 'not_applicable', files, root });
       continue;
     }
+    // `not_verified: dimension=<scope>` не годится: список измерений в evidence-validator.mjs
+    // закрытый (compilation, query-execution, static-analysis, cross-config-resolution,
+    // artifact-freshness, platform-api) и не включает имена скоупов каталога — такая запись
+    // была бы отвергнута собственным валидатором плагина. `skipped ... reason=unreadable`
+    // остаётся в открытом пространстве причин и, как analyzer_unavailable, отметки в журнале
+    // не требует; запись в журнал всё равно оставляем — она не мешает и фиксирует факт прохода.
     if (unreadable.length) {
-      evidence.push(`[qg not_verified: dimension=${scope}, reason=unreadable, files=${unreadable.length}]`);
+      evidence.push(`[qg skipped: layer=code, scope=${scope}, reason=unreadable, files=${unreadable.length}]`);
+      recordRun({ scope, tool: TOOL, verdict: 'unreadable', files, root });
       continue;
     }
     const hit = findings.find((f) => scopeOf(f.id) === scope);
