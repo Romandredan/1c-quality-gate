@@ -110,7 +110,7 @@ node "$QG/tools/platform-context-run.mjs" --changed <файл> [--changed <фа�
 
 ### 1. Антипаттерны производительности и механики платформы
 
-Источник: `references/bsl-anti-patterns.md` — прогоняется **всегда**, при любой глубине.
+Источник: `references/catalog/INDEX.md` — прогоняется **всегда**, при любой глубине.
 
 | Антипаттерн | Что искать | Важность |
 |---|---|---|
@@ -156,15 +156,15 @@ python "$QG/tools/xml/form-validate.py" -Path <Form.xml>   # правился м
 | Признак | Sev | Что ловит | Разбор |
 |---|---|---|---|
 | `qg:QRY-ALIAS-SHADOWS-FIELD`, `qg:QRY-ALIAS-SHADOWS-NESTED-TABLE` | 🔴 / 🟠 | псевдоним совпал с именем колонки ВТ пакета или табличной части, чей владелец в той же ветке: «Неоднозначное поле». Разыменование — 🔴, без обращения через точку — 🟠 | `references/bsl-query-reference.md` |
-| `qg:QRY-TOP-WITHOUT-ORDER` | 🟡 | `ПЕРВЫЕ N` без `УПОРЯДОЧИТЬ ПО` — набор строк недетерминирован | `references/bsl-anti-patterns.md` п. 5 |
-| `qg:BSL-TXN-IN-HANDLER` | 🟠 | своя `НачатьТранзакцию` внутри обработчика, который платформа уже выполняет в транзакции (#std783 п. 1.4) | `references/bsl-anti-patterns.md` п. 8б |
-| `qg:BSL-ENUM-STRING-ASSIGN` | 🟠 | примитив в поле строго ссылочного типа: сборка молчит, падает при записи | `references/bsl-anti-patterns.md` п. 8в |
-| `qg:BSL-STALE-LOCAL-CALL` | 🔴 | вызов метода, чьё объявление было в HEAD и исчезло в правке: переименование не доведено до точек вызова | `references/bsl-anti-patterns.md` п. 8г |
-| `qg:BSL-UNBOUNDED-STRING-COLUMN` | 🟠 | строковая колонка без квалификатора у таблицы, уходящей в параметр запроса (#std432 п. 3.1) | `references/catalog/AI-16.md` |
-| `qg:BSL-REF-DOT-ACCESS` | 🔴 / 🟠 | обращение к реквизиту ссылки через точку: объект читается целиком ради одного поля (#std437). Ссылочность доказывается присваиванием в методе или типом параметра из описания #std453 (🟠 — описание могло устареть), либо именем на «Ссылка» | `references/bsl-anti-patterns.md` п. 2 |
-| `qg:BSL-FORM-ATTR-SHADOW` | 🔴 | имя реквизита формы у переменной | `references/bsl-anti-patterns.md` п. 8д |
-| `qg:BSL-DISPATCH-NO-FALLBACK` | 🟠 | перебор значений перечисления или типов по трём и более веткам без `Иначе`: непредусмотренное значение проходит цепочку молча | `references/bsl-anti-patterns.md` п. 8е |
-| `qg:BSL-DB-READ-IN-LOOP` | 🟠 | чтение базы, достижимое из тела цикла через вызов метода: то же N+1, что в п. 1, только распределённое по методам (#std436). Прямую форму ловит анализатор | `references/bsl-anti-patterns.md` п. 1а |
+| `qg:QRY-TOP-WITHOUT-ORDER` | 🟡 | `ПЕРВЫЕ N` без `УПОРЯДОЧИТЬ ПО` — набор строк недетерминирован | `references/catalog/QRY-TOP-WITHOUT-ORDER.md` |
+| `qg:BSL-TXN-IN-HANDLER` | 🟠 | своя `НачатьТранзакцию` внутри обработчика, который платформа уже выполняет в транзакции (#std783 п. 1.4) | `references/catalog/BSL-TXN-IN-HANDLER.md` |
+| `qg:BSL-ENUM-STRING-ASSIGN` | 🟠 | примитив в поле строго ссылочного типа: сборка молчит, падает при записи | `references/catalog/BSL-ENUM-STRING-ASSIGN.md` |
+| `qg:BSL-STALE-LOCAL-CALL` | 🔴 | вызов метода, чьё объявление было в HEAD и исчезло в правке: переименование не доведено до точек вызова | `references/catalog/BSL-STALE-LOCAL-CALL.md` |
+| `qg:BSL-UNBOUNDED-STRING-COLUMN` | 🟠 | строковая колонка без квалификатора у таблицы, уходящей в параметр запроса (#std432 п. 3.1) | `references/catalog/BSL-UNBOUNDED-STRING-COLUMN.md` |
+| `qg:BSL-REF-DOT-ACCESS` | 🔴 / 🟠 | обращение к реквизиту ссылки через точку: объект читается целиком ради одного поля (#std437). Ссылочность доказывается присваиванием в методе или типом параметра из описания #std453 (🟠 — описание могло устареть), либо именем на «Ссылка» | `references/catalog/BSL-REF-DOT-ACCESS.md` |
+| `qg:BSL-FORM-ATTR-SHADOW` | 🔴 | имя реквизита формы у переменной | `references/catalog/BSL-FORM-ATTR-SHADOW.md` |
+| `qg:BSL-DISPATCH-NO-FALLBACK` | 🟠 | перебор значений перечисления или типов по трём и более веткам без `Иначе`: непредусмотренное значение проходит цепочку молча | `references/catalog/BSL-DISPATCH-NO-FALLBACK.md` |
+| `qg:BSL-DB-READ-IN-LOOP` | 🟠 | чтение базы, достижимое из тела цикла через вызов метода: то же N+1, что в п. 1, только распределённое по методам (#std436). Прямую форму ловит анализатор | `references/catalog/BSL-DB-READ-IN-LOOP.md` |
 
 **`attribute-access` покрыт инструментом лишь частично.** Доказать ссылочность в пределах
 одного файла удаётся не всегда: ссылка из чужой функции или из недокументированного параметра

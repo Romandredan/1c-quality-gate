@@ -2530,13 +2530,13 @@ section('Проектная настройка — создание, разре�
 section('Полнота правил (контуры code и arch выполняет модель — проверяем, что правила на месте)');
 
 const mustContain = [
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'Запрос в цикле', 'антипаттерн «запрос в цикле»'],
+  ['skills/bsl-code-review/references/catalog/BSL-QUERY-IN-LOOP.md', 'Запрос в цикле', 'антипаттерн «запрос в цикле»'],
   ['skills/bsl-code-review/references/catalog/AI-01.md', 'id: qg:AI-01', 'запись набора с неполным отбором'],
   ['skills/bsl-code-review/references/catalog/AI-04.md', 'AI-04', 'отчёт о непрогнанной проверке'],
   ['skills/bsl-code-review/references/catalog/AI-05.md', 'AI-05', 'зелёная сборка вместо компиляции'],
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'Коррелированный подзапрос', 'коррелированный подзапрос в условии'],
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'ИНДЕКСИРОВАТЬ ПО', 'временная таблица без индекса'],
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'СообщитьПользователю', 'Сообщить() как уведомление'],
+  ['skills/bsl-code-review/references/catalog/BSL-CORRELATED-SUBQUERY.md', 'Коррелированный подзапрос', 'коррелированный подзапрос в условии'],
+  ['skills/bsl-code-review/references/catalog/BSL-TEMPTABLE-NO-INDEX.md', 'ИНДЕКСИРОВАТЬ ПО', 'временная таблица без индекса'],
+  ['skills/bsl-code-review/references/catalog/BSL-MESSAGE-AS-NOTIFY.md', 'СообщитьПользователю', 'Сообщить() как уведомление'],
   ['skills/quality-gate/references/adversarial-audit.md', 'опроверг', 'состязательный аудит: обратная постановка'],
   ['skills/bsl-architecture-review/references/ai-antipatterns-arch.md', 'ARCH-AI-05', 'параллельная коллекция вместо поля'],
   ['skills/xml-structure-review/SKILL.md', 'ChildObjects', 'проверка регистрации в составе'],
@@ -2559,15 +2559,15 @@ const mustContain = [
   // Транзакция внутри неявной транзакции обработчика: отменяется ВНЕШНЯЯ, и падает потом
   // не то место, где ошибка. Правило и инструмент обязаны быть названы вместе — иначе
   // находка инструмента остаётся без объяснения «как чинить».
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'qg:BSL-TXN-IN-HANDLER', 'транзакция в обработчике — пункт каталога'],
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', '#std783 п. 1.4', 'у пункта про вложенную транзакцию есть якорь стандарта'],
+  ['skills/bsl-code-review/references/catalog/BSL-TXN-IN-HANDLER.md', 'qg:BSL-TXN-IN-HANDLER', 'транзакция в обработчике — пункт каталога'],
+  ['skills/bsl-code-review/references/catalog/BSL-TXN-IN-HANDLER.md', '#std783 п. 1.4', 'у пункта про вложенную транзакцию есть якорь стандарта'],
   ['skills/bsl-code-review/references/checklist-code.md', 'qg:BSL-TXN-IN-HANDLER', 'вложенная транзакция — пункт чеклиста'],
   ['skills/bsl-code-review/SKILL.md', 'bsl-lint.mjs', 'контур прогоняет проверку транзакций'],
   ['agents/bsl-verifier.md', 'bsl-lint.mjs', 'верификатор прогоняет проверку транзакций'],
   // ПЕРВЫЕ N без порядка: набор строк меняется между прогонами и СУБД. Обе половины важны —
   // и правило, и его законные формы, иначе проверка начнёт ругаться на проверку существования.
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'qg:QRY-TOP-WITHOUT-ORDER', 'ПЕРВЫЕ N без порядка — пункт каталога'],
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'Законные формы', 'у правила про ПЕРВЫЕ N названы контр-сигналы'],
+  ['skills/bsl-code-review/references/catalog/QRY-TOP-WITHOUT-ORDER.md', 'qg:QRY-TOP-WITHOUT-ORDER', 'ПЕРВЫЕ N без порядка — пункт каталога'],
+  ['skills/bsl-code-review/references/catalog/QRY-TOP-WITHOUT-ORDER.md', 'Законные формы', 'у правила про ПЕРВЫЕ N названы контр-сигналы'],
   ['skills/bsl-code-review/references/checklist-code.md', 'qg:QRY-TOP-WITHOUT-ORDER', 'ПЕРВЫЕ N без порядка — пункт чеклиста'],
   ['skills/bsl-code-review/references/checklist-code.md', '#std659', 'избыточные блокировки'],
   ['skills/bsl-code-review/references/checklist-code.md', '#std661', 'блокирующее чтение остатков в начале транзакции'],
@@ -2681,26 +2681,26 @@ const mustContain = [
   ['skills/bsl-code-review/references/analyzer-output.md', 'ИзменениеИКонтроль', 'известный случай неразобранного файла сохранён'],
   ['skills/bsl-code-review/references/analyzer-output.md', 'subsystemsFilter', 'разделение гейтового и проектного конфигов сохранено'],
   ['skills/bsl-code-review/references/cold-reader.md', 'независимость', 'условие независимости холодного читателя сохранено'],
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'BSL-ENUM-STRING-ASSIGN', 'примитив в ссылочном поле разобран в антипаттернах'],
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'Составные типы', 'у правила о ссылочных полях назван контр-сигнал'],
+  ['skills/bsl-code-review/references/catalog/BSL-ENUM-STRING-ASSIGN.md', 'BSL-ENUM-STRING-ASSIGN', 'примитив в ссылочном поле разобран в антипаттернах'],
+  ['skills/bsl-code-review/references/catalog/BSL-ENUM-STRING-ASSIGN.md', 'Составные типы', 'у правила о ссылочных полях назван контр-сигнал'],
   // Список обработчиков закрытый и ровно пятичленный: удаление и отмену проведения забывают
   // чаще прочего, а инструмент их ловит — расхождение доку с инструментом недопустимо.
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'ОбработкаУдаленияПроведения', 'в списке неявных транзакций есть отмена проведения'],
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'ПередУдалением', 'в списке неявных транзакций есть удаление'],
+  ['skills/bsl-code-review/references/catalog/BSL-TXN-IN-HANDLER.md', 'ОбработкаУдаленияПроведения', 'в списке неявных транзакций есть отмена проведения'],
+  ['skills/bsl-code-review/references/catalog/BSL-TXN-IN-HANDLER.md', 'ПередУдалением', 'в списке неявных транзакций есть удаление'],
   // Механизация #std437. Ключевое — не само правило, а то, что скоуп перестал быть
   // самодекларацией; и обратная половина: инструмент задаёт нижнюю границу, а не верхнюю.
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'qg:BSL-REF-DOT-ACCESS', 'разыменование ссылки механизировано и разобрано'],
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'нижняя граница', 'у правила о точке заявлено частичное покрытие'],
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'Отбор.Ссылка.Значение', 'элемент отбора назван контр-сигналом'],
+  ['skills/bsl-code-review/references/catalog/BSL-REF-DOT-ACCESS.md', 'qg:BSL-REF-DOT-ACCESS', 'разыменование ссылки механизировано и разобрано'],
+  ['skills/bsl-code-review/references/catalog/BSL-REF-DOT-ACCESS.md', 'нижняя граница', 'у правила о точке заявлено частичное покрытие'],
+  ['skills/bsl-code-review/references/catalog/BSL-REF-DOT-ACCESS.md', 'Отбор.Ссылка.Значение', 'элемент отбора назван контр-сигналом'],
   ['skills/bsl-code-review/references/catalog/AI-02.md', 'Механизированная часть', 'AI-02 указывает на механизированную половину'],
   ['skills/bsl-code-review/SKILL.md', 'нижнюю границу, а не верхнюю', 'контур предупреждает, что инструмент покрывает часть скоупа'],
   ['skills/bsl-code-review/references/checklist-code.md', 'BSL-REF-DOT-ACCESS', 'чтение реквизита через точку — пункт чеклиста'],
   // Доказательство из кода, а не из списка имён: словарь ссылочных имён был отвергнут
   // как нерабочий (в конфигурации сотни ссылочных объектов, а переменные называют как
   // угодно). Обе половины основания обязаны остаться в разборе.
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'присваивание в этом же методе', 'основание из кода названо'],
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', '#std453', 'тип параметра из описания метода назван основанием'],
-  ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'с именами объектов конфигурации инструмент не сопоставляет', 'сопоставление имён с метаданными исключено явно'],
+  ['skills/bsl-code-review/references/catalog/BSL-REF-DOT-ACCESS.md', 'присваивание в этом же методе', 'основание из кода названо'],
+  ['skills/bsl-code-review/references/catalog/BSL-REF-DOT-ACCESS.md', '#std453', 'тип параметра из описания метода назван основанием'],
+  ['skills/bsl-code-review/references/catalog/BSL-REF-DOT-ACCESS.md', 'с именами объектов конфигурации инструмент не сопоставляет', 'сопоставление имён с метаданными исключено явно'],
 ];
 for (const [file, needle, label] of mustContain) {
   const p = join(ROOT, file);
@@ -2727,7 +2727,7 @@ section('Бюджет навыков и достижимость справоч�
     //
     // 27 вместо 26 КБ: строка таблицы признаков за `qg:BSL-DISPATCH-NO-FALLBACK`. Строку
     // таблицы вынести некуда — правило, которого навык не называет, не будет применено, а
-    // разбор у него и так в справочнике (`bsl-anti-patterns.md` п. 8е). Свободного места в
+    // разбор у него и так в справочнике (`catalog/BSL-DISPATCH-NO-FALLBACK.md`). Свободного места в
     // навыке при этом оставалось 47 байт, то есть долг назван вслух: следующая проверка
     // упрётся в тот же порог, и оплачивать её придётся сжатием соседних абзацев.
     'bsl-code-review': 27 * 1024,
@@ -3262,6 +3262,20 @@ section('Реестр признаков — полнота: источники 
   const aiOrphans = Object.keys(registry).filter((id) => id.startsWith('qg:AI-')).filter((id) => !aiInCatalog.includes(id));
   check('в реестре нет AI-признаков без карточки', aiOrphans.length === 0, aiOrphans.join(', '));
 
+  // Платформенные и инструментальные признаки контура кода (BSL-*, QRY-*) живут карточками
+  // общего каталога — та же полнота, что уже проверена для AI-*, и то же требование к `tool`:
+  // карточка не должна утверждать инструмент, которого нет в реестре, и наоборот.
+  // `qg:QRY-EXECUTED` — не антипаттерн, а отметка «запрос исполнялся» в следе, карточки для
+  // неё не бывает по построению.
+  const codeIds = Object.keys(registry).filter((id) => /^qg:(AI|BSL|QRY)-/.test(id) && id !== 'qg:QRY-EXECUTED');
+  const noCard = codeIds.filter((id) => !cardIds.includes(id));
+  check('у каждого признака контура кода есть карточка', noCard.length === 0, noCard.join(', '));
+  const noRegistry = cardIds.filter((id) => !registry[id]);
+  check('у каждой карточки есть признак в реестре', noRegistry.length === 0, noRegistry.join(', '));
+  for (const c of gen.readCatalog()) {
+    check(`${c.id}: tool карточки совпадает с реестром`, (c.tool || null) === (registry[c.id]?.tool || null), `${c.tool} против ${registry[c.id]?.tool}`);
+  }
+
   // Перечень инструментальных проверок в README — та же истина, что TOOL_BACKED, только прозой.
   // Разъезд тихий: список читают, чтобы понять, где нужна отметка в журнале, и пропущенное имя
   // выглядит проверкой без инструмента. Так и случилось: из перечня выпали три проверки.
@@ -3299,7 +3313,7 @@ section('Реестр признаков — полнота: источники 
   const lintSrc = readFileSync(join(ROOT, 'tools', 'bsl-lint.mjs'), 'utf8');
   const handlers = [...((lintSrc.match(/TRANSACTIONAL_HANDLERS = new Set\(\[([\s\S]*?)\]\)/) || [, ''])[1])
     .matchAll(/'([^']+)'/g)].map((m) => m[1]);
-  const antiPatterns = readFileSync(join(ROOT, 'skills/bsl-code-review/references/bsl-anti-patterns.md'), 'utf8').toLowerCase();
+  const antiPatterns = readFileSync(join(ROOT, 'skills/bsl-code-review/references/catalog/BSL-TXN-IN-HANDLER.md'), 'utf8').toLowerCase();
   const lost = handlers.filter((h) => !antiPatterns.includes(h));
   check('обработчики неявной транзакции названы и в справочнике', handlers.length === 5 && lost.length === 0,
     `в инструменте ${handlers.length}, нет в справочнике: ${lost.join(', ') || '—'}`);

@@ -63,5 +63,8 @@ jobs:
           git diff --exit-code skills/bsl-architecture-review/references/signs-map.md \
             || { echo "signs-map.md устарел — перегенерируй: node tools/gen-signs-map-md.mjs"; exit 1; }
 
+      - name: Индекс каталога антипаттернов синхронен с карточками
+        run: node tools/gen-catalog-index.mjs --check
+
       - name: Тесты программных проверок
         run: node tests/run-tests.mjs

@@ -12,7 +12,7 @@
 
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname, relative, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { TOOL_BACKED, RENAMED, isKnownScope } from './evidence-scopes.mjs';
 
@@ -416,6 +416,22 @@ if (existsSync(signsJson) && existsSync(signsMd)) {
     }
   } catch (e) {
     fail('signs-map.json', `не разобран: ${e.message}`);
+  }
+}
+
+// --- 6б. Индекс каталога синхронен с карточками ------------------------------
+// Проверяется только на реальном дереве плагина: `gen-catalog-index.mjs` считает CATALOG_DIR
+// от собственного расположения модуля, а не от `ROOT`, поэтому на синтетических деревьях
+// тестов (`--root`, без каталога карточек) модуля по этому пути нет — блок молча пропускается,
+// а не даёт ложную находку на пустом каталоге.
+{
+  const genFile = join(ROOT, 'tools', 'gen-catalog-index.mjs');
+  if (existsSync(genFile)) {
+    const gen = await import(pathToFileURL(genFile).href);
+    const cards = gen.readCatalog();
+    const expected = gen.renderIndex(cards);
+    const current = existsSync(gen.INDEX_FILE) ? readFileSync(gen.INDEX_FILE, 'utf8') : '';
+    if (current !== expected) fail('catalog/INDEX.md', 'индекс устарел — перегенерируй: node tools/gen-catalog-index.mjs');
   }
 }
 
