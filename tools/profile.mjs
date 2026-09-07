@@ -21,7 +21,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, relative, resolve as resolvePath, sep } from 'node:path';
-import { DEFAULTS } from './config.mjs';
+import { DEFAULTS, resolve as resolveConfigState, evidenceValue } from './config.mjs';
 
 /**
  * Таблица архетипов кода — перенесена из таблицы «Ось 2» `quality-gate/SKILL.md` (столбцы
@@ -36,22 +36,33 @@ import { DEFAULTS } from './config.mjs';
  *
  * `minArch` архетипа `form-module` — единственный условный: уровень 1 требуется только при
  * `loc > 400` изменённых строк (см. `resolveMinArch`), а не всегда, как у прочих архетипов.
- * Представлено объектом `{ when: 'loc>400', level: 1 }`, а не текстом-«магией»: строку
- * пришлось бы разбирать заново на каждый вызов, а форма объекта проверяется тестом один раз.
+ * Представлено структурой `{ metric: 'loc', threshold: 400, level: 1 }`, а не текстом-«магией»
+ * и не встроенным в `resolveMinArch` числом: порог читается из данных архетипа, а не
+ * сравнивается со строкой-меткой условия — второе значило бы держать «400» в двух местах
+ * (здесь и в самой функции), и они бы разъехались на первой же правке одного без другого.
+ *
+ * `\b` в JS-регулярных выражениях считает словом только `[A-Za-z0-9_]` — кириллица в это
+ * определение не входит, и переход «кириллическая буква → небуквенный символ» границей НЕ
+ * является: `/\bАсинх\b/i` не находит «Асинх» вообще нигде (проверено прогоном: маркеры
+ * `object-event`, `client-server`, `async-client` из брифа с `\b` не срабатывали ни на одном
+ * реальном BSL-фрагменте теста). Граница здесь — `(?<![WORD])`/`(?![WORD])` с явным классом
+ * `WORD`, который включает кириллицу, — тот же приём, что уже используется в
+ * `rename-check.mjs` (`bareCalls`, константа `W`).
  */
+const WORD = 'A-Za-zА-Яа-яЁё0-9_';
 export const ARCHETYPES = [
   { label: 'query', markers: [/Новый\s+Запрос/i, /ВЫБРАТЬ\s/i], minCode: 'L2', minArch: null, refs: ['bsl-query-optimization.md', 'bsl-query-reference.md'], checklist: [6, 7] },
   { label: 'transaction', markers: [/НачатьТранзакцию/i, /Заблокировать\s*\(/i, /БлокировкаДанных/i], minCode: 'L2', minArch: null, refs: ['bsl-coding-standards.md'], checklist: [8] },
   { label: 'record-set', markers: [/Записать\s*\(\s*Истина\s*\)/i, /СоздатьНаборЗаписей/i], minCode: 'L2', minArch: null, refs: [] },
-  { label: 'object-event', markers: [/Процедура\s+(ПередЗаписью|ПриЗаписи|ОбработкаПроведения|ОбработкаУдаленияПроведения|ПередУдалением)\b/i], minCode: 'L2', minArch: 1, refs: [], checklist: [9] },
+  { label: 'object-event', markers: [new RegExp(`Процедура\\s+(ПередЗаписью|ПриЗаписи|ОбработкаПроведения|ОбработкаУдаленияПроведения|ПередУдалением)(?![${WORD}])`, 'i')], minCode: 'L2', minArch: 1, refs: [], checklist: [9] },
   { label: 'integration', markers: [/HTTPСоединение/i, /WSПрокси/i, /Новый\s+COMОбъект/i], minCode: 'L2', minArch: 1, refs: [], checklist: [15] },
   { label: 'rights', markers: [/УстановитьПривилегированныйРежим/i], pathMarker: /\/Roles\/[^/]+\/Ext\/Rights\.xml$/i, minCode: 'L2', minArch: 2, refs: [], checklist: [13, 14] },
   { label: 'cfe-patch', markers: [/&(Перед|После|Вместо|ИзменениеИКонтроль)\s*\(/i], minCode: 'L2', minArch: 1, refs: [] },
   { label: 'scheduled-job', markers: [/ФоновыеЗадания\./i, /РегламентныеЗадания\./i], pathMarker: /\/ScheduledJobs\//i, minCode: 'L2', minArch: null, refs: [], checklist: [12] },
-  { label: 'client-server', markers: [/&НаСервере(БезКонтекста)?\b/i, /&НаКлиенте(НаСервере)?\b/i], minCode: 'L1', minArch: 1, refs: [], checklist: [10] },
+  { label: 'client-server', markers: [new RegExp(`&НаСервере(БезКонтекста)?(?![${WORD}])`, 'i'), new RegExp(`&НаКлиенте(НаСервере)?(?![${WORD}])`, 'i')], minCode: 'L1', minArch: 1, refs: [], checklist: [10] },
   { label: 'user-dialog', markers: [/ПоказатьВопрос/i, /ВопросАсинх/i, /ОповещениеОЗавершении/i], minCode: 'L1', minArch: 1, refs: [] },
-  { label: 'form-module', markers: [], pathMarker: /\/Forms?\/[^/]+\/(Ext\/Form\/)?Module\.bsl$/i, minCode: 'L1', minArch: { when: 'loc>400', level: 1 }, refs: ['bsl-form-module-rules.md'], checklist: [10] },
-  { label: 'async-client', markers: [/\bАсинх\b/i, /\bЖдать\b/i, /Обещание/i], minCode: 'L1', minArch: null, refs: ['bsl-async.md'] },
+  { label: 'form-module', markers: [], pathMarker: /\/Forms?\/[^/]+\/(Ext\/Form\/)?Module\.bsl$/i, minCode: 'L1', minArch: { metric: 'loc', threshold: 400, level: 1 }, refs: ['bsl-form-module-rules.md'], checklist: [10] },
+  { label: 'async-client', markers: [new RegExp(`(?<![${WORD}])Асинх(?![${WORD}])`, 'i'), new RegExp(`(?<![${WORD}])Ждать(?![${WORD}])`, 'i'), /Обещание/i], minCode: 'L1', minArch: null, refs: ['bsl-async.md'] },
   {
     label: 'new-common-module',
     markers: [],
@@ -95,11 +106,19 @@ function codeMax(...values) {
   return best;
 }
 
-/** Уровень `arch` архетипа. `form-module` его вычисляет по `loc`, остальные хранят число (или null). */
+/**
+ * Уровень `arch` архетипа. Большинство хранят готовое число (или `null`, если архетип на
+ * `arch` не влияет); `form-module` хранит условие — `{ metric, threshold, level }` — и порог
+ * читается из этих полей, а не сравнивается со строкой-меткой: значение «400» живёт ровно в
+ * одном месте (в самих данных архетипа), а не дублируется здесь текстом.
+ */
 function resolveMinArch(archetype, loc) {
   const m = archetype.minArch;
   if (m === null || m === undefined) return null;
-  if (typeof m === 'object') return loc > (m.when === 'loc>400' ? 400 : 0) ? m.level : null;
+  if (typeof m === 'object') {
+    if (m.metric === 'loc') return loc > m.threshold ? m.level : null;
+    return null; // неизвестная форма условия — консервативно не поднимаем arch
+  }
   return Number(m);
 }
 
@@ -220,23 +239,17 @@ function complexityFindings(files, metrics, cfg) {
 }
 
 /**
- * `config=` записи `scope`: `default`, если ни одна секция настройки не отличается от
- * умолчаний плагина (`DEFAULTS` из `config.mjs`), иначе `custom:<секция>[+<секция>]`.
+ * Приближение на случай, когда штамп неоткуда взять по-настоящему: ни `configState`, ни
+ * читаемый `root` не даны. Сравнивает переданные значения `config` с `DEFAULTS` ПО ЗНАЧЕНИЮ.
  *
- * Не то же самое, что `evidenceValue()` из `config.mjs`: та смотрит на ИСТОЧНИК каждого
- * значения (файл/окружение/умолчание) через `resolve()`, а сюда приходят уже разрешённые
- * значения без источника (ровно форма `readConfig()`, без `.sources`) — так их передаёт тест
- * задачи и так их удобно собирать вызывающему (`gate.mjs plan`, Task 12) из `readConfig()`.
- * Секция, отсутствующая в переданном `config`, считается умолчанием: `computeProfile`
- * принимает частичный объект (см. тест) и не обязан достраивать его до полного перед вызовом.
- * Единственный случай, где это расходится с `evidenceValue()`, — секция, для которой файл
- * настройки явно повторил значение умолчания: `evidenceValue()` всё равно назвал бы её
- * переопределённой (переопределение — это факт «значение пришло из файла», а не «значение
- * отличается»), а сравнение по значению здесь этого не заметит. Расхождение неопасно: в
- * строгом режиме `evidence-validator.mjs` сверяет отметку `config=` не с этим инструментом, а
- * с живой настройкой проекта (`evidenceValue(resolveConfig(root))`) — источник истины один.
+ * Это НЕ то же самое, что `evidenceValue()` из `config.mjs` — та смотрит на ИСТОЧНИК каждого
+ * значения (файл/окружение/умолчание), и файл, явно повторивший значение умолчания, всё
+ * равно даёт `custom:<секция>` (переопределение — это факт «значение пришло из файла», а не
+ * «значение отличается»). Значит на таком проекте это приближение соврёт: назовёт `default`
+ * там, где `evidenceValue()` — и валидатор в `--gate` — назовут `custom:...`. Поэтому это
+ * только последний резерв (см. `computeConfigStamp`), а не основной путь.
  */
-function configStamp(config) {
+function configStampByValue(config) {
   const changed = [];
   for (const section of Object.keys(DEFAULTS)) {
     const provided = config?.[section];
@@ -247,16 +260,49 @@ function configStamp(config) {
 }
 
 /**
+ * `config=` записи `scope` — источник истины один: `evidenceValue()` из `config.mjs`, та же
+ * функция, что печатает `node config.mjs show` и что сверяет `evidence-validator.mjs` в
+ * `--gate`. Порядок:
+ *
+ * 1. `configState` — если вызывающий уже прочитал настройку через `resolve()`/`config.mjs`
+ *    (у него есть `.sources`), используем её значение напрямую — это ТОЧНЫЙ путь.
+ * 2. иначе — сами читаем настройку с диска по `root` (`resolveConfigState(root)`): это тот
+ *    же файл, из которого вызывающий обычно и собирал переданный `config` (`readConfig(root)`),
+ *    поэтому результат согласован без явной передачи состояния.
+ * 3. `root` нечитаем (упало исключение) — последний резерв: сравнение по значению
+ *    (`configStampByValue`), с объявленной неточностью в её же комментарии.
+ *
+ * Без этого расхождения `computeProfile` мог посчитать `config=default` там, где проект явно
+ * (пусть и значением, равным умолчанию) переопределил секцию в `.1c-quality-gate.json` —
+ * `evidence-validator.mjs` в `--gate` эту же сборку отклонил бы как «config расходится с
+ * настройкой проекта», хотя её печатает тот же самый плагин.
+ */
+function computeConfigStamp({ config, root, configState }) {
+  if (configState) return evidenceValue(configState);
+  if (root) {
+    try {
+      return evidenceValue(resolveConfigState(root));
+    } catch {
+      /* root есть, но настройка не читается — падаем на приближение ниже */
+    }
+  }
+  return configStampByValue(config);
+}
+
+/**
  * Считает профиль изменения по трём осям и разрешает его в глубину контуров `code`/`arch`
  * (плюс `xml`/`hygiene` — по матрице объёма из «Шага 2» `quality-gate/SKILL.md`).
  *
  * `files` — пути от корня проекта (`root`), как их печатает `gate.mjs status`. `config` —
  * разрешённые значения настройки (форма `readConfig()`: секции `volume`, `complexity`,
- * `archetypes.custom`; остальные секции не читаются профилем, но участвуют в `configStamp`,
- * если переданы). `metrics` — `metrics` из `analyzer-run.mjs --json` (`{}`, если анализатор
- * не запускался — тогда сложность считается пустой, а не приближается вручную).
+ * `archetypes.custom` используются для порогов и проектных архетипов; на штамп `config=` НЕ
+ * влияет — см. `computeConfigStamp`). `configState` — необязательно; результат
+ * `resolve()`/`config.mjs` (с `.sources`), если он уже есть у вызывающего — тогда штамп
+ * берётся из него напрямую, без повторного чтения диска. `metrics` — `metrics` из
+ * `analyzer-run.mjs --json` (`{}`, если анализатор не запускался — тогда сложность считается
+ * пустой, а не приближается вручную).
  */
-export function computeProfile({ files, root, config, metrics }) {
+export function computeProfile({ files, root, config, metrics, configState }) {
   const cfg = {
     c1MaxFiles: config?.volume?.c1MaxFiles ?? DEFAULTS.volume.c1MaxFiles,
     c1MaxLines: config?.volume?.c1MaxLines ?? DEFAULTS.volume.c1MaxLines,
@@ -340,12 +386,35 @@ export function computeProfile({ files, root, config, metrics }) {
     volume === 'C0' ? 'skip' : !hasXmlChange ? 'n/a' : volume === 'C1' ? 'changed' : volume === 'C2' ? 'changed+registration' : 'full';
   const resolvedHygiene = 'full';
 
-  // --- driver: что именно подняло глубину ------------------------------------
+  // --- driver: что именно подняло ХОТЯ БЫ ОДНУ ось (code или arch) -----------
+  //
+  // Раньше проверялся только code: при volume>=C2 его пол уже L2, архетип с minCode:'L2'
+  // (например, object-event) его не поднимает — и driver выходил 'volume', хотя контур
+  // arch пошёл ИСКЛЮЧИТЕЛЬНО из-за архетипа (без него arch был бы skip). Теперь «поднял»
+  // проверяется отдельно по каждой оси через контрфактическое сравнение — во что превратился
+  // бы итог БЕЗ вклада сложности / БЕЗ вклада архетипов, — и совпадение по code или по arch
+  // одинаково считается «подняло». Приоритет источника прежний: сложность, затем архетип,
+  // затем объём; имя архетипа для driver выбирается по той оси, которую он реально поднял.
+  const codeWithoutComplexity = codeMax(codeBase, codeFromArchetypes);
+  const archWithoutComplexity = archFromArchetypes.length ? Math.max(...archFromArchetypes) : null;
+  const complexityRaisedCode = CODE_RANK[resolvedCode] > CODE_RANK[codeWithoutComplexity];
+  const complexityRaisedArch = (resolvedArch ?? -1) > (archWithoutComplexity ?? -1);
+
+  const codeWithoutArchetypes = codeMax(codeBase, codeFromComplexity);
+  const archWithoutArchetypes = archFromComplexity;
+  const archetypeRaisedCode = CODE_RANK[resolvedCode] > CODE_RANK[codeWithoutArchetypes];
+  const archetypeRaisedArch = (resolvedArch ?? -1) > (archWithoutArchetypes ?? -1);
+
   let driver;
-  if (complexityFired && CODE_RANK[codeFromComplexity] > Math.max(CODE_RANK[codeBase], CODE_RANK[codeFromArchetypes])) {
+  if (complexityFired && (complexityRaisedCode || complexityRaisedArch)) {
     driver = `complexity:${complexity[0].split(':')[0]}`;
-  } else if (fired.length > 0 && CODE_RANK[codeFromArchetypes] > CODE_RANK[codeBase]) {
-    const top = fired.find((a) => a.minCode === resolvedCode) || fired[0];
+  } else if (fired.length > 0 && (archetypeRaisedCode || archetypeRaisedArch)) {
+    // Сперва ищем архетип, объясняющий поднятую code (совпадает по minCode с итогом); не
+    // нашли (значит подняли arch) — ищем по совпадению фактического minArch с итогом arch.
+    const top =
+      (archetypeRaisedCode && fired.find((a) => a.minCode === resolvedCode)) ||
+      (archetypeRaisedArch && fired.find((a) => resolveMinArch(a, totalLoc) === resolvedArch)) ||
+      fired[0];
     driver = `archetype:${top.label}`;
   } else {
     driver = 'volume';
@@ -360,7 +429,7 @@ export function computeProfile({ files, root, config, metrics }) {
     `[qg scope: volume=${volume}, files=${files.length}, loc=+${added}/-${removed}, ` +
     `archetypes=[${archetypesText}], complexity=[${complexityText}], driver=${driver}, ` +
     `resolved=code:${resolvedCode}|arch:${archText}|xml:${resolvedXml}|hygiene:${resolvedHygiene}, ` +
-    `config=${configStamp(config)}]`;
+    `config=${computeConfigStamp({ config, root, configState })}]`;
 
   const result = {
     volume,

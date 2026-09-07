@@ -5625,6 +5625,112 @@ section('Профиль изменения считает инструмент')
     check('новый XML объекта метаданных прямо под src/: архетип срабатывает, объём C3 безусловно',
       pMeta.archetypes.includes('new-metadata-object') && pMeta.volume === 'C3' && pMeta.resolved.arch === 3, JSON.stringify(pMeta));
   }
+
+  // Fix round 1 / Important 1. Штамп `config=` обязан идти из `evidenceValue()`, а не из
+  // сравнения по значению: проект, явно повторивший в файле значение умолчания, всё равно
+  // получает `custom:<секция>` — переопределение это факт «пришло из файла», а не «отличается
+  // от умолчания». Без этого `evidence-validator.mjs` в `--gate` отклонял бы корректный отчёт
+  // как «config расходится с настройкой проекта» — обе стороны сверки обязаны совпадать.
+  {
+    const cfgMod = await import(pathToFileURL(join(ROOT, 'tools', 'config.mjs')).href);
+    const cfgRoot = join(WORK, 'profile-config-root');
+    rmSync(cfgRoot, { recursive: true, force: true });
+    mkdirSync(join(cfgRoot, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: cfgRoot });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: cfgRoot });
+    // Значение равно умолчанию (DEFAULTS.volume.c1MaxLines === 40) — сравнение по значению
+    // сказало бы "default", а источник (файл) требует "custom:volume".
+    writeFileSync(join(cfgRoot, '.1c-quality-gate.json'), JSON.stringify({ volume: { c1MaxLines: 40 } }, null, 2), 'utf8');
+    const cfgFile = 'src/cf/CommonModules/М/Ext/Module.bsl';
+    writeFileSync(join(cfgRoot, cfgFile), 'Процедура П() Экспорт\nКонецПроцедуры\n', 'utf8');
+    const state = cfgMod.resolve(cfgRoot);
+    check('evidenceValue на этом проекте действительно даёт custom:volume (иначе тест ничего не проверяет)',
+      cfgMod.evidenceValue(state) === 'custom:volume', cfgMod.evidenceValue(state));
+
+    const pCfg = prof.computeProfile({ files: [cfgFile], root: cfgRoot, config: cfgMod.readConfig(cfgRoot), metrics: {} });
+    check('config= в scopeLine (чтение с диска по root) совпадает с evidenceValue при значении = умолчанию',
+      pCfg.scopeLine.endsWith(`config=${cfgMod.evidenceValue(state)}]`), pCfg.scopeLine);
+
+    const pCfgState = prof.computeProfile({ files: [cfgFile], root: cfgRoot, config: cfgMod.readConfig(cfgRoot), metrics: {}, configState: state });
+    check('config= через явный configState (без повторного чтения диска) совпадает с evidenceValue',
+      pCfgState.scopeLine.endsWith(`config=${cfgMod.evidenceValue(state)}]`), pCfgState.scopeLine);
+  }
+
+  // Fix round 1 / Important 2. `driver` обязан называть архетип, если он поднял ЛЮБУЮ ось —
+  // не только `code`. При `volume=C2` пол `code` уже `L2`, и архетип с `minCode:'L2'`
+  // (`object-event`) его не поднимает — но `arch` без архетипа остался бы `skip`, и именно
+  // архетип единственная причина `arch:1`. `driver=volume` в этом случае прятал бы причину.
+  {
+    const oeRoot = join(WORK, 'profile-object-event-root');
+    rmSync(oeRoot, { recursive: true, force: true });
+    mkdirSync(join(oeRoot, 'src', 'cf', 'Documents', 'Заказ', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: oeRoot });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: oeRoot });
+    const oeFile = 'src/cf/Documents/Заказ/Ext/ObjectModule.bsl';
+    const oeContent = 'Процедура ПередЗаписью(Отказ)\n' + '\tА = А + 1;\n'.repeat(45) + 'КонецПроцедуры\n';
+    writeFileSync(join(oeRoot, oeFile), oeContent, 'utf8');
+    const pOe = prof.computeProfile({ files: [oeFile], root: oeRoot, config, metrics: {} });
+    check('volume=C2 + object-event: driver называет архетип (поднял arch, не code)',
+      pOe.volume === 'C2' && pOe.driver === 'archetype:object-event' && pOe.resolved.arch === 1, JSON.stringify(pOe));
+  }
+
+  // Fix round 1 (найдено при написании теста на driver, не угадано): `\b` в JS-регулярных
+  // выражениях не считает кириллицу словом, и переход «кириллическая буква → небуквенный
+  // символ» границей не является — `/\bАсинх\b/i`, `/Процедура\s+ПередЗаписью\b/i` и
+  // `/&НаСервере\b/i` из брифа не срабатывали НИ НА ОДНОМ реальном фрагменте (проверено:
+  // тест на driver выше падал именно потому, что object-event не находил маркер вовсе).
+  // Заменено на `(?<![WORD])...(?![WORD])` с явным кириллическим классом (как в
+  // `rename-check.mjs`). Здесь — регрессионные проверки на две другие архетипа с той же
+  // болезнью, которых тест на driver не касается.
+  {
+    const csRoot = join(WORK, 'profile-client-server-root');
+    rmSync(csRoot, { recursive: true, force: true });
+    mkdirSync(join(csRoot, 'src', 'cf', 'CommonModules', 'КС', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: csRoot });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: csRoot });
+    const csFile = 'src/cf/CommonModules/КС/Ext/Module.bsl';
+    writeFileSync(join(csRoot, csFile), '&НаСервере\nПроцедура П() Экспорт\nКонецПроцедуры\n', 'utf8');
+    const pCs = prof.computeProfile({ files: [csFile], root: csRoot, config, metrics: {} });
+    check('client-server: маркер &НаСервере срабатывает после исправления \\b', pCs.archetypes.includes('client-server'), JSON.stringify(pCs.archetypes));
+
+    const acRoot = join(WORK, 'profile-async-client-root');
+    rmSync(acRoot, { recursive: true, force: true });
+    mkdirSync(join(acRoot, 'src', 'cf', 'CommonModules', 'АК', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: acRoot });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: acRoot });
+    const acFile = 'src/cf/CommonModules/АК/Ext/Module.bsl';
+    writeFileSync(join(acRoot, acFile), 'Асинх Процедура П() Экспорт\n\tЖдать ПоказатьВопросАсинх();\nКонецПроцедуры\n', 'utf8');
+    const pAc = prof.computeProfile({ files: [acFile], root: acRoot, config, metrics: {} });
+    check('async-client: маркеры Асинх/Ждать срабатывают после исправления \\b', pAc.archetypes.includes('async-client'), JSON.stringify(pAc.archetypes));
+  }
+
+  // Minor: checklist по архетипам — данные, а не логика; закреплена соответствием
+  // «архетип → разделы checklist-code.md» из брифа Task 12, чтобы правка одного списка не
+  // разошлась с другим молча.
+  {
+    const expectedChecklist = {
+      query: [6, 7],
+      transaction: [8],
+      'object-event': [9],
+      'client-server': [10],
+      'form-module': [10],
+      'scheduled-job': [12],
+      rights: [13, 14],
+      integration: [15],
+    };
+    const byLabel = Object.fromEntries(prof.ARCHETYPES.map((a) => [a.label, a.checklist]));
+    const mismatches = [];
+    for (const [label, expected] of Object.entries(expectedChecklist)) {
+      if (JSON.stringify(byLabel[label]) !== JSON.stringify(expected)) {
+        mismatches.push(`${label}: ожидали ${JSON.stringify(expected)}, получили ${JSON.stringify(byLabel[label])}`);
+      }
+    }
+    const noChecklist = ['record-set', 'cfe-patch', 'user-dialog', 'async-client', 'new-common-module', 'new-metadata-object'];
+    for (const label of noChecklist) {
+      if (byLabel[label] !== undefined) mismatches.push(`${label}: checklist не ожидался, получили ${JSON.stringify(byLabel[label])}`);
+    }
+    check('checklist по архетипам не разъехался с брифом Task 12', mismatches.length === 0, mismatches.join('; '));
+  }
 }
 
 // ---------------------------------------------------------------------------
