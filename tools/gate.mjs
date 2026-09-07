@@ -550,11 +550,24 @@ function xmlTreeRoot(file) {
   return '<каталог выгрузки — src/cf или src/cfe/<Имя>>';
 }
 
+/**
+ * Применимы ли скоупы каталога антипаттернов (`ai-antipatterns`, `platform-antipatterns`) к
+ * этому прогону — единственный источник условия для ДВУХ мест: строк `catalog.mjs
+ * index/attest` в «Инструменты» (`buildToolCommands`) и записей `ai-antipatterns`/
+ * `platform-antipatterns` в «Закрыть в следе» (`mustCloseList`). Читателю нечего проверять без
+ * изменённых `.bsl`/`.os` — контур `code`, поднятый чисто XML-архетипом (`rights` по пути
+ * `Rights.xml`, без единого модуля), не обязан требовать запись, для которой в плане нет ни
+ * команды, ни файла: `catalog.mjs attest` с пустым `--files` отказывает кодом 1, и план не
+ * должен предлагать закрыть в следе то, что нечем закрыть.
+ */
+function catalogScopesApply(resolvedCode, bslFiles) {
+  return resolvedCode !== 'skip' && bslFiles.length > 0;
+}
+
 /** Строит команды инструментов в порядке `TOOL_ORDER`, каждая — с буквальным `$QG`. */
-function buildToolCommands({ files, resolvedCode, archetypeLabels }) {
+function buildToolCommands({ files, resolvedCode, archetypeLabels, bslFiles }) {
   const appliesMap = toolAppliesMap();
   const hasXmlChange = files.some((f) => /\.xml$/i.test(f));
-  const bslFiles = files.filter((f) => /\.(bsl|os)$/i.test(f));
   const lines = [];
 
   for (const tool of TOOL_ORDER) {
@@ -619,9 +632,7 @@ function buildToolCommands({ files, resolvedCode, archetypeLabels }) {
         }
         break;
       case 'tools/catalog.mjs':
-        // Читателю нечего проверять без изменённых .bsl/.os, и контур code, если он skip,
-        // проход не запускает вовсе.
-        if (resolvedCode !== 'skip' && bslFiles.length) {
+        if (catalogScopesApply(resolvedCode, bslFiles)) {
           const arch = archetypeLabels.length ? archetypeLabels.join(',') : 'none';
           lines.push(`node "$QG/tools/catalog.mjs" index --archetypes ${arch}`);
           lines.push(
@@ -664,7 +675,7 @@ function codeModelPasses({ resolvedCode, volume, archetypeLabels, bslFiles, refs
     const active = expectedExamined(archetypeLabels, cards);
     passes.push(`каталог антипаттернов: субагент antipattern-reader, активных признаков: ${active.length} (см. index выше)`);
   } else {
-    passes.push('каталог антипаттернов: нет изменённых .bsl/.os — проход не применим');
+    passes.push('каталог антипаттернов: не применимо — модулей (.bsl/.os) в составе нет');
   }
 
   passes.push(
@@ -711,10 +722,10 @@ function xmlContourLine(resolvedXml) {
 }
 
 /** Что обязано закрыться в следе — список идентификаторов и поясняющая строка к каждому. */
-function mustCloseList({ archetypeLabels, resolvedCode }) {
+function mustCloseList({ archetypeLabels, resolvedCode, bslFiles }) {
   const ids = ['compilation'];
   if (archetypeLabels.includes('query')) ids.push('query-execution');
-  if (resolvedCode !== 'skip') ids.push('ai-antipatterns', 'platform-antipatterns');
+  if (catalogScopesApply(resolvedCode, bslFiles)) ids.push('ai-antipatterns', 'platform-antipatterns');
   return ids;
 }
 
@@ -831,13 +842,13 @@ function cmdPlan(args) {
   write(`resolved: code=${resolved.code} arch=${resolved.arch === null ? 'skip' : resolved.arch} xml=${resolved.xml} hygiene=${resolved.hygiene}\n`);
   write(`${profile.scopeLine}\n\n`);
 
-  const tools = buildToolCommands({ files, resolvedCode: resolved.code, archetypeLabels });
+  const bslFiles = files.filter((f) => /\.(bsl|os)$/i.test(f));
+  const tools = buildToolCommands({ files, resolvedCode: resolved.code, archetypeLabels, bslFiles });
   write('## Инструменты (в этом порядке)\n');
   for (const t of tools) write(`${t}\n`);
   write('\n');
 
   const { refs, checklist } = refsAndChecklist(archetypeLabels);
-  const bslFiles = files.filter((f) => /\.(bsl|os)$/i.test(f));
   const passes = codeModelPasses({ resolvedCode: resolved.code, volume, archetypeLabels, bslFiles, refs, checklist });
   write(`## Модельные проходы контура code (${resolved.code})\n`);
   for (const p of passes) write(`- ${p}\n`);
@@ -848,7 +859,7 @@ function cmdPlan(args) {
   write(`## Контур arch: ${archLine}\n`);
   write(`## Контур xml: ${xmlLine}\n\n`);
 
-  const mustClose = mustCloseList({ archetypeLabels, resolvedCode: resolved.code });
+  const mustClose = mustCloseList({ archetypeLabels, resolvedCode: resolved.code, bslFiles });
   write('## Закрыть в следе\n');
   for (const id of mustClose) write(`- ${id}: ${closeNote(id)}\n`);
 

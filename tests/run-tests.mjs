@@ -5778,6 +5778,44 @@ section('План прогона печатает инструмент');
   const noFiles = run('tools/gate.mjs', ['plan'], { env: { QG_PROJECT_DIR: emptyRoot } });
   check('plan без --files и без взведённого гейта отказывает', noFiles.code !== 0, `код: ${noFiles.code}`);
   check('отказ объясняет причину', /--files|гейт|сесси/i.test(noFiles.out), noFiles.out.slice(0, 300));
+
+  // Fix round 1 (ревью задачи 12). Правка ТОЛЬКО XML роли (архетип rights по pathMarker
+  // Roles/.../Ext/Rights.xml) поднимает resolved.code до L2, но не приносит ни одного
+  // .bsl/.os — читателю каталога антипаттернов нечего проверять. `mustClose` не имеет права
+  // требовать закрыть ai-antipatterns/platform-antipatterns, если в «Инструменты» для них нет
+  // ни строки catalog.mjs, ни файла: `catalog.mjs attest` с пустым --files отказывает кодом 1,
+  // и план предлагал бы закрыть запись, которую нечем закрыть.
+  const rightsRoot = join(WORK, 'plan-rights-root');
+  rmSync(rightsRoot, { recursive: true, force: true });
+  mkdirSync(join(rightsRoot, 'src', 'cf', 'Roles', 'Тест', 'Ext'), { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: rightsRoot });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: rightsRoot });
+  writeFileSync(join(rightsRoot, '.1c-quality-gate.json'), '{}', 'utf8');
+  const rightsFile = 'src/cf/Roles/Тест/Ext/Rights.xml';
+  writeFileSync(join(rightsRoot, rightsFile), '<Rights/>\n', 'utf8');
+
+  const rightsOnly = run('tools/gate.mjs', ['plan', '--files', rightsFile, '--no-analyzer', '--json'], { env: { QG_PROJECT_DIR: rightsRoot } });
+  check('plan по одной Rights.xml завершается успешно', rightsOnly.code === 0, rightsOnly.out.slice(0, 300));
+  const rightsPlan = JSON.parse(rightsOnly.out);
+  check('rights без .bsl: code поднят, но каталог не требуется в следе',
+    rightsPlan.profile.resolved.code !== 'skip' && !rightsPlan.mustClose.includes('ai-antipatterns') && !rightsPlan.mustClose.includes('platform-antipatterns'),
+    JSON.stringify({ resolvedCode: rightsPlan.profile.resolved.code, mustClose: rightsPlan.mustClose }));
+  check('rights без .bsl: catalog.mjs не среди инструментов', !rightsPlan.tools.some((t) => t.includes('catalog.mjs')), rightsPlan.tools.join('\n'));
+
+  // Обратный случай: та же роль плюс изменённый .bsl в составе — оба каталожных скоупа
+  // обязаны вернуться, потому что теперь читателю есть что проверять.
+  mkdirSync(join(rightsRoot, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+  const rightsBslFile = 'src/cf/CommonModules/М/Ext/Module.bsl';
+  writeFileSync(join(rightsRoot, rightsBslFile), 'Процедура П() Экспорт\nКонецПроцедуры\n', 'utf8');
+  const rightsWithBsl = run('tools/gate.mjs', ['plan', '--files', rightsFile, rightsBslFile, '--no-analyzer', '--json'], { env: { QG_PROJECT_DIR: rightsRoot } });
+  check('plan по Rights.xml + .bsl завершается успешно', rightsWithBsl.code === 0, rightsWithBsl.out.slice(0, 300));
+  const rightsWithBslPlan = JSON.parse(rightsWithBsl.out);
+  check('rights + .bsl: оба каталожных скоупа в mustClose',
+    rightsWithBslPlan.mustClose.includes('ai-antipatterns') && rightsWithBslPlan.mustClose.includes('platform-antipatterns'),
+    JSON.stringify(rightsWithBslPlan.mustClose));
+  check('rights + .bsl: catalog.mjs index/attest в инструментах',
+    rightsWithBslPlan.tools.some((t) => /catalog\.mjs" index/.test(t)) && rightsWithBslPlan.tools.some((t) => /catalog\.mjs" attest/.test(t)),
+    rightsWithBslPlan.tools.join('\n'));
 }
 
 // ---------------------------------------------------------------------------
