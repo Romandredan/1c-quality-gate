@@ -184,6 +184,13 @@ const EXPORT_RE = new RegExp(`(?<![${WORD}])Экспорт(?![${WORD}])`, 'i');
  * поменялась ли сигнатура существующего — без этого правка «один новый метод плюс правки в
  * двух существующих» неотличима от точечной подгонки текста внутри одного метода (Task,
  * дефект A/B-прогона).
+ *
+ * Разбалансированный `КонецПроцедуры`/`КонецФункции` (меньше закрытий, чем открытий, —
+ * например, синтаксическая ошибка в правке или временно закомментированный конец метода вне
+ * `maskModule`) растягивает границу метода до конца файла: `endMatch` не находится, `end =
+ * masked.length`. Метод в этом случае выглядит крупнее и «задетее», чем есть на самом деле, —
+ * направление ошибки безопасное (переоценка глубины разбора, не пропуск), но объём и маркеры
+ * архетипов могут завыситься сильнее, чем того требует реальная правка.
  */
 export function methodRanges(source) {
   const masked = maskModule(source);
@@ -263,11 +270,19 @@ function allLineNumbers(count) {
 }
 
 /**
- * Изменения одного файла: добавленные/удалённые строки, сами добавленные строки (для поиска
- * маркеров) и `changedLines` — номера строк РАБОЧЕГО ДЕРЕВА (не диффа), которые правка
- * затронула; читаются из заголовков hunk'ов `git diff -U0` (`@@ -a,b +c,d @@`, сторона
- * `+c,d`). Нужны `analyzeChangedMethods`, чтобы понять, какие МЕТОДЫ правка задела, а не
- * только сколько строк добавлено суммарно.
+ * Изменения одного файла: добавленные/удалённые строки, сами добавленные и удалённые строки
+ * (для поиска маркеров и для честного `cosmeticOnly`, см. ниже) и `changedLines` — номера
+ * строк РАБОЧЕГО ДЕРЕВА (не диффа), которые правка затронула; читаются из заголовков hunk'ов
+ * `git diff -U0` (`@@ -a,b +c,d @@`, сторона `+c,d`). Нужны `analyzeChangedMethods`, чтобы
+ * понять, какие МЕТОДЫ правка задела, а не только сколько строк добавлено суммарно.
+ *
+ * Hunk чистого удаления (`+c,0` — 0 строк на стороне рабочего дерева) не даёт диапазона:
+ * `c` в этом случае — номер строки рабочего дерева ПЕРЕД точкой, откуда убрали текст, а не
+ * начало какого-то диапазона. Правка реально касается стыка: строк `c` (последняя перед
+ * удалением) и `c+1` (первая после) рабочего дерева — засчитываются обе, а метод(ы), в
+ * границы которого(ых) они попадают, считаются задетыми (`analyzeChangedMethods`). Если `c` и
+ * `c+1` попадают в разные методы (удаление ровно на стыке двух методов), задетыми считаются
+ * оба — удаление там реально касается обоих.
  *
  * `isNew` — файла не было в HEAD (значит все его строки добавленные, `changedLines` —
  * 1..N целиком); `note: 'no_git'` — сравнивать было не с чем: git недоступен либо файл вне
@@ -284,6 +299,7 @@ function diffFile(file, root, gitOk) {
       added: lines.length,
       removed: 0,
       addedLines: lines,
+      removedLines: [],
       isNew: true,
       note: 'no_git',
       changedLines: allLineNumbers(lines.length),
@@ -294,7 +310,7 @@ function diffFile(file, root, gitOk) {
   const hasHistory = !head.error && head.status === 0;
   if (!hasHistory) {
     const lines = currentLines(abs);
-    return { rel, added: lines.length, removed: 0, addedLines: lines, isNew: true, changedLines: allLineNumbers(lines.length) };
+    return { rel, added: lines.length, removed: 0, addedLines: lines, removedLines: [], isNew: true, changedLines: allLineNumbers(lines.length) };
   }
 
   let added = 0;
@@ -310,21 +326,31 @@ function diffFile(file, root, gitOk) {
   }
 
   const addedLines = [];
+  const removedLines = [];
   const changedLines = new Set();
   const u = spawnSync('git', ['diff', '-U0', 'HEAD', '--', rel], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (!u.error && u.status === 0) {
     for (const line of String(u.stdout || '').split('\n')) {
-      if (line.startsWith('+++')) continue;
+      if (line.startsWith('+++') || line.startsWith('---')) continue;
       if (line.startsWith('+')) addedLines.push(line.slice(1));
+      else if (line.startsWith('-')) removedLines.push(line.slice(1));
       const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
       if (hunk) {
         const startLine = Number(hunk[1]);
         const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
-        for (let n = startLine; n < startLine + count; n++) changedLines.add(n);
+        if (count === 0) {
+          // Чистое удаление: `startLine` — строка рабочего дерева ПЕРЕД точкой удаления, не
+          // начало диапазона. Засчитываем стык — саму эту строку и следующую за ней (см.
+          // комментарий над `diffFile`).
+          if (startLine >= 1) changedLines.add(startLine);
+          changedLines.add(startLine + 1);
+        } else {
+          for (let n = startLine; n < startLine + count; n++) changedLines.add(n);
+        }
       }
     }
   }
-  return { rel, added, removed, addedLines, isNew: false, changedLines };
+  return { rel, added, removed, addedLines, removedLines, isNew: false, changedLines };
 }
 
 /**
@@ -346,13 +372,18 @@ function diffFile(file, root, gitOk) {
  *   - `signatureChanges` — имена существующих методов, у которых изменилась строка сигнатуры
  *     (список параметров, `Знач`, `Экспорт`).
  *
- * Приближение, заявленное прямо: hunk чистого удаления (`+c,0` в заголовке) не добавляет НИ
- * ОДНОЙ строки рабочего дерева, и это правильно — но значит, что метод, который правка ТОЛЬКО
- * укоротила (ни одной строки не добавлено внутри него), в `changedLines` не отмечен и здесь
- * методом «задетым» не считается: не входит в `touchedCount`, его тело не сканируется на
- * маркеры архетипов. Симметрично: метод, которого не стало в рабочем дереве (был в HEAD, в
- * текущей версии отсутствует полностью), правило (b) не ловит — оно однонаправленное, по
- * методам ТЕКУЩЕГО дерева, отсутствующим в HEAD, а не наоборот.
+ * Метод, который правка ТОЛЬКО укоротила (ни одной строки не добавлено внутри него, только
+ * удаления), больше не выпадает из подсчёта: `diffFile` засчитывает строки стыка на месте
+ * hunk'а чистого удаления (см. комментарий над `diffFile`), и `isTouched` ниже видит их так
+ * же, как обычный диапазон. Заявленное приближение осталось только одно, симметричное:
+ * метод, которого не стало в рабочем дереве (был в HEAD, в текущей версии отсутствует
+ * полностью), правило (b) не ловит — оно однонаправленное, по методам ТЕКУЩЕГО дерева,
+ * отсутствующим в HEAD, а не наоборот.
+ *
+ * Разбираются файлы `.bsl` и `.os` — тот же набор расширений, что `gate.mjs` считает кодовыми
+ * (`/\.(bsl|os)$/i`, см. `cmdPlan`/`bslFiles`); ограничение только `.bsl` пропускало внешние
+ * обработки и отчёты (`.os` — тот же синтаксис модуля) мимо метод-ориентированных правил оси 1
+ * целиком, и правка двух методов внешней обработки молча оставалась в C1.
  */
 function analyzeChangedMethods(diffs, root) {
   const touchedBodies = [];
@@ -361,7 +392,7 @@ function analyzeChangedMethods(diffs, root) {
   let touchedCount = 0;
 
   for (const d of diffs) {
-    if (d.isNew || !/\.bsl$/i.test(d.rel)) continue;
+    if (d.isNew || !/\.(bsl|os)$/i.test(d.rel)) continue;
     const abs = resolvePath(root, d.rel);
     if (!existsSync(abs)) continue; // рабочее дерево файл удалило — сравнивать методы негде
 
@@ -511,6 +542,7 @@ export function computeProfile({ files, root, config, metrics, configState }) {
   const added = diffs.reduce((s, d) => s + d.added, 0);
   const removed = diffs.reduce((s, d) => s + d.removed, 0);
   const allAddedLines = diffs.flatMap((d) => d.addedLines);
+  const allRemovedLines = diffs.flatMap((d) => d.removedLines || []);
   const addedText = allAddedLines.join('\n');
   const noGit = diffs.some((d) => d.note === 'no_git');
 
@@ -546,7 +578,13 @@ export function computeProfile({ files, root, config, metrics, configState }) {
   const complexityFired = complexity.length > 0;
 
   // --- ось 1: объём -------------------------------------------------------------
-  const cosmeticOnly = allAddedLines.every((l) => l.trim() === '' || l.trim().startsWith('//'));
+  // Косметика проверяется по ОБЕИМ сторонам диффа, не только по добавленным строкам: диф
+  // чистого удаления (только `-` строки, ни одной `+`) на пустом `allAddedLines` раньше давал
+  // `every() === true` вакуумно — правка, реально убравшая код из метода, засчитывалась как
+  // «тела методов не менялись» и уходила в C0. Хотя бы одна сторона обязана быть непустой:
+  // диффа без единой строки не бывает у файла из списка изменённых.
+  const cosmeticLines = [...allAddedLines, ...allRemovedLines];
+  const cosmeticOnly = cosmeticLines.length > 0 && cosmeticLines.every((l) => l.trim() === '' || l.trim().startsWith('//'));
   // Новый модуль или объект метаданных выводит правку из C1 БЕЗУСЛОВНО — так прямо
   // сказано в определении C1 (`quality-gate/references/profile-axes.md`, «Ось 1»): «нет
   // новых экспортов, изменённых сигнатур, новых модулей и объектов метаданных». Поэтому

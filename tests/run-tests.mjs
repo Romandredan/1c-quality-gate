@@ -5748,6 +5748,68 @@ section('Профиль изменения считает инструмент')
     check('async-client: маркеры Асинх/Ждать срабатывают после исправления \\b', pAc.archetypes.includes('async-client'), JSON.stringify(pAc.archetypes));
   }
 
+  // Fix round 1 (ревью раунда 2 Task 17), Important 1. `analyzeChangedMethods` фильтровал
+  // только `.bsl` — `gate.mjs` считает кодовыми и `.bsl`, и `.os` (`/\.(bsl|os)$/i`, тот же
+  // синтаксис модуля у внешних обработок/отчётов), и правка двух методов в `.os` молча
+  // оставалась в C1 (`volumeReason=null`) вместо C2.
+  {
+    const osRoot = join(WORK, 'profile-os-extension-root');
+    rmSync(osRoot, { recursive: true, force: true });
+    mkdirSync(join(osRoot, 'src', 'cf', 'ExternalReports', 'Отчет', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: osRoot });
+    const osFile = 'src/cf/ExternalReports/Отчет/Ext/ObjectModule.os';
+    writeFileSync(join(osRoot, osFile), 'Процедура А() Экспорт\n\tХ = 1;\nКонецПроцедуры\n\nПроцедура Б() Экспорт\n\tY = 1;\nКонецПроцедуры\n', 'utf8');
+    execFileSync('git', ['add', '-A'], { cwd: osRoot });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], { cwd: osRoot });
+    writeFileSync(join(osRoot, osFile), 'Процедура А() Экспорт\n\tХ = 2;\nКонецПроцедуры\n\nПроцедура Б() Экспорт\n\tY = 2;\nКонецПроцедуры\n', 'utf8');
+    const pOs = prof.computeProfile({ files: [osFile], root: osRoot, config, metrics: {} });
+    check('.os с двумя изменёнными процедурами: C2, volumeReason начинается с methods:',
+      pOs.volume === 'C2' && /^methods:/.test(pOs.volumeReason || ''), JSON.stringify(pOs));
+  }
+
+  // Fix round 1 (ревью раунда 2 Task 17), Important 2. Hunk чистого удаления (`+c,0`) раньше
+  // не давал НИ ОДНОГО номера строки рабочего дерева — метод, который правка только
+  // укоротила, не засчитывался. Теперь `diffFile` относит такой hunk к стыку (`c` и `c+1`).
+  // Сценарий 1: добавили строку в одном методе, удалили — в другом (без добавления там).
+  {
+    const mixRoot = join(WORK, 'profile-pure-deletion-mix-root');
+    rmSync(mixRoot, { recursive: true, force: true });
+    mkdirSync(join(mixRoot, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: mixRoot });
+    const mixFile = 'src/cf/CommonModules/М/Ext/Module.bsl';
+    writeFileSync(join(mixRoot, mixFile),
+      'Процедура А() Экспорт\n\tХ = 1;\nКонецПроцедуры\n\nПроцедура Б() Экспорт\n\tП = 1;\n\tQ = 2;\nКонецПроцедуры\n', 'utf8');
+    execFileSync('git', ['add', '-A'], { cwd: mixRoot });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], { cwd: mixRoot });
+    // Метод А: строка добавлена. Метод Б: строка убрана, ничего не добавлено (чистое удаление).
+    writeFileSync(join(mixRoot, mixFile),
+      'Процедура А() Экспорт\n\tХ = 1;\n\tZ = 3;\nКонецПроцедуры\n\nПроцедура Б() Экспорт\n\tП = 1;\nКонецПроцедуры\n', 'utf8');
+    const pMix = prof.computeProfile({ files: [mixFile], root: mixRoot, config, metrics: {} });
+    check('добавили в одном методе, удалили в другом: C2, methods:2',
+      pMix.volume === 'C2' && pMix.volumeReason === 'methods:2', JSON.stringify(pMix));
+  }
+
+  // Сценарий 2: удаление в двух методах, ничего не добавлено вовсе. До фикса `cosmeticOnly`
+  // (`allAddedLines.every(...)` на пустом массиве добавленных строк давало `true` вакуумно)
+  // такая правка молча уходила в C0 — правка, реально убравшая код, «тела методов не
+  // менялись» не является.
+  {
+    const delRoot = join(WORK, 'profile-pure-deletion-two-methods-root');
+    rmSync(delRoot, { recursive: true, force: true });
+    mkdirSync(join(delRoot, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: delRoot });
+    const delFile = 'src/cf/CommonModules/М/Ext/Module.bsl';
+    writeFileSync(join(delRoot, delFile),
+      'Процедура А() Экспорт\n\tХ = 1;\n\tY = 2;\nКонецПроцедуры\n\nПроцедура Б() Экспорт\n\tП = 1;\n\tQ = 2;\nКонецПроцедуры\n', 'utf8');
+    execFileSync('git', ['add', '-A'], { cwd: delRoot });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], { cwd: delRoot });
+    writeFileSync(join(delRoot, delFile),
+      'Процедура А() Экспорт\n\tХ = 1;\nКонецПроцедуры\n\nПроцедура Б() Экспорт\n\tП = 1;\nКонецПроцедуры\n', 'utf8');
+    const pDel = prof.computeProfile({ files: [delFile], root: delRoot, config, metrics: {} });
+    check('удаление в двух методах, ничего не добавлено: C2 (не C0)',
+      pDel.volume === 'C2', JSON.stringify(pDel));
+  }
+
   // Minor: checklist по архетипам — данные, а не логика; закреплена соответствием
   // «архетип → разделы checklist-code.md» из брифа Task 12, чтобы правка одного списка не
   // разошлась с другим молча.
