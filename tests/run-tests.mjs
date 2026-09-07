@@ -5766,6 +5766,135 @@ section('Профиль изменения считает инструмент')
     }
     check('checklist по архетипам не разъехался с брифом Task 12', mismatches.length === 0, mismatches.join('; '));
   }
+
+  // Дефект A/B-прогона: реальная правка «один новый метод + правки в двух существующих
+  // методах» (+33/-2, один файл) давала C1 — объём считался только по числу строк/файлов, а
+  // определение C1 требует ещё и «правку внутри существующих методов; нет новых экспортов,
+  // изменённых сигнатур». Фикстуры ниже — с РЕАЛЬНОЙ историей в HEAD (git init, commit, потом
+  // правка): без прежней версии сравнивать методы не с чем, и метод-ориентированные правила
+  // (b)/(c) на файлы без истории осознанно не распространяются — «новый файл целиком» уже
+  // отдельно решают архетипы `new-common-module`/`new-metadata-object` и порог по размеру
+  // (закреплено тестами cmRoot/plainRoot выше, они используют файлы без истории).
+  {
+    // (a) один файл, +30 строк ВНУТРИ ОДНОГО существующего метода → C1.
+    const rootA = join(WORK, 'profile-methods-root-a');
+    rmSync(rootA, { recursive: true, force: true });
+    mkdirSync(join(rootA, 'src', 'cf', 'CommonModules', 'МетодыА', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: rootA });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: rootA });
+    const fileA = 'src/cf/CommonModules/МетодыА/Ext/Module.bsl';
+    writeFileSync(join(rootA, fileA), 'Процедура ЗагрузитьДанные(Знач Параметр)\n\tРезультат = 0;\nКонецПроцедуры\n', 'utf8');
+    execFileSync('git', ['add', '.'], { cwd: rootA });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'база A'], { cwd: rootA });
+    const extraA = Array.from({ length: 30 }, (_, i) => `\tШаг${i} = ${i};`).join('\n') + '\n';
+    writeFileSync(join(rootA, fileA), 'Процедура ЗагрузитьДанные(Знач Параметр)\n\tРезультат = 0;\n' + extraA + 'КонецПроцедуры\n', 'utf8');
+    const pA = prof.computeProfile({ files: [fileA], root: rootA, config, metrics: {} });
+    check('(a) +30 строк внутри одного существующего метода: C1, без volumeReason',
+      pA.volume === 'C1' && pA.volumeReason === null, JSON.stringify(pA));
+
+    // (b) тот же объём (~30 строк), но правка задевает ДВА метода → C2, volumeReason=methods:2.
+    const rootB = join(WORK, 'profile-methods-root-b');
+    rmSync(rootB, { recursive: true, force: true });
+    mkdirSync(join(rootB, 'src', 'cf', 'CommonModules', 'МетодыБ', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: rootB });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: rootB });
+    writeFileSync(join(rootB, '.1c-quality-gate.json'), '{}', 'utf8');
+    const fileB = 'src/cf/CommonModules/МетодыБ/Ext/Module.bsl';
+    writeFileSync(
+      join(rootB, fileB),
+      'Процедура Первый(Знач П)\n\tР1 = 0;\nКонецПроцедуры\n\nПроцедура Второй(Знач П)\n\tР2 = 0;\nКонецПроцедуры\n',
+      'utf8'
+    );
+    execFileSync('git', ['add', '.'], { cwd: rootB });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'база Б'], { cwd: rootB });
+    const extraB1 = Array.from({ length: 15 }, (_, i) => `\tШ1_${i} = ${i};`).join('\n') + '\n';
+    const extraB2 = Array.from({ length: 15 }, (_, i) => `\tШ2_${i} = ${i};`).join('\n') + '\n';
+    writeFileSync(
+      join(rootB, fileB),
+      'Процедура Первый(Знач П)\n\tР1 = 0;\n' +
+        extraB1 +
+        'КонецПроцедуры\n\nПроцедура Второй(Знач П)\n\tР2 = 0;\n' +
+        extraB2 +
+        'КонецПроцедуры\n',
+      'utf8'
+    );
+    const pB = prof.computeProfile({ files: [fileB], root: rootB, config, metrics: {} });
+    check('(b) те же ~30 строк, но в ДВУХ методах: C2, volumeReason=methods:2',
+      pB.volume === 'C2' && pB.volumeReason === 'methods:2', JSON.stringify(pB));
+
+    // Проверка через живой инструмент: `gate.mjs plan --json` обязан отдавать volumeReason
+    // наружу, а текстовый план — печатать причину строкой «объём: C2 (methods:2)».
+    const planB = run('tools/gate.mjs', ['plan', '--files', fileB, '--no-analyzer', '--json'], { env: { QG_PROJECT_DIR: rootB } });
+    check('gate.mjs plan --json завершается успешно на фикстуре (b)', planB.code === 0, planB.out.slice(0, 300));
+    const planBJson = JSON.parse(planB.out);
+    check('gate.mjs plan --json отдаёт profile.volumeReason=methods:2',
+      planBJson.profile && planBJson.profile.volumeReason === 'methods:2', JSON.stringify(planBJson.profile));
+    const planBText = run('tools/gate.mjs', ['plan', '--files', fileB, '--no-analyzer'], { env: { QG_PROJECT_DIR: rootB } });
+    check('текстовый план печатает причину объёма строкой «объём: C2 (methods:2)»',
+      /объём: C2 \(methods:2\)/.test(planBText.out), planBText.out.slice(0, 500));
+
+    // (c) добавлен новый НЕэкспортный метод, существующий не тронут → C2, volumeReason=new-method:.
+    const rootC = join(WORK, 'profile-methods-root-c');
+    rmSync(rootC, { recursive: true, force: true });
+    mkdirSync(join(rootC, 'src', 'cf', 'CommonModules', 'МетодыВ', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: rootC });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: rootC });
+    const fileC = 'src/cf/CommonModules/МетодыВ/Ext/Module.bsl';
+    writeFileSync(join(rootC, fileC), 'Процедура Существующий(Знач П)\n\tР = 0;\nКонецПроцедуры\n', 'utf8');
+    execFileSync('git', ['add', '.'], { cwd: rootC });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'база В'], { cwd: rootC });
+    writeFileSync(
+      join(rootC, fileC),
+      'Процедура Существующий(Знач П)\n\tР = 0;\nКонецПроцедуры\n\nФункция ТекстОтвета(Знач П)\n\tВозврат "";\nКонецФункции\n',
+      'utf8'
+    );
+    const pC = prof.computeProfile({ files: [fileC], root: rootC, config, metrics: {} });
+    check('(c) новый неэкспортный метод: C2, volumeReason=new-method:ТекстОтвета',
+      pC.volume === 'C2' && pC.volumeReason === 'new-method:ТекстОтвета', JSON.stringify(pC));
+
+    // (d) изменена ТОЛЬКО сигнатура (добавлен параметр) → C2, volumeReason=signature:.
+    const rootD = join(WORK, 'profile-methods-root-d');
+    rmSync(rootD, { recursive: true, force: true });
+    mkdirSync(join(rootD, 'src', 'cf', 'CommonModules', 'МетодыГ', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: rootD });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: rootD });
+    const fileD = 'src/cf/CommonModules/МетодыГ/Ext/Module.bsl';
+    writeFileSync(join(rootD, fileD), 'Функция ВыполнитьЗапрос(Знач П1)\n\tРез = 0;\nКонецФункции\n', 'utf8');
+    execFileSync('git', ['add', '.'], { cwd: rootD });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'база Г'], { cwd: rootD });
+    writeFileSync(join(rootD, fileD), 'Функция ВыполнитьЗапрос(Знач П1, Знач П2)\n\tРез = 0;\nКонецФункции\n', 'utf8');
+    const pD = prof.computeProfile({ files: [fileD], root: rootD, config, metrics: {} });
+    check('(d) добавлен параметр в сигнатуру, тело не тронуто: C2, volumeReason=signature:ВыполнитьЗапрос',
+      pD.volume === 'C2' && pD.volumeReason === 'signature:ВыполнитьЗапрос', JSON.stringify(pD));
+
+    // (e) архетип integration ищется и в ТЕЛЕ задетого метода, а не только в добавленных
+    // строках диффа: маркер `Новый HTTPСоединение` стоит в нетронутой строке того же метода.
+    const rootE = join(WORK, 'profile-methods-root-e');
+    rmSync(rootE, { recursive: true, force: true });
+    mkdirSync(join(rootE, 'src', 'cf', 'CommonModules', 'МетодыД', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: rootE });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: rootE });
+    const fileE = 'src/cf/CommonModules/МетодыД/Ext/Module.bsl';
+    writeFileSync(
+      join(rootE, fileE),
+      'Процедура ОтправитьЗапрос(Знач Данные)\n\tСоединение = Новый HTTPСоединение("example.com");\n\tРез = Данные;\nКонецПроцедуры\n',
+      'utf8'
+    );
+    execFileSync('git', ['add', '.'], { cwd: rootE });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'база Д'], { cwd: rootE });
+    writeFileSync(
+      join(rootE, fileE),
+      'Процедура ОтправитьЗапрос(Знач Данные)\n\tСоединение = Новый HTTPСоединение("example.com");\n\tРез = Данные + 1;\nКонецПроцедуры\n',
+      'utf8'
+    );
+    const diffE = execFileSync('git', ['diff', '-U0', 'HEAD', '--', fileE], { cwd: rootE, encoding: 'utf8' });
+    const addedLinesE = diffE.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++'));
+    check('(e) постановка теста: добавленные строки диффа НЕ содержат маркер интеграции',
+      !addedLinesE.some((l) => /HTTPСоединение/.test(l)), diffE);
+    const pE = prof.computeProfile({ files: [fileE], root: rootE, config, metrics: {} });
+    check('(e) integration находится по телу задетого метода, а не только по добавленным строкам',
+      pE.archetypes.includes('integration'), JSON.stringify(pE.archetypes));
+  }
 }
 
 section('План прогона печатает инструмент');

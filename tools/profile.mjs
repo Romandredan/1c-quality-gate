@@ -11,17 +11,25 @@
  * заявленный в отчёте профиль со посчитанным).
  *
  * Источник данных о правке — не рабочее дерево «как получится», а git: `git diff --numstat
- * HEAD` даёт число изменённых строк, `git diff -U0 HEAD` — сами добавленные строки, по ним
- * ищутся маркеры архетипов. Файл без истории в HEAD (только что созданный, ещё не
- * закоммиченный) — все его строки добавленные; то же самое приближение действует, если
- * git недоступен вовсе или файл лежит вне корня проекта — тогда взять для сравнения нечего,
- * и это явно помечается (`note: 'no_git'`), а не выдаётся за точный подсчёт.
+ * HEAD` даёт число изменённых строк, `git diff -U0 HEAD` — сами добавленные строки (по ним, и
+ * ещё по телам задетых методов — см. ниже, ищутся маркеры архетипов) и заголовки hunk'ов
+ * (`@@ -a,b +c,d @@`), из которых читаются НОМЕРА строк рабочего дерева, которых правка
+ * коснулась (`changedLines`). Их сравнение с границами `Процедура|Функция…КонецПроцедуры|
+ * КонецФункции` текущей версии и версии в HEAD (`methodRanges`, `analyzeChangedMethods`) даёт
+ * ось 1 не только по числу строк, но и по методам: сколько их задето, появился ли новый,
+ * не поменялась ли сигнатура существующего. Файл без истории в HEAD (только что созданный,
+ * ещё не закоммиченный) — все его строки добавленные, метод-ориентированные правила на него
+ * не распространяются (сравнивать не с чем); то же самое приближение действует, если git
+ * недоступен вовсе или файл лежит вне корня проекта — тогда взять для сравнения нечего, и это
+ * явно помечается (`note: 'no_git'`), а не выдаётся за точный подсчёт.
  */
 
 import { readFileSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, relative, resolve as resolvePath, sep } from 'node:path';
 import { DEFAULTS, resolve as resolveConfigState, evidenceValue } from './config.mjs';
+import { maskModule } from './bsl-lint.mjs';
+import { headVersion } from './rename-check.mjs';
 
 /**
  * Таблица архетипов кода — перенесена из таблицы «Ось 2» `quality-gate/SKILL.md` (столбцы
@@ -48,6 +56,14 @@ import { DEFAULTS, resolve as resolveConfigState, evidenceValue } from './config
  * реальном BSL-фрагменте теста). Граница здесь — `(?<![WORD])`/`(?![WORD])` с явным классом
  * `WORD`, который включает кириллицу, — тот же приём, что уже используется в
  * `rename-check.mjs` (`bareCalls`, константа `W`).
+ *
+ * Маркеры ищутся не только в добавленных строках диффа, но и в ПОЛНЫХ ТЕЛАХ изменённых
+ * методов (working tree, см. `analyzeChangedMethods`). «Изменённый код» — это тело метода,
+ * который правка задела, а не только те его строки, что попали в `+` диффа: живой пример из
+ * задачи — правка модуля HTTP-транспорта тронула не ту строку, где стоит `Новый
+ * HTTPСоединение`, и по одним добавленным строкам архетип `integration` не находился, хотя
+ * весь метод — работа с HTTP-соединением. Без этого расширения ось 2 систематически
+ * недооценивала бы правки внутри уже архетипичных методов.
  */
 const WORD = 'A-Za-zА-Яа-яЁё0-9_';
 export const ARCHETYPES = [
@@ -126,6 +142,80 @@ function escapeRegExp(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** Номер строки (1-based) символа с позицией `pos` в `source`. */
+function lineAt(source, pos) {
+  let line = 1;
+  for (let i = 0; i < pos && i < source.length; i++) if (source[i] === '\n') line++;
+  return line;
+}
+
+/**
+ * Заголовок метода — `Процедура|Функция <Имя>(` — и его конец `КонецПроцедуры|КонецФункции`.
+ *
+ * Отдельная от `parseRoutines` (`bsl-lint.mjs`) регулярка: там модуль пишется только
+ * по-русски (правило проекта — идентификаторы и код в оригинале, а прикладной код 1С в этом
+ * плагине всегда русскоязычный), а здесь нужна ЕЩЁ и английская форма ключевых слов
+ * (`Procedure`/`Function`/`EndProcedure`/`EndFunction`) — платформа принимает оба варианта
+ * синтаксиса модуля, и сравниваемая правка живого кода может быть написана на любом.
+ */
+const METHOD_HEADER = new RegExp(
+  `(?<![${WORD}])(Процедура|Функция|Procedure|Function)\\s+([A-Za-zА-Яа-яЁё_][${WORD}]*)\\s*\\(`,
+  'giu'
+);
+const METHOD_END = {
+  procedure: new RegExp(`(?<![${WORD}])(КонецПроцедуры|EndProcedure)(?![${WORD}])`, 'gi'),
+  function: new RegExp(`(?<![${WORD}])(КонецФункции|EndFunction)(?![${WORD}])`, 'gi'),
+};
+const EXPORT_RE = new RegExp(`(?<![${WORD}])Экспорт(?![${WORD}])`, 'i');
+
+/**
+ * Границы методов модуля: имя, диапазон строк (1-based, включительно), сигнатура (исходный,
+ * немаскированный текст заголовка — от ключевого слова до конца строки с закрывающей скобкой
+ * параметров) и экспортность.
+ *
+ * Источник для оси 1 (`analyzeChangedMethods`, ниже): сравнение границ и сигнатур ЭТОЙ же
+ * функции для рабочего дерева и для версии в HEAD решает, появился ли новый метод и
+ * поменялась ли сигнатура существующего — без этого правка «один новый метод плюс правки в
+ * двух существующих» неотличима от точечной подгонки текста внутри одного метода (Task,
+ * дефект A/B-прогона).
+ */
+export function methodRanges(source) {
+  const masked = maskModule(source);
+  const routines = [];
+  METHOD_HEADER.lastIndex = 0;
+  let m;
+  while ((m = METHOD_HEADER.exec(masked)) !== null) {
+    const kind = m[1].toLowerCase();
+    const isFunction = kind === 'функция' || kind === 'function';
+    const endRe = isFunction ? METHOD_END.function : METHOD_END.procedure;
+
+    // Граница списка параметров — согласованная скобка, а не первая попавшаяся: значение
+    // параметра по умолчанию само может содержать скобки (`Знач П = Новый Массив(3)`).
+    let depth = 1;
+    let i = m.index + m[0].length;
+    while (i < masked.length && depth > 0) {
+      if (masked[i] === '(') depth++;
+      else if (masked[i] === ')') depth--;
+      i++;
+    }
+    let lineEnd = masked.indexOf('\n', i);
+    if (lineEnd === -1) lineEnd = masked.length;
+
+    endRe.lastIndex = i;
+    const endMatch = endRe.exec(masked);
+    const end = endMatch ? endMatch.index : masked.length;
+
+    routines.push({
+      name: m[2],
+      start: lineAt(source, m.index),
+      end: lineAt(source, end),
+      signature: source.slice(m.index, lineEnd).replace(/\s+/g, ' ').trim(),
+      isExport: EXPORT_RE.test(masked.slice(m.index, lineEnd)),
+    });
+  }
+  return routines;
+}
+
 /** Архетипы проекта (`archetypes.custom` настройки) в той же форме, что и встроенные. */
 function customArchetypes(config) {
   const list = config?.archetypes?.custom;
@@ -159,10 +249,23 @@ function currentLines(absPath) {
   return text === '' ? [] : text.split('\n');
 }
 
+/** Все номера строк 1..n — файл без истории в HEAD «весь добавлен», от первой до последней. */
+function allLineNumbers(count) {
+  const set = new Set();
+  for (let n = 1; n <= count; n++) set.add(n);
+  return set;
+}
+
 /**
- * Изменения одного файла: добавленные/удалённые строки и сами добавленные строки (для
- * поиска маркеров). `isNew` — файла не было в HEAD (значит все его строки добавленные);
- * `note: 'no_git'` — сравнивать было не с чем: git недоступен либо файл вне корня проекта.
+ * Изменения одного файла: добавленные/удалённые строки, сами добавленные строки (для поиска
+ * маркеров) и `changedLines` — номера строк РАБОЧЕГО ДЕРЕВА (не диффа), которые правка
+ * затронула; читаются из заголовков hunk'ов `git diff -U0` (`@@ -a,b +c,d @@`, сторона
+ * `+c,d`). Нужны `analyzeChangedMethods`, чтобы понять, какие МЕТОДЫ правка задела, а не
+ * только сколько строк добавлено суммарно.
+ *
+ * `isNew` — файла не было в HEAD (значит все его строки добавленные, `changedLines` —
+ * 1..N целиком); `note: 'no_git'` — сравнивать было не с чем: git недоступен либо файл вне
+ * корня проекта.
  */
 function diffFile(file, root, gitOk) {
   const abs = resolvePath(root, file);
@@ -170,14 +273,22 @@ function diffFile(file, root, gitOk) {
 
   if (!gitOk || !rel || rel.startsWith('..')) {
     const lines = currentLines(abs);
-    return { rel: rel || normalize(file), added: lines.length, removed: 0, addedLines: lines, isNew: true, note: 'no_git' };
+    return {
+      rel: rel || normalize(file),
+      added: lines.length,
+      removed: 0,
+      addedLines: lines,
+      isNew: true,
+      note: 'no_git',
+      changedLines: allLineNumbers(lines.length),
+    };
   }
 
   const head = spawnSync('git', ['show', `HEAD:${rel}`], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   const hasHistory = !head.error && head.status === 0;
   if (!hasHistory) {
     const lines = currentLines(abs);
-    return { rel, added: lines.length, removed: 0, addedLines: lines, isNew: true };
+    return { rel, added: lines.length, removed: 0, addedLines: lines, isNew: true, changedLines: allLineNumbers(lines.length) };
   }
 
   let added = 0;
@@ -193,14 +304,91 @@ function diffFile(file, root, gitOk) {
   }
 
   const addedLines = [];
+  const changedLines = new Set();
   const u = spawnSync('git', ['diff', '-U0', 'HEAD', '--', rel], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (!u.error && u.status === 0) {
     for (const line of String(u.stdout || '').split('\n')) {
       if (line.startsWith('+++')) continue;
       if (line.startsWith('+')) addedLines.push(line.slice(1));
+      const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+      if (hunk) {
+        const startLine = Number(hunk[1]);
+        const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
+        for (let n = startLine; n < startLine + count; n++) changedLines.add(n);
+      }
     }
   }
-  return { rel, added, removed, addedLines, isNew: false };
+  return { rel, added, removed, addedLines, isNew: false, changedLines };
+}
+
+/**
+ * Методы, которых КОНКРЕТНО коснулась правка существующего файла, — сравнение текущих границ
+ * методов с версией в HEAD (`headVersion` из `rename-check.mjs`, та же функция, что уже
+ * использует проверка голых вызовов). Файл без истории в HEAD (`d.isNew`) сюда не попадает —
+ * сравнивать методы не с чем, а «новый модуль/объект целиком» уже отдельно решают архетипы
+ * `new-common-module`/`new-metadata-object` и порог по размеру: без этого исключения
+ * однострочный новый общий модуль без декларации объекта не остался бы в C1, хотя он им
+ * является (см. тест «новый Module.bsl без декларации объекта: … объём по размеру»).
+ *
+ * Возвращает:
+ *   - `touchedCount` — сколько методов (суммарно по всем файлам) правка задела хотя бы одной
+ *     строкой;
+ *   - `touchedBodies` — тексты этих методов целиком (для маркеров архетипов, ось 2);
+ *   - `newMethods` — имена методов, которых не было в HEAD под тем же именем (новый метод,
+ *     экспортный или нет — переименование сюда тоже попадает: старое имя пропало, значит для
+ *     инструмента это новый метод, и это осознанно, см. брифинг задачи);
+ *   - `signatureChanges` — имена существующих методов, у которых изменилась строка сигнатуры
+ *     (список параметров, `Знач`, `Экспорт`).
+ *
+ * Приближение, заявленное прямо: hunk чистого удаления (`+c,0` в заголовке) не добавляет НИ
+ * ОДНОЙ строки рабочего дерева, и это правильно — но значит, что метод, который правка ТОЛЬКО
+ * укоротила (ни одной строки не добавлено внутри него), в `changedLines` не отмечен и здесь
+ * методом «задетым» не считается: не входит в `touchedCount`, его тело не сканируется на
+ * маркеры архетипов. Симметрично: метод, которого не стало в рабочем дереве (был в HEAD, в
+ * текущей версии отсутствует полностью), правило (b) не ловит — оно однонаправленное, по
+ * методам ТЕКУЩЕГО дерева, отсутствующим в HEAD, а не наоборот.
+ */
+function analyzeChangedMethods(diffs, root) {
+  const touchedBodies = [];
+  const newMethods = [];
+  const signatureChanges = [];
+  let touchedCount = 0;
+
+  for (const d of diffs) {
+    if (d.isNew || !/\.bsl$/i.test(d.rel)) continue;
+    const abs = resolvePath(root, d.rel);
+    if (!existsSync(abs)) continue; // рабочее дерево файл удалило — сравнивать методы негде
+
+    let currentText;
+    try {
+      currentText = readFileSync(abs, 'utf8').replace(/^﻿/, '').replace(/\r\n/g, '\n');
+    } catch {
+      continue;
+    }
+    const headRaw = headVersion(abs, root);
+    if (headRaw === null) continue; // защитный дубль условия d.isNew выше
+
+    const currentMethods = methodRanges(currentText);
+    const headMethods = methodRanges(headRaw.replace(/\r\n/g, '\n'));
+    const headByName = new Map(headMethods.map((mth) => [mth.name.toLowerCase(), mth]));
+    const lines = currentText.split('\n');
+
+    for (const method of currentMethods) {
+      const isTouched = [...d.changedLines].some((n) => n >= method.start && n <= method.end);
+      if (!isTouched) continue;
+      touchedCount++;
+      touchedBodies.push(lines.slice(method.start - 1, method.end).join('\n'));
+
+      const head = headByName.get(method.name.toLowerCase());
+      if (!head) {
+        newMethods.push(method.name);
+      } else if (head.signature !== method.signature) {
+        signatureChanges.push(method.name);
+      }
+    }
+  }
+
+  return { touchedCount, touchedBodies, newMethods, signatureChanges };
 }
 
 /**
@@ -320,12 +508,19 @@ export function computeProfile({ files, root, config, metrics, configState }) {
   const addedText = allAddedLines.join('\n');
   const noGit = diffs.some((d) => d.note === 'no_git');
 
+  // Методы, которых коснулась правка, — общий вход для оси 1 (новый метод / изменённая
+  // сигнатура / >1 метода) и для оси 2 (маркеры архетипов ищутся и в телах этих методов, не
+  // только в добавленных строках диффа).
+  const methodAnalysis = analyzeChangedMethods(diffs, root);
+  const changedBodiesText = methodAnalysis.touchedBodies.join('\n');
+
   // --- ось 2: архетипы --------------------------------------------------------
   const dirsPresent = new Set(diffs.map((d) => normalize(d.rel).toLowerCase()));
   const catalog = [...ARCHETYPES, ...customArchetypes(config)];
   const fired = [];
   for (const a of catalog) {
-    const byMarker = a.markers && a.markers.length > 0 && a.markers.some((re) => re.test(addedText));
+    const byMarker =
+      a.markers && a.markers.length > 0 && a.markers.some((re) => re.test(addedText) || re.test(changedBodiesText));
     const byPath = a.pathMarker ? diffs.some((d) => a.pathMarker.test(d.rel)) : false;
     const byNewFile = a.newFile
       ? diffs.some((d) => {
@@ -352,11 +547,37 @@ export function computeProfile({ files, root, config, metrics, configState }) {
   // проверка идёт раньше размера:
   // однострочный новый общий модуль — всё равно C3, а не C1 по числу строк.
   const newModuleOrMetadata = archetypeLabels.includes('new-metadata-object') || archetypeLabels.includes('new-common-module');
+
+  // Порядок проверок ниже — приоритет ПРИЧИНЫ, которую называет `volumeReason`, когда
+  // сработало сразу несколько условий: >1 метода важнее конкретного нового метода (он и есть
+  // один из этих «>1»), новый метод важнее правки сигнатуры соседнего, а размер — последний
+  // резерв, если ни один структурный признак не сработал. Сама принадлежность к C2 при этом
+  // не зависит от порядка — это ИЛИ по всем условиям, определение C2 в `profile-axes.md`
+  // («Ось 1») перечисляет их через «ИЛИ».
   let volume;
-  if (cosmeticOnly) volume = 'C0';
-  else if (newModuleOrMetadata) volume = 'C3';
-  else if (files.length <= cfg.c1MaxFiles && added + removed <= cfg.c1MaxLines) volume = 'C1';
-  else volume = 'C2';
+  let volumeReason = null;
+  if (cosmeticOnly) {
+    volume = 'C0';
+  } else if (newModuleOrMetadata) {
+    volume = 'C3';
+  } else if (methodAnalysis.touchedCount > 1) {
+    volume = 'C2';
+    volumeReason = `methods:${methodAnalysis.touchedCount}`;
+  } else if (methodAnalysis.newMethods.length > 0) {
+    volume = 'C2';
+    volumeReason = `new-method:${methodAnalysis.newMethods[0]}`;
+  } else if (methodAnalysis.signatureChanges.length > 0) {
+    volume = 'C2';
+    volumeReason = `signature:${methodAnalysis.signatureChanges[0]}`;
+  } else if (files.length > cfg.c1MaxFiles) {
+    volume = 'C2';
+    volumeReason = 'files';
+  } else if (added + removed > cfg.c1MaxLines) {
+    volume = 'C2';
+    volumeReason = 'lines';
+  } else {
+    volume = 'C1';
+  }
 
   const totalLoc = added + removed;
 
@@ -434,6 +655,7 @@ export function computeProfile({ files, root, config, metrics, configState }) {
 
   const result = {
     volume,
+    volumeReason,
     files: files.length,
     loc: { added, removed },
     archetypes: archetypeLabels,

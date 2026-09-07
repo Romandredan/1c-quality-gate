@@ -838,6 +838,10 @@ function cmdPlan(args) {
     `volume=${volume} files=${profile.files} loc=+${profile.loc.added}/-${profile.loc.removed} ` +
       `archetypes=[${archetypeLabels.length ? archetypeLabels.join(',') : 'none'}] complexity=[${complexityDisplay}] driver=${driver}\n`
   );
+  // Причина, по которой объём НЕ C1 (>1 метода / новый метод / изменённая сигнатура / порог
+  // строк либо файлов) — без неё «C2» видно, а почему C2 — нет, и первое же «почему так
+  // глубоко на трёх строках?» превращается в спор без записи, на которую можно сослаться.
+  if (profile.volumeReason) write(`объём: ${volume} (${profile.volumeReason})\n`);
   if (!analyzerOk) write(`сложность не считалась: ${analyzerReason}\n`);
   write(`resolved: code=${resolved.code} arch=${resolved.arch === null ? 'skip' : resolved.arch} xml=${resolved.xml} hygiene=${resolved.hygiene}\n`);
   write(`${profile.scopeLine}\n\n`);
