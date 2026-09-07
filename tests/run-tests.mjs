@@ -2607,7 +2607,7 @@ const mustContain = [
   ['skills/bsl-code-review/references/bsl-coding-standards.md', 'Неоднозначное поле', 'затенение колонки псевдонимом разобрано в стандартах'],
   ['skills/bsl-code-review/references/bsl-query-reference.md', 'qg:QRY-ALIAS-SHADOWS-FIELD', 'справочник языка называет эвристику затенения'],
   ['skills/bsl-code-review/references/checklist-code.md', 'QRY-ALIAS-SHADOWS-FIELD', 'затенение псевдонимом — пункт чеклиста'],
-  ['skills/bsl-code-review/SKILL.md', 'tools/query-lint.mjs', 'контур кода прогоняет лексическую проверку запросов'],
+  ['tools/gate.mjs', 'tools/query-lint.mjs', 'контур кода прогоняет лексическую проверку запросов'],
   // Обратная половина: строгость к ОБЪЕДИНИТЬ не должна уходить в ложные находки. Отсутствие
   // псевдонимов в неголовной ветке — законная форма, и это сказано прямо.
   ['skills/bsl-code-review/references/bsl-query-reference.md', 'Имена колонок результата берутся из', 'имена колонок ОБЪЕДИНИТЬ берутся из первой выборки'],
@@ -2653,7 +2653,7 @@ const mustContain = [
   // половины правило провоцирует потерю данных в колонках с длинным текстом.
   ['skills/bsl-code-review/references/catalog/AI-16.md', '#std432 п. 2', 'у AI-16 назван контр-сигнал: неограниченная строка бывает законной'],
   ['skills/bsl-code-review/references/catalog/AI-16.md', 'ВЫРАЗИТЬ(Т.Поле КАК СТРОКА(N))', 'AI-16 называет приведение длины на стороне запроса'],
-  ['skills/bsl-code-review/SKILL.md', 'qg:BSL-UNBOUNDED-STRING-COLUMN', 'контур кода знает про механическую половину AI-16'],
+  ['skills/bsl-code-review/references/catalog/INDEX.md', 'qg:BSL-UNBOUNDED-STRING-COLUMN', 'контур кода знает про механическую половину AI-16'],
   ['skills/bsl-code-review/references/checklist-code.md', 'BSL-UNBOUNDED-STRING-COLUMN', 'колонка без квалификатора — пункт чеклиста'],
   ['agents/bsl-verifier.md', 'BSL-UNBOUNDED-STRING-COLUMN', 'верификатор прогоняет проверку колонок'],
   ['skills/bsl-code-review/references/bsl-query-reference.md', 'КвалификаторыСтроки', 'справочник языка называет типизацию колонок таблицы-параметра'],
@@ -2748,12 +2748,16 @@ section('Бюджет навыков и достижимость справоч�
     // в справочник не выносится: без него движок просто не будет запущен. Обосновывающее
     // при этом лежит в `references/platform-api.md`, в навыке остались только действия.
     //
-    // 27 вместо 26 КБ: строка таблицы признаков за `qg:BSL-DISPATCH-NO-FALLBACK`. Строку
-    // таблицы вынести некуда — правило, которого навык не называет, не будет применено, а
-    // разбор у него и так в справочнике (`catalog/BSL-DISPATCH-NO-FALLBACK.md`). Свободного места в
-    // навыке при этом оставалось 47 байт, то есть долг назван вслух: следующая проверка
-    // упрётся в тот же порог, и оплачивать её придётся сжатием соседних абзацев.
-    'bsl-code-review': 27 * 1024,
+    // 22 вместо 27 КБ (Task 15): таблица признаков п.2 Слоя 1б и таблица «Стандарты под
+    // архетип» ушли — их печатает `gate.mjs plan`/`catalog.mjs index` по составу правки,
+    // данные лежат в `tools/profile.mjs` (`ARCHETYPES[*].refs`) и `references/catalog/`.
+    // Заодно свёрнуты в строки плана команды, которые `plan` печатает дословно
+    // (`analyzer-run.mjs`, `platform-context-run.mjs`, `catalog.mjs index/attest`), и таблица
+    // «Класс → глубина» в «Вход» — то же самое поле `resolved:` плана. Задача просила довести
+    // бюджет до 16 КБ; это недостижимо без потери «Слоя 2/3», «Автофикса» и «Выхода», которые
+    // задание прямо просило не трогать, — фактический размер после трима лёг на 21888 байт,
+    // бюджет ниже него не ставим.
+    'bsl-code-review': 22 * 1024,
     'xml-structure-review': 24 * 1024,
     'bsl-architecture-review': 20 * 1024,
     'file-hygiene': 12 * 1024,
