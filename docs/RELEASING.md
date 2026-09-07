@@ -55,6 +55,8 @@
    node tests/run-tests.mjs
    node tools/validate-package.mjs
    node tools/gen-signs-map-md.mjs   # если менялся signs-map.json
+   node tests/recall.mjs             # полнота читателя каталога не ниже порога; результат
+                                      # прикладывается к описанию релиза одной строкой
    ```
 
    `validate-package.mjs` остановит выпуск, если `version` в манифестах разошлись либо `ref`

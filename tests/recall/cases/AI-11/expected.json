@@ -2,5 +2,6 @@
   "defect": [
     "qg:AI-11"
   ],
-  "clean": []
+  "clean": [],
+  "detectable": "diff-only"
 }
