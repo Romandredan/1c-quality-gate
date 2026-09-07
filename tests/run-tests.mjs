@@ -2704,11 +2704,26 @@ const mustContain = [
   ['skills/bsl-code-review/references/catalog/BSL-REF-DOT-ACCESS.md', 'присваивание в этом же методе', 'основание из кода названо'],
   ['skills/bsl-code-review/references/catalog/BSL-REF-DOT-ACCESS.md', '#std453', 'тип параметра из описания метода назван основанием'],
   ['skills/bsl-code-review/references/catalog/BSL-REF-DOT-ACCESS.md', 'с именами объектов конфигурации инструмент не сопоставляет', 'сопоставление имён с метаданными исключено явно'],
+  // Субагент-читатель каталога антипаттернов и его вызов из обоих навыков: контур кода
+  // делегирует проход по каталогу читателю, а оркестратор знает о нём и об инструменте
+  // аттестации.
+  ['agents/antipattern-reader.md', 'quote', 'читатель обязан цитировать строку кода'],
+  ['agents/antipattern-reader.md', 'catalog.mjs" index', 'читатель получает индекс из инструмента'],
+  ['skills/bsl-code-review/SKILL.md', 'antipattern-reader', 'контур кода делегирует проход по каталогу читателю'],
+  ['skills/bsl-code-review/SKILL.md', 'catalog.mjs" attest', 'контур кода аттестует результат читателя'],
+  ['skills/quality-gate/SKILL.md', 'antipattern-reader', 'оркестратор знает субагента-читателя'],
+  ['skills/quality-gate/SKILL.md', 'tools/catalog.mjs', 'оркестратор называет инструмент аттестации'],
 ];
 for (const [file, needle, label] of mustContain) {
   const p = join(ROOT, file);
   check(`правило на месте: ${label}`, existsSync(p) && readFileSync(p, 'utf8').includes(needle));
 }
+
+// Читатель каталога не должен превратиться в ещё один свод, который грузит верификатор, и не
+// должен быть облегчён до дешёвой модели — оба условия ловят регрессию молча, без падения на
+// живом прогоне.
+check('верификатор не грузит каталог антипаттернов', !readFileSync(join(ROOT, 'agents', 'bsl-verifier.md'), 'utf8').includes('catalog/'));
+check('читатель работает не на haiku', /^model:\s*(sonnet|opus|inherit)/m.test(readFileSync(join(ROOT, 'agents', 'antipattern-reader.md'), 'utf8')));
 
 // ---------------------------------------------------------------------------
 section('Бюджет навыков и достижимость справочников');
