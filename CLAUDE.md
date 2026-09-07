@@ -24,6 +24,7 @@ agents/<имя>.md              субагенты
 commands/<имя>.md            слэш-команды
 hooks/hooks.json             хуки; пути через ${CLAUDE_PLUGIN_ROOT}
 tools/                       исполняемые проверки
+skills/bsl-code-review/references/catalog/   карточки антипаттернов; INDEX.md генерируется
 shared/                      знание, общее для нескольких навыков
 package.json                 манифест установки под OpenCode; main — файл плагина
 opencode/plugin/             плагин OpenCode и разбор состава пакета в его конфигурацию
@@ -71,6 +72,7 @@ opencode/commands/           слэш-команды OpenCode
 node tests/run-tests.mjs             # тесты программных проверок
 node tools/validate-package.mjs      # целостность пакета, ссылки, утечки
 node tools/gen-signs-map-md.mjs      # если менялся signs-map.json
+node tools/gen-catalog-index.mjs --check   # если менялась карточка каталога — INDEX.md не устарел
 ```
 
 Контуры `code` и `arch` — инструкции для модели, автоматически их прогнать нельзя.
