@@ -142,6 +142,12 @@ function escapeRegExp(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** Максимум непустых значений, `null` вместо `-Infinity` при пустом входе. */
+function maxOrNull(values) {
+  const present = values.filter((v) => v !== null && v !== undefined);
+  return present.length ? Math.max(...present) : null;
+}
+
 /** Номер строки (1-based) символа с позицией `pos` в `source`. */
 function lineAt(source, pos) {
   let line = 1;
@@ -593,14 +599,16 @@ export function computeProfile({ files, root, config, metrics, configState }) {
   const archFromComplexity = complexityFired ? 1 : null;
 
   const resolvedCode = codeMax(codeBase, codeFromArchetypes, codeFromComplexity);
-  // У `arch`, в отличие от `code`, объём САМ ПО СЕБЕ не даёт минимума. Ячейка C2 таблицы
-  // «Ось 1» («ур. 1-2») — это диапазон, в котором arch работает, КОГДА его поднял архетип
-  // или сложность, а не гарантированный пол при любом C2: живые примеры следа (например,
-  // task-9-report.md, `evidence-format.md`) показывают `arch:skip` ровно при `volume=C2` без
-  // сработавших архетипов. Жёсткий пол в 3 при C3 к тому же перебивал бы собственный
-  // `minArch: 2` архетипа `new-common-module`, из-за которого правка и стала C3, — то есть
-  // противоречил бы таблице архетипов, которую этот же модуль переносит дословно.
-  const archCandidates = [...archFromArchetypes, archFromComplexity].filter((v) => v !== null);
+  // У `arch`, как и у `code`, объём САМ ПО СЕБЕ даёт пол — так же прямо, как задокументировано
+  // в «Шаг 2» (исходно `quality-gate/SKILL.md`, теперь `profile-axes.md`, матрица глубин по
+  // объёму): C2 — «ур. 1–2», C3 — «ур. 3». Живой прогон, где `arch:skip` встречался при
+  // `volume=C2` без сработавших архетипов (task-9-report.md, `evidence-format.md`), — это
+  // модель, отступившая от документированной таблицы при заполнении evidence, а не образец
+  // для инструмента: раунд 2 задачи `context-routing` вернул пол намеренно. Конфликта с
+  // `minArch: 2` архетипа `new-common-module` (C3) нет — итог берёт максимум (`max(3, 2) = 3`),
+  // а не заменяет: архетип со своим минимумом никогда не может ПОНИЗИТЬ то, что даёт объём.
+  const archFloor = volume === 'C3' ? 3 : volume === 'C2' ? 1 : null;
+  const archCandidates = [...archFromArchetypes, archFromComplexity, archFloor].filter((v) => v !== null);
   const resolvedArch = archCandidates.length ? Math.max(...archCandidates) : null;
 
   const hasXmlChange = files.some((f) => /\.xml$/i.test(f));
@@ -617,13 +625,17 @@ export function computeProfile({ files, root, config, metrics, configState }) {
   // бы итог БЕЗ вклада сложности / БЕЗ вклада архетипов, — и совпадение по code или по arch
   // одинаково считается «подняло». Приоритет источника прежний: сложность, затем архетип,
   // затем объём; имя архетипа для driver выбирается по той оси, которую он реально поднял.
+  // Контрфактика по `arch` обязана нести и `archFloor` — иначе пол по объёму (Task 17,
+  // раунд 2) выглядел бы вкладом сложности или архетипа: без этого правка, где `arch` целиком
+  // объясняется полом C2/C3, ошибочно называла бы driver архетипом или сложностью, которые
+  // ничего не подняли сверх того, что уже дал объём.
   const codeWithoutComplexity = codeMax(codeBase, codeFromArchetypes);
-  const archWithoutComplexity = archFromArchetypes.length ? Math.max(...archFromArchetypes) : null;
+  const archWithoutComplexity = maxOrNull([...archFromArchetypes, archFloor]);
   const complexityRaisedCode = CODE_RANK[resolvedCode] > CODE_RANK[codeWithoutComplexity];
   const complexityRaisedArch = (resolvedArch ?? -1) > (archWithoutComplexity ?? -1);
 
   const codeWithoutArchetypes = codeMax(codeBase, codeFromComplexity);
-  const archWithoutArchetypes = archFromComplexity;
+  const archWithoutArchetypes = maxOrNull([archFromComplexity, archFloor]);
   const archetypeRaisedCode = CODE_RANK[resolvedCode] > CODE_RANK[codeWithoutArchetypes];
   const archetypeRaisedArch = (resolvedArch ?? -1) > (archWithoutArchetypes ?? -1);
 

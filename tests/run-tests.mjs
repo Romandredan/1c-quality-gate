@@ -5624,14 +5624,19 @@ section('Профиль изменения считает инструмент')
     writeFileSync(join(cmRoot, declFile), '<CommonModule/>\n', 'utf8');
     const cfg2 = { ...config, volume: { c1MaxFiles: 2, c1MaxLines: 40 } };
     const withDecl = prof.computeProfile({ files: [moduleFile, declFile], root: cmRoot, config: cfg2, metrics: {} });
-    check('новый Module.bsl с декларацией объекта: архетип срабатывает и выводит из C1 безусловно',
-      withDecl.archetypes.includes('new-common-module') && withDecl.volume === 'C3' && withDecl.resolved.arch === 2,
+    // Пол по объёму при C3 — 3 (Task 17, раунд 2), и он выше собственного `minArch: 2`
+    // архетипа `new-common-module` — итог берёт максимум (`max(3, 2) = 3`), архетип пол не
+    // понижает.
+    check('новый Module.bsl с декларацией объекта: архетип срабатывает, объём C3 безусловно, пол arch = 3',
+      withDecl.archetypes.includes('new-common-module') && withDecl.volume === 'C3' && withDecl.resolved.arch === 3,
       JSON.stringify(withDecl));
   }
 
-  // Объём C2 без сработавших архетипов и без сложности не даёт контуру arch никакого пола —
-  // «ур. 1-2» в таблице «Ось 1» описывает диапазон, в котором arch работает, когда его
-  // поднял архетип или сложность, а не гарантию хотя бы уровня 1 при любом C2.
+  // Объём C2 без сработавших архетипов и без сложности всё равно даёт контуру arch пол —
+  // уровень 1 (Task 17, раунд 2): «ур. 1–2» в матрице глубин по объёму — не диапазон, который
+  // включается только архетипом/сложностью, а гарантия хотя бы уровня 1 при любом C2, как и
+  // задокументировано в «Шаг 2» (исходно `quality-gate/SKILL.md`). Драйвер при этом — именно
+  // `volume`: ни один архетип не сработал, поднимать нечему.
   {
     const plainRoot = join(WORK, 'profile-plain-c2-root');
     rmSync(plainRoot, { recursive: true, force: true });
@@ -5641,8 +5646,9 @@ section('Профиль изменения считает инструмент')
     const plainFile = 'src/cf/CommonModules/П/Ext/Module.bsl';
     writeFileSync(join(plainRoot, plainFile), 'Процедура П() Экспорт\n' + '\tА = А + 1;\n'.repeat(45) + 'КонецПроцедуры\n', 'utf8');
     const pPlain = prof.computeProfile({ files: [plainFile], root: plainRoot, config, metrics: {} });
-    check('C2 без архетипов и без сложности: arch = skip (нет пола по объёму)',
-      pPlain.volume === 'C2' && pPlain.archetypes.length === 0 && pPlain.resolved.arch === null, JSON.stringify(pPlain));
+    check('C2 без архетипов и без сложности: arch = 1 (пол по объёму), driver=volume',
+      pPlain.volume === 'C2' && pPlain.archetypes.length === 0 && pPlain.resolved.arch === 1 && pPlain.driver === 'volume',
+      JSON.stringify(pPlain));
   }
 
   // Пути от корня проекта («src/cf/...») не получают ведущего слэша перед `src` — буквальный
@@ -5691,10 +5697,13 @@ section('Профиль изменения считает инструмент')
       pCfgState.scopeLine.endsWith(`config=${cfgMod.evidenceValue(state)}]`), pCfgState.scopeLine);
   }
 
-  // Fix round 1 / Important 2. `driver` обязан называть архетип, если он поднял ЛЮБУЮ ось —
-  // не только `code`. При `volume=C2` пол `code` уже `L2`, и архетип с `minCode:'L2'`
-  // (`object-event`) его не поднимает — но `arch` без архетипа остался бы `skip`, и именно
-  // архетип единственная причина `arch:1`. `driver=volume` в этом случае прятал бы причину.
+  // Fix round 1 / Important 2 (переоценено раундом 2 Task 17). Пол по объёму при C2 — уже 1,
+  // и `minArch` архетипа `object-event` тоже 1: архетип совпадает с полом, а не поднимает
+  // ЕГО НАД полом — контрфактика («что было бы без вклада архетипа») в этом случае равна
+  // фактическому итогу, значит архетип ничего не поднял, и называть его driver'ом было бы
+  // враньём о причине. Правильный driver здесь — `volume`: пола по объёму достаточно для
+  // `arch:1` и без архетипа. Архетип стал бы driver'ом, только если бы его `minArch` был
+  // строго больше пола (например, `rights`, `minArch:2`, при том же `volume=C2`).
   {
     const oeRoot = join(WORK, 'profile-object-event-root');
     rmSync(oeRoot, { recursive: true, force: true });
@@ -5705,8 +5714,8 @@ section('Профиль изменения считает инструмент')
     const oeContent = 'Процедура ПередЗаписью(Отказ)\n' + '\tА = А + 1;\n'.repeat(45) + 'КонецПроцедуры\n';
     writeFileSync(join(oeRoot, oeFile), oeContent, 'utf8');
     const pOe = prof.computeProfile({ files: [oeFile], root: oeRoot, config, metrics: {} });
-    check('volume=C2 + object-event: driver называет архетип (поднял arch, не code)',
-      pOe.volume === 'C2' && pOe.driver === 'archetype:object-event' && pOe.resolved.arch === 1, JSON.stringify(pOe));
+    check('volume=C2 + object-event: driver=volume (архетип не поднял ничего сверх пола по объёму)',
+      pOe.volume === 'C2' && pOe.driver === 'volume' && pOe.resolved.arch === 1, JSON.stringify(pOe));
   }
 
   // Fix round 1 (найдено при написании теста на driver, не угадано): `\b` в JS-регулярных
