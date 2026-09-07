@@ -6,10 +6,15 @@
  * написаны. Без этого замера экономия контекста доказуема, а сохранность обнаружения — нет.
  *
  * Не входит в run-tests.mjs: нужен доступ к модели. Запускается по команде и перед релизом:
- *   node tests/recall.mjs [--cases "AI-*"] [--model sonnet] [--concurrency 4]
+ *   node tests/recall.mjs [--cases "AI-*"] [--model sonnet] [--concurrency 4] [--timeout 300]
  *                          [--min-recall 0.8] [--max-false-positive 0.1]
  * Результат — tests/recall/results/<дата>.json. Код возврата 1, если полнота ниже порога либо
  * доля ложных находок на clean.bsl выше порога.
+ *
+ * Числовые флаги разбираются простым парсером `--ключ значение`: флаг последним токеном без
+ * значения (`... --min-recall`) читается как `true` → `Number(true)` → `1`, то есть валидный
+ * порог 100%, а не ошибка. `numArg()` ловит только `NaN` (мусорное значение), не эту форму —
+ * при ручном вызове с одиночными флагами без значений результат стоит перепроверить глазами.
  *
  * Зонд headless-режима (Claude Code 2.1.259, `claude -p ... --output-format json
  * --json-schema ...`): структурированный результат лежит в поле `structured_output` объекта
@@ -28,7 +33,9 @@
  * Приближение, которое нужно знать при чтении результата: вызов идёт с `--allowedTools ""`,
  * то есть читателю недоступен даже Read — шаг 3 его инструкции («открой карточку и проверь
  * «Когда это не дефект»») не выполняется. Число ниже — полнота срабатывания триггера, а не
- * полнота итогового вердикта читателя в проде (там подтверждение по карточке доступно).
+ * полнота итогового вердикта читателя в проде (там подтверждение по карточке доступно). Эта
+ * оговорка печатается в сводке и пишется в результат (`note`, `toolsAllowed`), а не только
+ * живёт здесь: кто читает цифру, не обязан читать код скрипта.
  *
  * Правило по AI-11: дефект виден только при сравнении версий (было/стало), одним файлом не
  * ловится. В `expected.json` карточки стоит `"detectable": "diff-only"` — для неё не
@@ -72,7 +79,14 @@ const MODEL = args.model || 'sonnet';
 const MIN_RECALL = numArg('min-recall', 0.8);
 const MAX_FP = numArg('max-false-positive', 0.1);
 const CONCURRENCY = Math.max(1, numArg('concurrency', 4));
+const TIMEOUT_S = numArg('timeout', 300);
 const glob = args.cases ? new RegExp('^' + String(args.cases).replace(/\*/g, '.*') + '$') : null;
+
+const FIDELITY_NOTE =
+  'Читатель вызван с --allowedTools "" — карточка не открывается, шаг «Когда это не дефект» ' +
+  'не выполняется. Число — полнота срабатывания триггера по индексу, а не итоговый вердикт ' +
+  'читателя в проде: полнота здесь оптимистичнее боевой (нечем себя поправить по карточке), ' +
+  'а доля ложных срабатываний — наоборот, завышена (нет доступа к законным формам признака).';
 
 const SCHEMA = {
   type: 'object',
@@ -126,12 +140,30 @@ function ask(fileName, code) {
     );
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    // Без таймаута зависший claude -p (ждёт ввод, оборвалась сеть) не разрешает промис
+    // никогда: пул встаёт молча, без строки в консоли, без файла результата и без кода
+    // возврата — пропавшая проверка неотличима от идущей.
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      reject(new Error(`claude -p не ответил за ${TIMEOUT_S} с на ${fileName} — процесс убит`));
+    }, TIMEOUT_S * 1000);
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
-    child.on('error', reject);
+    child.on('error', (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(e);
+    });
     child.on('close', (status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       if (status !== 0) {
         reject(new Error(`claude -p завершился с кодом ${status} на ${fileName}: ${stderr}`));
         return;
@@ -186,24 +218,33 @@ for (const name of caseNames) {
   for (const kind of kinds) tasks.push({ name, dir, kind, expected });
 }
 
-const rows = await pool(tasks, CONCURRENCY, async ({ name, dir, kind, expected }) => {
-  const code = readFileSync(join(dir, `${kind}.bsl`), 'utf8').replace(/^\uFEFF/, '');
-  const got = await ask(`${name}/${kind}.bsl`, code);
-  const found = [...new Set(got.findings.map((f) => f.id))];
-  const want = expected[kind];
-  const row = {
-    case: name,
-    kind,
-    want,
-    found,
-    hit: want.every((id) => found.includes(id)),
-    falsePositive: kind === 'clean' && found.length > 0,
-  };
-  process.stdout.write(
-    `${row.hit && !row.falsePositive ? ' ok ' : 'FAIL'}  ${name}/${kind}  ожидалось [${want}] найдено [${found}]\n`
-  );
-  return row;
-});
+let rows;
+try {
+  rows = await pool(tasks, CONCURRENCY, async ({ name, dir, kind, expected }) => {
+    const code = readFileSync(join(dir, `${kind}.bsl`), 'utf8').replace(/^\uFEFF/, '');
+    const got = await ask(`${name}/${kind}.bsl`, code);
+    const found = [...new Set(got.findings.map((f) => f.id))];
+    const want = expected[kind];
+    const row = {
+      case: name,
+      kind,
+      want,
+      found,
+      hit: want.every((id) => found.includes(id)),
+      falsePositive: kind === 'clean' && found.length > 0,
+    };
+    process.stdout.write(
+      `${row.hit && !row.falsePositive ? ' ok ' : 'FAIL'}  ${name}/${kind}  ожидалось [${want}] найдено [${found}]\n`
+    );
+    return row;
+  });
+} catch (e) {
+  // Первая ошибка из pool() — истёкший таймаут, ненулевой код claude -p или неразобранный
+  // конверт: без явного выхода здесь top-level await падает в сырой стек, а не в понятный
+  // код возврата, который ждёт вызывающий (CI, релизный чек-лист).
+  process.stderr.write(`Прогон прерван: ${e.message}\n`);
+  process.exit(1);
+}
 
 const defects = rows.filter((r) => r.kind === 'defect');
 const recall = defects.length ? defects.filter((r) => r.hit).length / defects.length : 1;
@@ -214,11 +255,12 @@ mkdirSync(RESULTS, { recursive: true });
 const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
 writeFileSync(
   join(RESULTS, `${stamp}.json`),
-  JSON.stringify({ model: MODEL, recall, fpRate, notMeasured, rows }, null, 2),
+  JSON.stringify({ model: MODEL, recall, fpRate, notMeasured, toolsAllowed: false, note: FIDELITY_NOTE, rows }, null, 2),
   'utf8'
 );
 
 process.stdout.write(`\nПолнота: ${(recall * 100).toFixed(0)}% (порог ${MIN_RECALL * 100}%), ложные на чистых: ${(fpRate * 100).toFixed(0)}% (порог ${MAX_FP * 100}%)\n`);
+process.stdout.write(`Оговорка: ${FIDELITY_NOTE}\n`);
 if (notMeasured.length) {
   process.stdout.write(`не измеряется парой файлов: ${notMeasured.length} (${notMeasured.join(', ')})\n`);
 }
