@@ -2830,9 +2830,23 @@ section('Каталог антипаттернов — формат карточ
     check(`${c.id}: триггер непустой и короче 600 байт`, c.trigger.length > 20 && Buffer.byteLength(c.trigger) < 600, String(Buffer.byteLength(c.trigger)));
     check(`${c.id}: имя файла совпадает с id`, c.file.endsWith(`${c.id.replace(/^qg:/, '')}.md`), c.file);
     check(`${c.id}: «Когда это не дефект» — список`, /## Когда это не дефект\n\n- /.test(text));
+    // `needs` — чем карточку нельзя проверить по одному лишь коду. Пусто по умолчанию;
+    // единственное известное значение сейчас — `diff` (нужно сравнение версий, qg:AI-11).
+    const KNOWN_NEEDS = ['diff'];
+    check(`${c.id}: needs — пусто либо список известных значений`,
+      Array.isArray(c.needs) && c.needs.every((n) => KNOWN_NEEDS.includes(n)), JSON.stringify(c.needs));
   }
   const md = gen.renderIndex(cards);
   check('индекс содержит каждый id', cards.every((c) => md.includes(c.id)));
+  // Карточка с needs: [diff] обязана быть отмечена в INDEX.md видимым маркером — иначе тот,
+  // кто ведёт признак по индексу, не узнает, что одного кода читателю недостаточно.
+  const needsDiffCards = cards.filter((c) => c.needs.includes('diff'));
+  check('есть хотя бы одна карточка needs: [diff] (иначе следующая проверка ничего не проверяет)',
+    needsDiffCards.length >= 1, String(needsDiffCards.length));
+  for (const c of needsDiffCards) {
+    const row = md.split('\n').find((l) => l.includes(`\`${c.id}\``));
+    check(`${c.id}: строка индекса отмечена маркером needs: [diff]`, !!row && row.includes('*'), row || '(строка не найдена)');
+  }
   // Проекция на 46 карточек считается отдельно для заголовка (фиксированная надпись и шапка
   // таблицы, не растёт со строками) и для строк (растут линейно с числом карточек) — иначе
   // при малом числе карточек, как сейчас, единоразовый заголовок умножился бы на 46 вместе
@@ -2955,6 +2969,64 @@ section('Аттестация результата читателя катало
   const gatedOk = run('tools/evidence-validator.mjs', [gatedFixture, '--gate'], { env: { CLAUDE_PROJECT_DIR: uRoot } });
   check('skipped reason=unreadable с отметкой в журнале принят (--gate)',
     gatedOk.code === 0, gatedOk.out.trim().slice(0, 300));
+}
+
+// ---------------------------------------------------------------------------
+section('Аттестация каталога — находки basis: diff (сравнение версий)');
+
+{
+  // Дефект A/B-прогона (task-18): признак qg:AI-11 виден только в дифе — исчезнувшую проверку
+  // рабочее дерево уже не содержит. Находка с `basis: "diff"` сверяется не с текущим файлом,
+  // а с удалёнными строками `git diff HEAD -- <файл>`; настоящая git-история нужна, поэтому
+  // фикстура — с `git init`/commit, как в тестах профиля метод-ориентированных правил выше.
+  const cat = await import(pathToFileURL(join(ROOT, 'tools', 'catalog.mjs')).href);
+  const gen = await import(pathToFileURL(join(ROOT, 'tools', 'gen-catalog-index.mjs')).href);
+  const expectedExamined = gen.readCatalog().filter((c) => !c.tool && c.archetypes.includes('always')).map((c) => c.id);
+
+  const dRoot = join(WORK, 'attest-diff-root');
+  rmSync(dRoot, { recursive: true, force: true });
+  mkdirSync(join(dRoot, 'src'), { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: dRoot });
+  writeFileSync(join(dRoot, '.1c-quality-gate.json'), '{}', 'utf8');
+  const dFile = 'src/Module.bsl';
+  writeFileSync(
+    join(dRoot, dFile),
+    'Функция Тест(Знач П)\n\tЕсли П = Неопределено Тогда\n\t\tВозврат "";\n\tКонецЕсли;\n\tВозврат Строка(П);\nКонецФункции\n',
+    'utf8'
+  );
+  execFileSync('git', ['add', '.'], { cwd: dRoot });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'база'], { cwd: dRoot });
+  // Правка: guard редкого случая исчез — в рабочем дереве его больше нет.
+  writeFileSync(join(dRoot, dFile), 'Функция Тест(Знач П)\n\tВозврат Строка(П);\nКонецФункции\n', 'utf8');
+
+  const diffGood = {
+    examined: expectedExamined,
+    files: [dFile],
+    unreadable: [],
+    findings: [{ id: 'qg:AI-11', file: dFile, line: 2, method: 'Тест', quote: 'Если П = Неопределено Тогда', basis: 'diff', note: 'guard редкого случая исчез' }],
+  };
+  const okDiff = cat.attest({ result: diffGood, files: [dFile], archetypes: [], root: dRoot });
+  check('находка basis=diff с цитатой из удалённой строки аттестуется', okDiff.ok === true, okDiff.problems.join('; '));
+  check('печатается violation по qg:AI-11 (ai-antipatterns)',
+    okDiff.evidence.some((l) => /scope=ai-antipatterns.*verdict=violation:qg:AI-11/.test(l)), okDiff.evidence.join('\n'));
+
+  const diffBadQuote = { ...diffGood, findings: [{ ...diffGood.findings[0], quote: 'Такой строки среди удалённых нет' }] };
+  const badDiffQuote = cat.attest({ result: diffBadQuote, files: [dFile], archetypes: [], root: dRoot });
+  check('находка basis=diff с цитатой не из удалённых строк отвергается',
+    badDiffQuote.ok === false && badDiffQuote.problems.some((p) => /basis=diff/.test(p)), badDiffQuote.problems.join('; '));
+
+  // Файл без версии в HEAD (никогда не коммитился) — не с чем сравнивать, находка не проходит.
+  const noHeadFile = 'src/Новый.bsl';
+  writeFileSync(join(dRoot, noHeadFile), 'Функция Тест2()\n\tВозврат 1;\nКонецФункции\n', 'utf8');
+  const diffNoHead = {
+    examined: expectedExamined,
+    files: [noHeadFile],
+    unreadable: [],
+    findings: [{ id: 'qg:AI-11', file: noHeadFile, line: 1, method: 'Тест2', quote: 'Функция Тест2()', basis: 'diff', note: 'x' }],
+  };
+  const badNoHead = cat.attest({ result: diffNoHead, files: [noHeadFile], archetypes: [], root: dRoot });
+  check('находка basis=diff по файлу без версии в HEAD отвергается',
+    badNoHead.ok === false && badNoHead.problems.some((p) => /basis=diff/.test(p)), badNoHead.problems.join('; '));
 }
 
 // Регрессия, которая в репозитории уже была: справочник языка подавал РАЗРЕШЕННЫЕ как выбор

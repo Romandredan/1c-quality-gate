@@ -17,7 +17,8 @@
  */
 
 import { readFileSync, existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, relative, sep } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readCatalog, renderIndex } from './gen-catalog-index.mjs';
 import { isKnownQgId } from './evidence-scopes.mjs';
@@ -42,6 +43,46 @@ function scopeOf(id) {
 
 function squash(s) {
   return String(s).replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Строки, удалённые правкой (`-`-строки диффа), с их номером в версии ДО правки.
+ *
+ * Номер строки старой версии восстанавливается по заголовку hunk (`@@ -a,b +c,d @@`) и по
+ * счётчику: контекстные строки и удалённые двигают его, добавленные — нет (их не было в
+ * старой версии).
+ */
+export function parseRemovedLines(diffText) {
+  const removed = [];
+  let oldLine = 0;
+  for (const raw of String(diffText).split(/\r?\n/)) {
+    const hunk = raw.match(/^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/);
+    if (hunk) { oldLine = Number(hunk[1]); continue; }
+    if (raw.startsWith('--- ') || raw.startsWith('+++ ')) continue;
+    if (raw.startsWith('-')) { removed.push({ line: oldLine, text: raw.slice(1) }); oldLine++; continue; }
+    if (raw.startsWith('+')) continue;
+    if (raw.startsWith(' ')) { oldLine++; continue; }
+    // остальные строки метаданных диффа (`diff --git`, `index …`, `\ No newline …`) счётчик не двигают
+  }
+  return removed;
+}
+
+/**
+ * Удалённые строки файла относительно HEAD, либо причина, почему сравнить не с чем.
+ *
+ * Находка `basis: "diff"` не сверяется с рабочим деревом (там строки уже нет — в этом и
+ * находка) — сверяется с самим диффом. Недоступный git или файл без версии в HEAD делает
+ * находку непроверяемой, а не автоматически верной: читатель не должен получить способ
+ * протащить недоказуемую находку через отсутствие истории.
+ */
+function diffRemovedLinesOf(fileRel, root) {
+  const relForGit = relative(resolve(root), resolve(root, fileRel)).split(sep).join('/');
+  const head = spawnSync('git', ['show', `HEAD:${relForGit}`], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  if (head.error) return { ok: false, reason: 'git недоступен' };
+  if (head.status !== 0) return { ok: false, reason: `нет версии HEAD файла ${fileRel}` };
+  const diff = spawnSync('git', ['diff', 'HEAD', '--', relForGit], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  if (diff.error || diff.status !== 0) return { ok: false, reason: 'git недоступен' };
+  return { ok: true, removed: parseRemovedLines(diff.stdout || '') };
 }
 
 export function attest({ result, files, archetypes = [], root = projectRoot() }) {
@@ -88,17 +129,34 @@ export function attest({ result, files, archetypes = [], root = projectRoot() })
   }
 
   const findings = Array.isArray(result?.findings) ? result.findings : [];
+  const fileByKey = new Map(files.map((f) => [normalizePath(f, root), f]));
+  const diffCache = new Map();
   for (const [i, f] of findings.entries()) {
     const where = `находка ${i + 1} (${f?.id || '?'})`;
     if (!isKnownQgId(String(f?.id || ''))) { problems.push(`${where}: идентификатор не из реестра`); continue; }
     if (!examined.includes(f.id)) { problems.push(`${where}: признак не входит в examined`); continue; }
     const key = normalizePath(String(f.file || ''), root);
-    const lines = contents.get(key);
-    if (!lines) { problems.push(`${where}: файл ${f.file} не из состава прогона`); continue; }
+    if (!wanted.includes(key)) { problems.push(`${where}: файл ${f.file} не из состава прогона (--files)`); continue; }
     const line = Number(f.line);
-    if (!Number.isInteger(line) || line < 1 || line > lines.length) { problems.push(`${where}: строка ${f.line} вне файла (${lines.length} строк)`); continue; }
+    if (!Number.isInteger(line) || line < 1) { problems.push(`${where}: строка ${f.line} некорректна`); continue; }
     const quote = squash(f.quote || '');
     if (!quote) { problems.push(`${where}: пустая цитата`); continue; }
+
+    if (f.basis === 'diff') {
+      // Находка по дифу: строки рабочего дерева не годятся — строка удалена как раз в этом и
+      // состоит находка. Сверяем с исчезнувшими строками `git diff HEAD -- <файл>`.
+      if (!diffCache.has(key)) diffCache.set(key, diffRemovedLinesOf(fileByKey.get(key), root));
+      const d = diffCache.get(key);
+      if (!d.ok) { problems.push(`${where}: basis=diff — ${d.reason}`); continue; }
+      const around = d.removed.filter((r) => r.line >= line - 2 && r.line <= line + 2).map((r) => r.text);
+      const window = squash(around.join(' '));
+      if (!window.includes(quote)) problems.push(`${where}: цитата не найдена среди удалённых строк ${line - 2}…${line + 2} (basis=diff) файла ${f.file}`);
+      continue;
+    }
+
+    const lines = contents.get(key);
+    if (!lines) { problems.push(`${where}: файл ${f.file} не читается`); continue; }
+    if (line > lines.length) { problems.push(`${where}: строка ${f.line} вне файла (${lines.length} строк)`); continue; }
     const window = squash(lines.slice(Math.max(0, line - 3), line + 2).join(' '));
     if (!window.includes(quote)) problems.push(`${where}: цитата не найдена в строках ${line - 2}…${line + 2} файла ${f.file}`);
   }

@@ -37,17 +37,19 @@
  * оговорка печатается в сводке и пишется в результат (`note`, `toolsAllowed`), а не только
  * живёт здесь: кто читает цифру, не обязан читать код скрипта.
  *
- * Правило по AI-11: дефект виден только при сравнении версий (было/стало), одним файлом не
- * ловится. В `expected.json` карточки стоит `"detectable": "diff-only"` — для неё не
- * запрашивается `defect.bsl` (заведомый промах ничего не измеряет), запрос по `clean.bsl`
- * остаётся: ложные срабатывания меряются везде. Такие карточки не входят в знаменатель
- * полноты и печатаются отдельной строкой сводки.
+ * Правило по картам `"detectable": "diff-only"` (в `expected.json`): дефект виден только при
+ * сравнении версий (было/стало), одним файлом не ловится. Читателю теперь можно отдать и
+ * `git diff` — рядом с `defect.bsl`/`clean.bsl` лежат `defect.diff`/`clean.diff` (реальный
+ * `git diff HEAD` между версией до и версией после), и для таких карт замер задаёт оба вопроса
+ * с приложенным дифом, как в проде (Слой 1б навыка `bsl-code-review`). Карта без диф-фикстур
+ * (пары `defect.diff` рядом нет) по-прежнему исключена из знаменателя полноты — заведомый
+ * промах ничего не измеряет — и печатается отдельной строкой сводки.
  *
  * AI-04 и AI-05 в знаменатель входят, но проверяют распознавание маркерной фразы в тексте
  * кода, а не признак самого дефекта — это тоже отмечено отдельной строкой сводки.
  */
 
-import { readFileSync, writeFileSync, readdirSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -118,10 +120,11 @@ const cards = readCatalog().filter((c) => !c.tool);
 const index = renderIndex(cards);
 
 /** Один вызов читателя в headless-режиме. Промис вместо spawnSync — нужен для пула воркеров. */
-function ask(fileName, code) {
+function ask(fileName, code, diff) {
   const prompt = [
     'Индекс триггеров:', '', index, '',
     `Файл ${fileName}:`, '', '```bsl', code, '```', '',
+    ...(diff ? [`git diff HEAD -- ${fileName}:`, '', '```diff', diff, '```', ''] : []),
     'Верни JSON по схеме.',
   ].join('\n');
 
@@ -213,16 +216,23 @@ const notMeasured = [];
 for (const name of caseNames) {
   const dir = join(CASES, name);
   const expected = JSON.parse(readFileSync(join(dir, 'expected.json'), 'utf8'));
-  const kinds = expected.detectable === 'diff-only' ? ['clean'] : ['defect', 'clean'];
-  if (expected.detectable === 'diff-only') notMeasured.push(name);
-  for (const kind of kinds) tasks.push({ name, dir, kind, expected });
+  const diffOnly = expected.detectable === 'diff-only';
+  // Диф-фикстура есть — карту измеряем целиком, приложив соответствующий `*.diff` к запросу.
+  // Диф-фикстуры нет — прежнее исключение: запрос по `defect.bsl` без дифа ничего не измерил
+  // бы (заведомый промах), запрос по `clean.bsl` остаётся ради ложных срабатываний.
+  const hasDefectDiff = diffOnly && existsSync(join(dir, 'defect.diff'));
+  const kinds = diffOnly && !hasDefectDiff ? ['clean'] : ['defect', 'clean'];
+  if (diffOnly && !hasDefectDiff) notMeasured.push(name);
+  for (const kind of kinds) tasks.push({ name, dir, kind, expected, useDiff: diffOnly });
 }
 
 let rows;
 try {
-  rows = await pool(tasks, CONCURRENCY, async ({ name, dir, kind, expected }) => {
+  rows = await pool(tasks, CONCURRENCY, async ({ name, dir, kind, expected, useDiff }) => {
     const code = readFileSync(join(dir, `${kind}.bsl`), 'utf8').replace(/^\uFEFF/, '');
-    const got = await ask(`${name}/${kind}.bsl`, code);
+    const diffPath = join(dir, `${kind}.diff`);
+    const diff = useDiff && existsSync(diffPath) ? readFileSync(diffPath, 'utf8') : null;
+    const got = await ask(`${name}/${kind}.bsl`, code, diff);
     const found = [...new Set(got.findings.map((f) => f.id))];
     const want = expected[kind];
     const row = {
