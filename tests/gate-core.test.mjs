@@ -139,6 +139,9 @@ check('подсказка opencode честна про мягкий гейт', h
 check('подсказка opencode не обещает блокировку', !hintO.includes('Завершение сессии заблокировано'));
 const hintXml = gateHint({ kind: 'metadata-xml', rel: 'x.xml', packageRoot: root, mode: 'claude' });
 check('подсказка metadata-xml упоминает Configuration.mdo (EDT)', hintXml.includes('Configuration.mdo'));
+// Task 14: подсказка называет план прогона literal-путём — до первого разрешения `$QG` в
+// сессии модель иначе не знает, чем именно запустить `gate.mjs plan`.
+check('подсказка называет план прогона', hintC.includes('gate.mjs" plan') && hintXml.includes('gate.mjs" plan'));
 const hintOut = gateHint({ ...armedOut, sessionId: 'sess-1', packageRoot: root, mode: 'claude' });
 check('подсказка про файл вне корня заявлена', hintOut.includes('вне корня'));
 check('подсказка называет судьбу проектных проверок', hintOut.includes('not_verified'));

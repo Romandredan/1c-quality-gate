@@ -2130,17 +2130,12 @@ const evProj = { env: { CLAUDE_PROJECT_DIR: EV_PROJ } };
   const rCustom = run('tools/evidence-validator.mjs', [customArch, '--gate'], { env: { CLAUDE_PROJECT_DIR: archProj } });
   check('проектный архетип принимается как метка', rCustom.code === 0, rCustom.out.trim().slice(0, 160));
 
-  // Список меток в валидаторе и таблица архетипов в навыке обязаны сходиться: разъедься они —
-  // модель пишет метку из таблицы, а валидатор её отвергает.
-  const skill = readFileSync(join(ROOT, 'skills/quality-gate/SKILL.md'), 'utf8');
+  // Список меток архетипов в словаре валидатора и в `tools/profile.mjs` (источник истины
+  // с Task 14 — таблица «Ось 2» из навыка туда и переехала) обязаны сходиться: разъедься
+  // они — модель получает от `gate.mjs plan` метку, которую валидатор отвергает. Полная
+  // проверка обеих сторон — ниже, в секции «Профиль изменения считает инструмент»; здесь
+  // достаточно варианта для `validatorSrc`, который используется дальше по DIMENSIONS.
   const validatorSrc = readFileSync(join(ROOT, 'tools', 'evidence-validator.mjs'), 'utf8');
-  const tableLabels = [...skill.matchAll(/^\|[^|]+\|\s*`([a-z][a-z-]*)`\s*\|/gm)].map((m) => m[1]);
-  const validatorLabels = ((validatorSrc.match(/const ARCHETYPES = \[([^\]]+)\]/s) || [, ''])[1].match(/'([^']+)'/g) || [])
-    .map((s) => s.slice(1, -1));
-  check('таблица архетипов даёт хотя бы десять меток', tableLabels.length >= 10, `${tableLabels.length}`);
-  check('метки навыка и валидатора совпадают',
-    tableLabels.every((l) => validatorLabels.includes(l)) && validatorLabels.filter((l) => l !== 'none').every((l) => tableLabels.includes(l)),
-    `навык: ${tableLabels.join(',')} | валидатор: ${validatorLabels.join(',')}`);
 
   // Закрытый список измерений и инструменты, которые их печатают, обязаны сходиться. Иначе
   // валидатор ругается на собственный вывод плагина, и предупреждению перестают верить.
@@ -2595,10 +2590,17 @@ const mustContain = [
   // должно быть место в навыке, где сказано, откуда берётся её порог.
   ['skills/quality-gate/SKILL.md', 'tools/config.mjs" show', 'пороги берутся из проектной настройки, а не по памяти'],
   ['skills/quality-gate/SKILL.md', 'sentinel.id', 'номер часового задаётся проектом'],
-  ['skills/quality-gate/SKILL.md', 'archetypes.custom', 'архетипы проекта участвуют в выборе глубины'],
-  ['skills/quality-gate/SKILL.md', 'volume.c1MaxLines', 'порог объёма назван ключом настройки'],
-  ['skills/quality-gate/SKILL.md', 'complexity.maxNesting', 'порог сложности назван ключом настройки'],
+  // Таблицы осей переехали в `tools/profile.mjs` (Task 14) — навык больше не дублирует ключи
+  // настройки прозой, план (`gate.mjs plan`) печатает их посчитанными. Игла держит ключи там,
+  // где их реально читает код, а не там, где их когда-то называл текст навыка.
+  ['tools/profile.mjs', 'archetypes.custom', 'архетипы проекта участвуют в выборе глубины'],
+  ['tools/profile.mjs', 'volume.c1MaxLines', 'порог объёма назван ключом настройки'],
+  ['tools/profile.mjs', 'complexity.maxNesting', 'порог сложности назван ключом настройки'],
   ['skills/quality-gate/SKILL.md', 'config=', 'отметка о настройке переносится в след'],
+  ['skills/quality-gate/SKILL.md', 'gate.mjs" plan', 'оркестратор начинает с плана'],
+  ['skills/quality-gate/SKILL.md', '--no-analyzer', 'план называет флаг, пропускающий ось сложности'],
+  ['skills/quality-gate/SKILL.md', 'поднять', 'профиль плана можно поднять'],
+  ['skills/quality-gate/SKILL.md', 'понизить', 'профиль плана нельзя понизить без основания'],
   ['skills/quality-gate/references/evidence-format.md', 'custom:volume+sentinel', 'формат отметки о настройке описан'],
   // Затенение колонки псевдонимом источника: ошибка выполнения, которую до продуктива не
   // ловит ничто — текст запроса для всех инструментов остаётся строковым литералом.
@@ -2622,7 +2624,9 @@ const mustContain = [
   // единственное, что отличает «проверено» от «прочитано глазами».
   ['skills/quality-gate/SKILL.md', 'Контур исполняется вызовом навыка', 'оркестратор запрещает исполнять контур по памяти'],
   ['skills/quality-gate/SKILL.md', 'qg-runs.jsonl', 'оркестратор называет журнал прогонов'],
-  ['skills/quality-gate/SKILL.md', 'tools/query-lint.mjs', 'оркестратор называет инструменты проверок поимённо'],
+  // Таблица «Проверка → инструмент» переехала в план (Task 14): её печатает `gate.mjs plan`
+  // по составу конкретной правки, а не навык прозой на все случаи разом.
+  ['tools/gate.mjs', 'query-lint.mjs', 'план называет инструменты проверок поимённо'],
   ['skills/quality-gate/references/evidence-format.md', 'не старше последней правки', 'срок годности доказательства назван'],
   ['skills/quality-gate/references/evidence-format.md', 'дописанной в журнал вручную', 'граница гарантии журнала заявлена прямо'],
   ['skills/file-hygiene/SKILL.md', 'печатает сам', 'контур гигиены переносит вывод инструмента, а не сочиняет запись'],
@@ -2734,10 +2738,11 @@ section('Бюджет навыков и достижимость справоч�
   // инструментов пришлось оплачивать сжатием соседнего абзаца. Свой бюджет ниже предела
   // ловит рост заранее, а число в нём называет долг вслух.
   const BUDGET = {
-    // 29 вместо 28 КБ: имя ещё одной проверки в таблице инструментов (`db-read-in-loop`)
-    // перебрало прежний бюджет на 11 байт. Имя оттуда не вынести — по этой таблице
-    // оркестратор узнаёт, что строку следа печатает инструмент, а не он сам.
-    'quality-gate': 29 * 1024,
+    // 14 вместо 29 КБ (Task 14): таблицы трёх осей, архетипов и матрица глубин ушли — их
+    // считает и печатает `gate.mjs plan`, данные лежат в `tools/profile.mjs`/`tools/gate.mjs`,
+    // обоснование — в `references/profile-axes.md`. В навыке остались инварианты и цикл
+    // «план → инструменты → контуры → отчёт → снятие», каждый шаг — команда, а не таблица.
+    'quality-gate': 14 * 1024,
     // 26 вместо 25 КБ: у слоя 1а появился второй движок (сверка со справочником платформы),
     // и его блок — команда, признак «выключен по умолчанию» и два правила чтения вывода —
     // в справочник не выносится: без него движок просто не будет запущен. Обосновывающее
@@ -2769,6 +2774,14 @@ section('Бюджет навыков и достижимость справоч�
   // а фактически мёртв — и правило в нём не действует, хотя написано. Форма ссылки в навыках
   // разная («references/имя.md» в прозе, голое имя файла в таблице архетипов), поэтому
   // достаточно упоминания имени; проверяется факт адресации, а не её оформление.
+  //
+  // Task 14: у quality-gate таблица архетипов (со столбцом refs) переехала из SKILL.md в
+  // `tools/profile.mjs` — справочник, названный только там (`ARCHETYPES[*].refs`), тоже
+  // законно адресован: план (`gate.mjs plan`) печатает его модели по составу правки, роль
+  // та же, что была у таблицы в тексте навыка.
+  const profArchetypes = await import(pathToFileURL(join(ROOT, 'tools', 'profile.mjs')).href);
+  const profileRefs = new Set(profArchetypes.ARCHETYPES.flatMap((a) => a.refs || []));
+
   for (const name of skills) {
     const refDir = join(ROOT, 'skills', name, 'references');
     if (!existsSync(refDir)) continue;
@@ -2788,8 +2801,8 @@ section('Бюджет навыков и достижимость справоч�
         .filter((r) => r !== ref && !statSync(join(refDir, r)).isDirectory())
         .map((r) => readFileSync(join(refDir, r), 'utf8'))
         .join('\n');
-      const reachable = skillText.includes(ref) || siblings.includes(ref);
-      check(`${name}: справочник ${ref} достижим`, reachable, 'на него не ссылается ни навык, ни соседний справочник');
+      const reachable = skillText.includes(ref) || siblings.includes(ref) || profileRefs.has(ref);
+      check(`${name}: справочник ${ref} достижим`, reachable, 'на него не ссылается ни навык, ни соседний справочник, ни ARCHETYPES[*].refs');
     }
   }
 }
@@ -5313,19 +5326,22 @@ section('Самозаведение контура платформенного 
   }
 
   // --- движок назван там, где его будут искать -------------------------------
-  // Контур, о котором не знает оркестратор, не запускается: таблица инструментов — это и есть
-  // список того, что прогон обязан прогнать. А субагент верификации без явного указания на
+  // Контур, о котором не знает оркестратор, не запускается. С Task 14 список того, что прогон
+  // обязан прогнать, печатает `gate.mjs plan` по `TOOL_ORDER` — не таблица прозой в SKILL.md,
+  // которую легко забыть обновить при правке. А субагент верификации без явного указания на
   // движок уходит в ручную сверку через MCP: модель проверяет то, о чём догадалась спросить.
   {
+    const gateToolSrc = readFileSync(join(ROOT, 'tools', 'gate.mjs'), 'utf8');
+    check(
+      'план называет движок в TOOL_ORDER',
+      /TOOL_ORDER\s*=\s*\[[^\]]*'tools\/platform-context-run\.mjs'/s.test(gateToolSrc),
+      'TOOL_ORDER не содержит platform-context-run.mjs'
+    );
     const gateSkill = readFileSync(join(ROOT, 'skills', 'quality-gate', 'SKILL.md'), 'utf8');
     check(
-      'оркестратор называет движок в таблице инструментов',
-      /\|\s*`platform-api`\s*\|\s*`tools\/platform-context-run\.mjs`/.test(gateSkill),
-      gateSkill.split('\n').filter((l) => l.includes('platform-api')).join(' / ') || 'упоминаний нет'
-    );
-    check(
-      'оркестратор требует отчёта о сверке с платформой',
-      /сверка со справочником платформы обязательна/i.test(gateSkill)
+      'оркестратор объясняет модели, почему движок обязателен',
+      /platform-context-run\.mjs.{0,40}(?<!не )обязателен/is.test(gateSkill),
+      gateSkill.split('\n').filter((l) => l.includes('platform-context-run')).join(' / ') || 'упоминаний нет'
     );
     const verifier = readFileSync(join(ROOT, 'agents', 'bsl-verifier.md'), 'utf8');
     check(

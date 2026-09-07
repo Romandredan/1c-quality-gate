@@ -234,6 +234,11 @@ export function gateHint({ kind, rel, sessionId = null, created = null, outside 
       ? 'Завершение сессии заблокировано, пока гейт не снят.'
       : 'Пока гейт не снят, плагин будет возвращать тебя к работе на каждой паузе.';
 
+  // Путь к плану печатается literal — так же, как toolPath() в blockMessage(): подсказка
+  // читается до первого разрешения `$QG` в сессии, а без готового пути модель не знает, что
+  // именно она сможет запустить.
+  const planLine = packageRoot ? `План прогона: node "${join(packageRoot, 'tools', 'gate.mjs').replace(/\\/g, '/')}" plan` : null;
+
   const lines =
     kind === 'bsl'
       ? [
@@ -242,6 +247,7 @@ export function gateHint({ kind, rel, sessionId = null, created = null, outside 
           ...(sessionId ? [`Сессия: ${sessionId} — её идентификатор для --session в verify/release.`] : []),
           '',
           call,
+          ...(planLine ? [planLine] : []),
           'Он сам определит глубину по трём осям (объём правки, архетипы кода, сложность)',
           'и запустит только нужные контуры. Мелкая правка проверяется за секунды.',
           '',
@@ -253,6 +259,7 @@ export function gateHint({ kind, rel, sessionId = null, created = null, outside 
           ...(sessionId ? [`Сессия: ${sessionId} — её идентификатор для --session в verify/release.`] : []),
           '',
           call,
+          ...(planLine ? [planLine] : []),
           'Для нового объекта критична проверка регистрации в составе конфигурации',
           '(Configuration.xml выгрузки либо Configuration.mdo в проекте EDT): файл-сирота',
           'вне состава не попадает в сборку, при этом среда этого не диагностирует —',

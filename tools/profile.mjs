@@ -347,8 +347,9 @@ export function computeProfile({ files, root, config, metrics, configState }) {
   // --- ось 1: объём -------------------------------------------------------------
   const cosmeticOnly = allAddedLines.every((l) => l.trim() === '' || l.trim().startsWith('//'));
   // Новый модуль или объект метаданных выводит правку из C1 БЕЗУСЛОВНО — так прямо
-  // сказано в определении C1 (`SKILL.md`, «Ось 1»): «нет новых экспортов, изменённых
-  // сигнатур, новых модулей и объектов метаданных». Поэтому проверка идёт раньше размера:
+  // сказано в определении C1 (`quality-gate/references/profile-axes.md`, «Ось 1»): «нет
+  // новых экспортов, изменённых сигнатур, новых модулей и объектов метаданных». Поэтому
+  // проверка идёт раньше размера:
   // однострочный новый общий модуль — всё равно C3, а не C1 по числу строк.
   const newModuleOrMetadata = archetypeLabels.includes('new-metadata-object') || archetypeLabels.includes('new-common-module');
   let volume;
