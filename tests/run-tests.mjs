@@ -2826,6 +2826,24 @@ section('Каталог антипаттернов — формат карточ
 }
 
 // ---------------------------------------------------------------------------
+section('Контрольные примеры каталога — состав');
+
+{
+  const gen = await import(pathToFileURL(join(ROOT, 'tools', 'gen-catalog-index.mjs')).href);
+  const casesDir = join(ROOT, 'tests', 'recall', 'cases');
+  for (const c of gen.readCatalog().filter((x) => !x.tool)) {
+    const dir = join(casesDir, c.id.replace(/^qg:/, ''));
+    const ok = ['defect.bsl', 'clean.bsl', 'expected.json'].every((f) => existsSync(join(dir, f)));
+    check(`${c.id}: контрольный пример на месте`, ok, dir);
+    if (!ok) continue;
+    const exp = JSON.parse(readFileSync(join(dir, 'expected.json'), 'utf8'));
+    check(`${c.id}: expected называет сам признак`, Array.isArray(exp.defect) && exp.defect.includes(c.id) && Array.isArray(exp.clean) && exp.clean.length === 0);
+    const defect = readFileSync(join(dir, 'defect.bsl'), 'utf8');
+    check(`${c.id}: defect.bsl — полный метод от 15 строк`, defect.split('\n').length >= 15 && /Конец(Процедуры|Функции)/.test(defect));
+  }
+}
+
+// ---------------------------------------------------------------------------
 section('Аттестация результата читателя каталога');
 
 {
