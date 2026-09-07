@@ -2531,9 +2531,9 @@ section('Полнота правил (контуры code и arch выполня
 
 const mustContain = [
   ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'Запрос в цикле', 'антипаттерн «запрос в цикле»'],
-  ['skills/bsl-code-review/references/ai-antipatterns.md', 'AI-01', 'запись набора с неполным отбором'],
-  ['skills/bsl-code-review/references/ai-antipatterns.md', 'AI-04', 'отчёт о непрогнанной проверке'],
-  ['skills/bsl-code-review/references/ai-antipatterns.md', 'AI-05', 'зелёная сборка вместо компиляции'],
+  ['skills/bsl-code-review/references/catalog/AI-01.md', 'id: qg:AI-01', 'запись набора с неполным отбором'],
+  ['skills/bsl-code-review/references/catalog/AI-04.md', 'AI-04', 'отчёт о непрогнанной проверке'],
+  ['skills/bsl-code-review/references/catalog/AI-05.md', 'AI-05', 'зелёная сборка вместо компиляции'],
   ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'Коррелированный подзапрос', 'коррелированный подзапрос в условии'],
   ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'ИНДЕКСИРОВАТЬ ПО', 'временная таблица без индекса'],
   ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'СообщитьПользователю', 'Сообщить() как уведомление'],
@@ -2587,7 +2587,7 @@ const mustContain = [
   ['skills/bsl-code-review/references/bsl-form-module-rules.md', 'Локальная переменная с именем реквизита формы', 'коллизия имени с реквизитом формы разобрана'],
   ['skills/bsl-code-review/references/bsl-form-module-rules.md', '&НаКлиентеНаСервереБезКонтекста`)', 'методы без контекста формы названы контр-сигналом'],
   ['skills/bsl-code-review/references/bsl-form-module-rules.md', 'непроверенный', 'без состава реквизитов признак не выпускается'],
-  ['skills/bsl-code-review/references/ai-antipatterns.md', 'ЗаполнитьЗначенияСвойств(Приёмник', 'копия структуры не делается заполнением свойств'],
+  ['skills/bsl-code-review/references/catalog/AI-07.md', 'ЗаполнитьЗначенияСвойств(Приёмник', 'копия структуры не делается заполнением свойств'],
   // Настройка, которую никто не читает, неотличима от «правило не сработало»: у каждой оси
   // должно быть место в навыке, где сказано, откуда берётся её порог.
   ['skills/quality-gate/SKILL.md', 'tools/config.mjs" show', 'пороги берутся из проектной настройки, а не по памяти'],
@@ -2640,12 +2640,12 @@ const mustContain = [
   // Слепая зона AI-16 в исходной формулировке: перечислялись РАЗЛИЧНЫЕ/ОБЪЕДИНИТЬ/
   // СГРУППИРОВАТЬ, а живой кейс упал на соединении — и соединение делал ЧУЖОЙ метод, так что
   // по месту объявления колонки дефект не виден. Обе половины обязаны остаться в тексте.
-  ['skills/bsl-code-review/references/ai-antipatterns.md', 'соединении (`ПО`)', 'AI-16 покрывает соединение, а не только группировку'],
-  ['skills/bsl-code-review/references/ai-antipatterns.md', 'таблицу в запрос отправляет **другой метод**', 'AI-16 называет форму, невидимую по месту объявления'],
+  ['skills/bsl-code-review/references/catalog/AI-16.md', 'соединении (`ПО`)', 'AI-16 покрывает соединение, а не только группировку'],
+  ['skills/bsl-code-review/references/catalog/AI-16.md', 'таблицу в запрос отправляет **другой метод**', 'AI-16 называет форму, невидимую по месту объявления'],
   // Контр-сигнал: квалификатор режет значение, и «дописать везде» — не решение. Без этой
   // половины правило провоцирует потерю данных в колонках с длинным текстом.
-  ['skills/bsl-code-review/references/ai-antipatterns.md', '#std432 п. 2', 'у AI-16 назван контр-сигнал: неограниченная строка бывает законной'],
-  ['skills/bsl-code-review/references/ai-antipatterns.md', 'ВЫРАЗИТЬ(Т.Поле КАК СТРОКА(N))', 'AI-16 называет приведение длины на стороне запроса'],
+  ['skills/bsl-code-review/references/catalog/AI-16.md', '#std432 п. 2', 'у AI-16 назван контр-сигнал: неограниченная строка бывает законной'],
+  ['skills/bsl-code-review/references/catalog/AI-16.md', 'ВЫРАЗИТЬ(Т.Поле КАК СТРОКА(N))', 'AI-16 называет приведение длины на стороне запроса'],
   ['skills/bsl-code-review/SKILL.md', 'qg:BSL-UNBOUNDED-STRING-COLUMN', 'контур кода знает про механическую половину AI-16'],
   ['skills/bsl-code-review/references/checklist-code.md', 'BSL-UNBOUNDED-STRING-COLUMN', 'колонка без квалификатора — пункт чеклиста'],
   ['agents/bsl-verifier.md', 'BSL-UNBOUNDED-STRING-COLUMN', 'верификатор прогоняет проверку колонок'],
@@ -2659,12 +2659,12 @@ const mustContain = [
   // AI-17/AI-18/ARCH-AI-08: выбор коллекции для набора однотипных записей. Правило вредно без
   // двух половин - обязательной типизации добавляемой колонки и предупреждения о том, что
   // замена соответствия на таблицу без индекса делает поиск медленнее, а не быстрее.
-  ['skills/bsl-code-review/references/ai-antipatterns.md', 'Выгрузить()', 'AI-17 называет способ получить таблицу из результата запроса'],
-  ['skills/bsl-code-review/references/ai-antipatterns.md', 'без `ОписаниеТипов`', 'AI-17 требует указывать тип добавляемой колонки'],
-  ['skills/bsl-code-review/references/ai-antipatterns.md', 'Сворачивать нужно копию', 'AI-17 предупреждает о потере колонок в Свернуть'],
-  ['skills/bsl-code-review/references/ai-antipatterns.md', 'ключ — это набор колонок, а не колонка', 'AI-18 запрещает перенос склейки в колонку таблицы'],
-  ['skills/bsl-code-review/references/ai-antipatterns.md', 'соответствию состава колонок в индексе', 'условие подхвата индекса приведено цитатой из документации платформы'],
-  ['skills/bsl-code-review/references/ai-antipatterns.md', 'в регламентном задании по большому списку', 'у AI-18 назван контр-сигнал: соответствие бывает быстрее таблицы'],
+  ['skills/bsl-code-review/references/catalog/AI-17.md', 'Выгрузить()', 'AI-17 называет способ получить таблицу из результата запроса'],
+  ['skills/bsl-code-review/references/catalog/AI-17.md', 'без `ОписаниеТипов`', 'AI-17 требует указывать тип добавляемой колонки'],
+  ['skills/bsl-code-review/references/catalog/AI-17.md', 'Сворачивать нужно копию', 'AI-17 предупреждает о потере колонок в Свернуть'],
+  ['skills/bsl-code-review/references/catalog/AI-18.md', 'ключ — это набор колонок, а не колонка', 'AI-18 запрещает перенос склейки в колонку таблицы'],
+  ['skills/bsl-code-review/references/catalog/AI-18.md', 'соответствию состава колонок в индексе', 'условие подхвата индекса приведено цитатой из документации платформы'],
+  ['skills/bsl-code-review/references/catalog/AI-18.md', 'в регламентном задании по большому списку', 'у AI-18 назван контр-сигнал: соответствие бывает быстрее таблицы'],
   ['skills/bsl-code-review/references/checklist-code.md', 'qg:AI-18', 'выбор коллекции и поиск по колонкам - пункт чеклиста кода'],
   ['skills/bsl-architecture-review/references/ai-antipatterns-arch.md', 'около миллиона сравнений', 'у ARCH-AI-08 цена ошибки названа числом, а не прилагательным'],
   ['skills/bsl-architecture-review/references/ai-antipatterns-arch.md', 'заголовки HTTP-запроса', 'у ARCH-AI-08 названа законная форма соответствия'],
@@ -2692,7 +2692,7 @@ const mustContain = [
   ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'qg:BSL-REF-DOT-ACCESS', 'разыменование ссылки механизировано и разобрано'],
   ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'нижняя граница', 'у правила о точке заявлено частичное покрытие'],
   ['skills/bsl-code-review/references/bsl-anti-patterns.md', 'Отбор.Ссылка.Значение', 'элемент отбора назван контр-сигналом'],
-  ['skills/bsl-code-review/references/ai-antipatterns.md', 'Механизированная часть', 'AI-02 указывает на механизированную половину'],
+  ['skills/bsl-code-review/references/catalog/AI-02.md', 'Механизированная часть', 'AI-02 указывает на механизированную половину'],
   ['skills/bsl-code-review/SKILL.md', 'нижнюю границу, а не верхнюю', 'контур предупреждает, что инструмент покрывает часть скоупа'],
   ['skills/bsl-code-review/references/checklist-code.md', 'BSL-REF-DOT-ACCESS', 'чтение реквизита через точку — пункт чеклиста'],
   // Доказательство из кода, а не из списка имён: словарь ссылочных имён был отвергнут
@@ -3252,14 +3252,15 @@ section('Реестр признаков — полнота: источники 
   const archOrphans = archInRegistry.filter((id) => !archInMap.includes(id));
   check('в реестре нет ARCH-признаков, которых нет в signs-map.json', archOrphans.length === 0, archOrphans.join(', '));
 
-  // Каждый AI-антипаттерн из ai-antipatterns.md есть в реестре — и наоборот.
-  const aiDoc = readFileSync(join(ROOT, 'skills', 'bsl-code-review', 'references', 'ai-antipatterns.md'), 'utf8');
-  const aiInDoc = [...aiDoc.matchAll(/^### (AI-\d{2})\b/gmu)].map((m) => `qg:${m[1]}`);
-  check('AI-антипаттерны в документе есть', aiInDoc.length >= 16, `найдено ${aiInDoc.length}`);
-  const aiMissing = aiInDoc.filter((id) => !registry[id]);
-  check('все AI-антипаттерны в реестре', aiMissing.length === 0, aiMissing.join(', '));
-  const aiOrphans = Object.keys(registry).filter((id) => id.startsWith('qg:AI-')).filter((id) => !aiInDoc.includes(id));
-  check('в реестре нет AI-признаков, которых нет в документе', aiOrphans.length === 0, aiOrphans.join(', '));
+  // Каждая AI-карточка каталога есть в реестре — и наоборот.
+  const gen = await import(pathToFileURL(join(ROOT, 'tools', 'gen-catalog-index.mjs')).href);
+  const cardIds = gen.readCatalog().map((c) => c.id);
+  const aiInCatalog = cardIds.filter((id) => id.startsWith('qg:AI-'));
+  check('AI-карточки в каталоге есть', aiInCatalog.length >= 22, `найдено ${aiInCatalog.length}`);
+  const aiMissing = aiInCatalog.filter((id) => !registry[id]);
+  check('все AI-карточки в реестре', aiMissing.length === 0, aiMissing.join(', '));
+  const aiOrphans = Object.keys(registry).filter((id) => id.startsWith('qg:AI-')).filter((id) => !aiInCatalog.includes(id));
+  check('в реестре нет AI-признаков без карточки', aiOrphans.length === 0, aiOrphans.join(', '));
 
   // Перечень инструментальных проверок в README — та же истина, что TOOL_BACKED, только прозой.
   // Разъезд тихий: список читают, чтобы понять, где нужна отметка в журнале, и пропущенное имя
