@@ -31,11 +31,14 @@ const WORK = join(tmpdir(), 'qg-tests');
 const VERBOSE = process.argv.includes('--verbose');
 
 // Контур кода запущен — валидатор требует заявить проходы по каталогу антипаттернов
-// (ai-antipatterns, platform-antipatterns), иначе предупреждает. Инструментов у них нет,
-// поэтому в тестах, которые собирают след вручную, оба прохода заявляются пропуском.
+// (ai-antipatterns, platform-antipatterns), иначе предупреждает. У обоих скоупов теперь есть
+// инструмент (tools/catalog.mjs) — заявить их пропуск причиной `not_applicable` в этих тестах
+// значило бы утверждать «читатель посмотрел и решил не применять», а тесты, собирающие след
+// вручную, читателя не запускали. Причина `reader_unavailable` отметки в журнале не требует
+// (как `analyzer_unavailable`): читатель просто не вызывался.
 const CATALOG_DECLARED =
-  '[qg skipped: layer=code, scope=ai-antipatterns, reason=not_applicable]\n' +
-  '[qg skipped: layer=code, scope=platform-antipatterns, reason=not_applicable]\n';
+  '[qg skipped: layer=code, scope=ai-antipatterns, reason=reader_unavailable]\n' +
+  '[qg skipped: layer=code, scope=platform-antipatterns, reason=reader_unavailable]\n';
 
 let passed = 0;
 const failures = [];
@@ -2805,6 +2808,47 @@ section('Каталог антипаттернов — формат карточ
   const rowsBytes = Buffer.byteLength(md) - headBytes;
   const projected = headBytes + (rowsBytes / Math.max(cards.length, 1)) * 46;
   check('индекс укладывается в 12 КБ на 46 карточек', projected <= 12 * 1024, String(Math.round(projected)));
+}
+
+// ---------------------------------------------------------------------------
+section('Аттестация результата читателя каталога');
+
+{
+  const cat = await import(pathToFileURL(join(ROOT, 'tools', 'catalog.mjs')).href);
+  const gen = await import(pathToFileURL(join(ROOT, 'tools', 'gen-catalog-index.mjs')).href);
+  const root = join(WORK, 'attest-root');
+  mkdirSync(join(root, 'src'), { recursive: true });
+  writeFileSync(join(root, '.1c-quality-gate.json'), '{}', 'utf8');
+  const bsl = join(root, 'src', 'Module.bsl');
+  writeFileSync(bsl, 'Функция ПодобратьЦены(ТаблицаТоваров)\n\tВозврат ТаблицаТоваров.Количество();\nКонецФункции\n', 'utf8');
+
+  const expectedExamined = gen.readCatalog().filter((c) => !c.tool && c.archetypes.includes('always')).map((c) => c.id);
+  const good = {
+    examined: expectedExamined,
+    files: ['src/Module.bsl'],
+    findings: [{ id: 'qg:AI-07', file: 'src/Module.bsl', line: 1, method: 'ПодобратьЦены', quote: 'Функция ПодобратьЦены(ТаблицаТоваров)', note: 'только читает' }],
+    unreadable: [],
+  };
+  const ok = cat.attest({ result: good, files: ['src/Module.bsl'], archetypes: [], root });
+  check('корректный результат аттестуется', ok.ok === true, ok.problems.join('; '));
+  check('печатается запись ai-antipatterns с violation', ok.evidence.some((l) => /scope=ai-antipatterns.*verdict=violation:qg:AI-07/.test(l)), ok.evidence.join('\n'));
+  check('печатается запись platform-antipatterns', ok.evidence.some((l) => /scope=platform-antipatterns/.test(l)), ok.evidence.join('\n'));
+
+  const fake = { ...good, findings: [{ ...good.findings[0], quote: 'Такой строки в файле нет' }] };
+  const bad = cat.attest({ result: fake, files: ['src/Module.bsl'], archetypes: [], root });
+  check('цитата, которой нет в файле, отвергается', bad.ok === false && bad.problems.some((p) => /цитат/i.test(p)), bad.problems.join('; '));
+
+  const partial = { ...good, examined: expectedExamined.slice(1) };
+  const bad2 = cat.attest({ result: partial, files: ['src/Module.bsl'], archetypes: [], root });
+  check('неполный список проверенных признаков отвергается', bad2.ok === false && bad2.problems.some((p) => /examined/.test(p)), bad2.problems.join('; '));
+
+  const unknown = { ...good, findings: [{ ...good.findings[0], id: 'qg:AI-99' }] };
+  const bad3 = cat.attest({ result: unknown, files: ['src/Module.bsl'], archetypes: [], root });
+  check('вымышленный идентификатор отвергается', bad3.ok === false, bad3.problems.join('; '));
+
+  const journal = await import(pathToFileURL(join(ROOT, 'tools', 'run-journal.mjs')).href);
+  const runs = journal.readJournal(root).filter((r) => r.tool === 'tools/catalog.mjs');
+  check('успешная аттестация оставила записи в журнале для обоих скоупов', new Set(runs.map((r) => r.scope)).size === 2, JSON.stringify(runs));
 }
 
 // Регрессия, которая в репозитории уже была: справочник языка подавал РАЗРЕШЕННЫЕ как выбор

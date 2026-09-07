@@ -127,9 +127,10 @@
 
 **Проходы по каталогу антипаттернов заявляются всегда, когда запущен контур кода.** Записи
 `scope=ai-antipatterns` и `scope=platform-antipatterns` печатает режим `attest` инструмента
-`catalog.mjs` (часть C текущего плана, пока не реализована) по результату субагента-читателя;
-без них валидатор предупреждает, а следующим релизом откажет. Причина: проходы делает модель,
-и без записи их пропуск неотличим от выполнения.
+`catalog.mjs` по результату субагента-читателя: он сверяет `examined`, `files` и каждую находку
+с каталогом и с содержимым файлов и только тогда пишет журнал и печатает строку следа. Без
+записи об этих проходах валидатор предупреждает, а следующим релизом откажет. Причина: проходы
+делает модель, и без записи их пропуск неотличим от выполнения.
 
 Чего сверка не делает: она не защищает от записи, дописанной в журнал вручную. В отличие от
 поля `config`, где истина заново выводится с диска, независимого источника здесь нет. Это
@@ -145,8 +146,10 @@
 Обязательные поля: `layer`, `reason`.
 
 Типовые причины: `volume_below_threshold`, `not_applicable`, `no_queries_found`,
-`no_metadata_resolved`, `contour_not_installed`, `analyzer_unavailable`, `rlm_unavailable`,
-`platform_unavailable`, `stale_or_unavailable_index`, `verified_earlier`.
+`no_metadata_resolved`, `contour_not_installed`, `analyzer_unavailable`, `reader_unavailable`,
+`rlm_unavailable`, `platform_unavailable`, `stale_or_unavailable_index`, `verified_earlier`.
+
+`reader_unavailable` — читатель каталога недоступен, проход не делался.
 
 `no_queries_found` и `not_applicable` — разные утверждения: первое значит «инструмент файлы
 ЧИТАЛ и запросов не нашёл», второе — «правило к файлам этого вида не относится». Файл, чьи

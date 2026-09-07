@@ -186,17 +186,17 @@ export const SCOPES = {
   // Проходы по каталогу антипаттернов. До этой записи два самых объёмных справочника
   // контура читались «всегда», но след не оставляли: в 25 живых отчётах ни одной находки
   // и ни одной записи — отличить «код чист» от «проход не делался» было нечем.
-  // `tool: null` временно: аттестацию результата читателя вводит tools/catalog.mjs.
+  // Строку печатает `catalog.mjs attest` после сверки результата читателя с каталогом и файлами.
   'ai-antipatterns': {
     layer: 'code',
-    tool: null,
+    tool: 'tools/catalog.mjs',
     about: 'антипаттерны кода, порождаемого моделью (карточки qg:AI-*)',
     granularity: 'files',
     applies: ['.bsl', '.os'],
   },
   'platform-antipatterns': {
     layer: 'code',
-    tool: null,
+    tool: 'tools/catalog.mjs',
     about: 'антипаттерны производительности и механики платформы без инструмента (карточки qg:BSL-* с tool: null)',
     granularity: 'files',
     applies: ['.bsl', '.os'],
