@@ -190,8 +190,10 @@
 
 Замер по той же методике, что и в разделе 1: сумма байт файлов, которые новая раскладка
 предписывает прочитать до первой строки кода, по составу репозитория на момент выпуска.
-Единственное изменение метода — сами файлы: два «прогоняется всегда» справочника заменены
-генерируемым `references/catalog/INDEX.md`.
+Строка `C2` обязана считаться той же формулой, что и базовое значение 363 КБ:
+`C1 + архетип query + весь контур архитектуры (SKILL.md и все его справочники)` — контур
+`arch` в этой версии на карточки не переносился, справочники читаются целиком, и подсчёт,
+исключающий часть из них, сравнивал бы разные вещи под одной строкой таблицы.
 
 Воспроизводимо одной командой:
 
@@ -202,12 +204,14 @@ const B = (...p) => fs.statSync(p.join('/')).size;
 const base = B('skills/quality-gate/SKILL.md') + B('skills/quality-gate/references/evidence-format.md') + B('skills/file-hygiene/SKILL.md') + B('shared/routing-contract.md');
 const code = base + B('skills/bsl-code-review/SKILL.md') + B('skills/bsl-code-review/references/catalog/INDEX.md');
 const query = code + B('skills/bsl-code-review/references/bsl-query-optimization.md') + B('skills/bsl-code-review/references/bsl-query-reference.md');
-const arch = code + B('skills/bsl-architecture-review/SKILL.md') + B('skills/bsl-architecture-review/references/signs-map.json');
+const archFiles = B('skills/bsl-architecture-review/SKILL.md') + B('skills/bsl-architecture-review/references/signs-map.json') + B('skills/bsl-architecture-review/references/checklist-architecture.md') + B('skills/bsl-architecture-review/references/ai-antipatterns-arch.md') + B('skills/bsl-architecture-review/references/patterns-in-1c.md');
+const c2 = query + archFiles;
 const fmt = n => (n/1024).toFixed(1) + ' KB';
 console.log('C0 (оркестратор+evidence-format+hygiene+routing-contract):', base, fmt(base));
 console.log('C1 code L1 (+code SKILL.md+catalog/INDEX.md):', code, fmt(code));
 console.log('C1 + query archetype (+bsl-query-optimization.md+bsl-query-reference.md):', query, fmt(query));
-console.log('C2 + architecture (code + arch SKILL.md+signs-map.json):', arch, fmt(arch));
+console.log('arch (SKILL.md+signs-map.json+checklist-architecture.md+ai-antipatterns-arch.md+patterns-in-1c.md):', archFiles, fmt(archFiles));
+console.log('C2 = C1+query+arch:', c2, fmt(c2));
 "
 ```
 
@@ -217,20 +221,33 @@ console.log('C2 + architecture (code + arch SKILL.md+signs-map.json):', arch, fm
 C0 (оркестратор+evidence-format+hygiene+routing-contract): 63396 61.9 KB
 C1 code L1 (+code SKILL.md+catalog/INDEX.md): 97525 95.2 KB
 C1 + query archetype (+bsl-query-optimization.md+bsl-query-reference.md): 138312 135.1 KB
-C2 + architecture (code + arch SKILL.md+signs-map.json): 126859 123.9 KB
+arch (SKILL.md+signs-map.json+checklist-architecture.md+ai-antipatterns-arch.md+patterns-in-1c.md): 76077 74.3 KB
+C2 = C1+query+arch: 214389 209.4 KB
 ```
 
 | Класс | До (раздел 1) | После | Порог (задание) | Пройден |
 |---|---|---|---|---|
 | `C0` | 73 КБ | 61.9 КБ | — | — |
-| `C1`, контур кода L1 | 249 КБ | 95.2 КБ | ≤ 110 КБ | да, запас 15 КБ |
+| `C1`, контур кода L1 | 249 КБ | 95.2 КБ | ≤ 110 КБ | да |
 | `C1` + архетип `query` | 289 КБ | 135.1 КБ | — | — |
-| `C2` + архитектура | 363 КБ | 123.9 КБ | ≤ 190 КБ | да, запас 66 КБ |
+| `C2` + архитектура | 363 КБ | 209.4 КБ | ≤ 190 КБ | нет |
 
-Оба обязательных порога задания выполнены с запасом. `C0` в «после» не включает
-`checklist-code.md` и стандарты под архетип: они архетип-зависимы (печатает `gate.mjs plan`
-по составу правки, п. 3 Слоя 1б `bsl-code-review/SKILL.md`) и не входят в «всегда» — это и
-есть перенесённая в план маршрутизация из раздела 4, а не пропуск при подсчёте.
+`C0`/`C1` в «после» не включают `checklist-code.md` и стандарты под архетип: они архетип-
+зависимы (печатает `gate.mjs plan` по составу правки, п. 3 Слоя 1б `bsl-code-review/SKILL.md`)
+и не входят в «всегда» — это и есть перенесённая в план маршрутизация из раздела 4, а не
+пропуск при подсчёте.
+
+**Порог `C2` не достигнут.** Контур кода перенесён на модель «триггер в индексе, разбор — по
+попаданию» (раздел 4, ярусы 2-3); контур архитектуры — нет. Все пять файлов контура
+архитектуры (SKILL.md, `signs-map.json`, `checklist-architecture.md`,
+`ai-antipatterns-arch.md`, `patterns-in-1c.md` — 76 КБ) по-прежнему читаются целиком при
+любом прогоне `arch`, и план (`gate.mjs plan`) их состав не сокращает — задание этой версии
+прямо исключало перенос контура архитектуры на карточки (раздел 7, самопроверка плана:
+«Что план не делает»). Разница между исходными 363 КБ и нынешними 209.4 КБ — эффект переноса
+только `C1`/query (249+40 → 95+40 КБ), а не сокращение архитектурной части. Контур `arch` —
+следующий кандидат на ту же перестройку: у него уже есть `signs-map.json` как источник
+истины и генерируемый `signs-map.md`, то есть половина инфраструктуры (ярус 2) готова, не
+хватает разделения триггер/разбор и изолированного читателя (ярус 3), как у `catalog/`.
 
 **Бюджеты навыков.** Оркестратор снижен с 29 КБ до 14 282 байт (13.9 КБ) — раздел 4 называл
 целью 12 КБ; фактический результат чуть выше, но содержит план-цикл и все девять инвариантов
@@ -238,9 +255,11 @@ C2 + architecture (code + arch SKILL.md+signs-map.json): 126859 123.9 KB
 14 КБ, задание Task 15 — 16 КБ. Обе цели признаны недостижимыми без потери Слоя 2/3 и
 раздела «Выход», которые задание Task 15 прямо просило не трогать — решение зафиксировано в
 комментарии `BUDGET` (`tests/run-tests.mjs`, секция «Бюджет навыков и достижимость
-справочников»). Даже с этим остатком горячий путь `C1` сократился на 62% (249 → 95 КБ), а
-`C2` — на 66% (363 → 124 КБ): выигрыш пришёл не от навыков, а от переноса двух «всегда»-
-справочников (131 КБ) в изолированный, не всегда читаемый каталог.
+справочников»). Даже с этим остатком горячий путь `C1` сократился на 62% (249 → 95 КБ):
+выигрыш пришёл не от навыков, а от переноса двух «всегда»-справочников (131 КБ) в
+изолированный, не всегда читаемый каталог. `C2` сократился заметно меньше — на 42%
+(363 → 209 КБ) — той же причиной: перестройке подвергся только контур кода внутри `C2`,
+контур архитектуры (76 КБ) остался нетронутым и держит порог невыполненным.
 
 **Полнота читателя каталога.** `node tests/recall.mjs` по всем 35 карточкам без инструмента
 (69 запросов: `defect.bsl`/`clean.bsl` пар, минус пропущенный по построению `AI-11` —
