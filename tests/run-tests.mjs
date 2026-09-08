@@ -6155,6 +6155,20 @@ section('Профиль изменения считает инструмент')
     const neitherErr = tryProfile([{ markers: ['x'] }]);
     check('(k) archetypes.custom: запись без name и без extends отклонена', Boolean(neitherErr), String(neitherErr && neitherErr.message));
 
+    // Fix round 1 (ревью координатора). `form-module` — единственный встроенный архетип с
+    // УСЛОВНЫМ minArch (порог по числу изменённых строк, `{ metric: 'loc', threshold: 400,
+    // level: 1 }`, а не голое число) — extends не может поднять условный минимум числом:
+    // сравнивать «выше/ниже» не с чем, пока не известен объём правки. Попытка задать minArch
+    // на такой архетип отклоняется целиком, а без minArch (только markers) расширение работает
+    // как обычно — это и задокументировано в docs/CONFIG.md отдельной оговоркой.
+    const formArchErr = tryProfile([{ extends: 'form-module', minArch: 2 }]);
+    check('extends: minArch на архетип с условным минимумом (form-module) отклонён',
+      Boolean(formArchErr) && /условн/.test(formArchErr.message), String(formArchErr && formArchErr.message));
+
+    const formArchOk = tryProfile([{ extends: 'form-module', markers: ['ОсобаяФорма'] }]);
+    check('extends: form-module без minArch (только markers) не отклонён',
+      formArchOk === null, String(formArchOk && formArchOk.message));
+
     // (l) регрессия: старая форма (`name`) и новая (`extends`) работают вместе в одном списке
     // `archetypes.custom` — оба маркера обязаны сработать одновременно на одной правке,
     // иначе проверка не отличила бы «обе формы разобраны» от «разобрана только одна».
