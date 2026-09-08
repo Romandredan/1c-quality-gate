@@ -86,44 +86,83 @@ function diffRemovedLinesOf(fileRel, root) {
   return { ok: true, removed: parseRemovedLines(diff.stdout || '') };
 }
 
-/** Строки удалённого пути к файлу без ведущего `./`, слэши приведены к прямым. */
-function posixPath(f) {
-  return String(f).split(sep).join('/').replace(/^\.\//, '');
+/**
+ * `git diff HEAD -- <файлы>` по составу прогона — единственное законное основание для
+ * needs:[diff]-признаков (ревью round 1, task-22). Подстрочная сверка переданного `--diff` с
+ * текстом, который «упоминает имя файла», пропускала обычный текст с этим именем, дифф без
+ * единого hunk и дифф ЧУЖОГО файла с именем целевого, дописанным в комментарий — все три
+ * фикстуры ревью прошли `ok: true`. Доверия переданному файлу больше нет: истина всегда
+ * пересчитывается здесь, а `--diff` (если передан) с ней только сверяется.
+ */
+function gitDiffForFiles(files, root) {
+  // Pathspec с магией `:(icase,literal)`, а не голый путь: `--files` приходит из состояния
+  // гейта уже в нижнем регистре (`run-journal.mjs normalizePath`), а у git сопоставление
+  // пути в `--` — точное, не регистронезависимое, даже на файловой системе без учёта
+  // регистра (замерено отдельно: голый нижнерегистрный путь молча даёт пустой diff, что
+  // неотличимо от «сравнивать нечем» — ложный отказ дороже пропуска). `literal` — чтобы
+  // спецсимволы пути не читались как glob.
+  const rel = files.map((f) => `:(icase,literal)${relative(resolve(root), resolve(root, f)).split(sep).join('/')}`);
+  const res = spawnSync('git', ['diff', 'HEAD', '--', ...rel], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  if (res.error) return { ok: false, reason: 'git недоступен' };
+  if (res.status !== 0) return { ok: false, reason: `git diff завершился с кодом ${res.status}` };
+  return { ok: true, text: res.stdout || '' };
 }
 
 /**
- * Файл `--diff`: настоящее сравнение версий, а не пустышка или диф от других файлов.
- *
- * Диф не строит сам attest — он приходит от оркестратора (`git diff HEAD -- <файлы>`,
- * сохранённый ДО делегирования читателю: у него нет оболочки). Здесь только проверка, что
- * переданный файл годится: непустой и упоминает каждый файл из `--files` — без этого пустой
- * или чужой файл, подставленный за `--diff`, проходил бы точно так же, как настоящий, и
- * признак `needs: [diff]` снова заявлялся бы без сравнения версий за ним.
+ * Заголовки `diff --git a/... b/...` и `@@ -a,b +c,d @@` — то, по чему сверяется переданный
+ * `--diff` с настоящим git diff. Не текст целиком: контекстные строки хвоста hunk-заголовка
+ * (`@@ ... @@ ИмяМетода`) не сравниваем, только числа диапазонов — они не зависят от того,
+ * как movable-функция называет свою границу. Набор, а не последовательность: порядок файлов в
+ * `--files` и в переданном дифе может расходиться, а согласие по составу — не может.
  */
-function loadDiff(diffFile, files, root, problems) {
-  if (!diffFile) return null;
+function diffHeaderSet(text) {
+  const headers = new Set();
+  for (const raw of String(text).split(/\r?\n/)) {
+    if (raw.startsWith('diff --git ')) { headers.add(raw.trim()); continue; }
+    const hunk = raw.match(/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/);
+    if (hunk) headers.add(hunk[0]);
+  }
+  return headers;
+}
+
+function setsEqual(a, b) {
+  if (a.size !== b.size) return false;
+  for (const x of a) if (!b.has(x)) return false;
+  return true;
+}
+
+/**
+ * Сверяет переданный `--diff` с настоящим `git diff` по тем же файлам. `--diff` остаётся
+ * входом для читателя (у него нет оболочки, чтобы построить его самому), но перестаёт быть
+ * основанием для attest: расхождение с git — проблема вызова, а не тихий пропуск, чтобы
+ * подсунуть чужой файл не получалось даже случайно.
+ */
+function verifyDiffFile(diffFile, root, gitDiff, problems) {
   let text;
   try {
     text = readFileSync(resolve(root, diffFile), 'utf8');
   } catch {
     problems.push(`--diff указывает на файл, который не читается: ${diffFile}`);
-    return null;
+    return;
   }
   if (!text.trim()) {
     problems.push(`--diff файл пуст: сравнения версий в нём нет (${diffFile})`);
-    return null;
+    return;
   }
-  // Регистр без строгости: `--files` приходит из состояния гейта уже в нижнем регистре
-  // (`run-journal.mjs normalizePath`), а заголовки диффа несут регистр рабочего дерева —
-  // `Module.bsl` против `module.bsl` для одного и того же файла на Windows. Строгое
-  // сравнение отвергало бы настоящий diff как «не упоминает файл», а это дороже пропуска.
-  const textLower = text.toLowerCase();
-  const missing = files.filter((f) => !textLower.includes(posixPath(f).toLowerCase()));
-  if (missing.length) {
-    problems.push(`--diff не упоминает файлы состава прогона: ${missing.join(', ')} (${diffFile})`);
-    return null;
+  if (!gitDiff.ok) {
+    problems.push(`--diff нельзя сверить с git: ${gitDiff.reason}`);
+    return;
   }
-  return text;
+  const given = diffHeaderSet(text);
+  const real = diffHeaderSet(gitDiff.text);
+  if (!setsEqual(given, real)) {
+    const missing = [...real].filter((h) => !given.has(h));
+    const extra = [...given].filter((h) => !real.has(h));
+    const parts = [];
+    if (missing.length) parts.push(`в файле нет заголовков git diff: ${missing.join(' | ')}`);
+    if (extra.length) parts.push(`в файле лишние заголовки: ${extra.join(' | ')}`);
+    problems.push(`--diff расходится с git diff HEAD -- по файлам прогона (${diffFile}): ${parts.join('; ')}`);
+  }
 }
 
 export function attest({ result, files, archetypes = [], root = projectRoot(), diffFile = null, noDiffAvailable = false }) {
@@ -131,7 +170,7 @@ export function attest({ result, files, archetypes = [], root = projectRoot(), d
   const cards = readCatalog();
   const expectedAll = expectedExamined(archetypes, cards);
   // Признаки, которым для проверки нужно сравнение версий (сегодня — только qg:AI-11): без
-  // переданного `--diff` их нечем проверить, и заявлять проход по ним — тот самый разрыв
+  // настоящего git diff их нечем проверить, и заявлять проход по ним — тот самый разрыв
   // между «числится examined» и «действительно проверено» (task-22).
   const needsDiff = activeCards(cards, archetypes)
     .filter((c) => !c.tool && (c.needs || []).includes('diff'))
@@ -140,12 +179,21 @@ export function attest({ result, files, archetypes = [], root = projectRoot(), d
   const examined = Array.isArray(result?.examined) ? [...new Set(result.examined)].sort() : [];
 
   if (diffFile && noDiffAvailable) problems.push('--diff и --no-diff-available нельзя передавать одновременно');
-  const diffText = loadDiff(diffFile, files, root, problems);
-  const diffAvailable = diffText !== null;
+
+  // Основание — то, что вернул git по файлам прогона, а не заявление о переданном файле.
+  // Считаем только когда есть кому его предъявлять: needs:[diff]-признак активен либо --diff
+  // всё равно передан и его есть с чем сверить.
+  const gitDiff = needsDiff.length || diffFile ? gitDiffForFiles(files, root) : { ok: true, text: '' };
+  const diffAvailable = gitDiff.ok && gitDiff.text.trim() !== '';
+
+  if (diffFile) verifyDiffFile(diffFile, root, gitDiff, problems);
 
   if (!diffAvailable) {
     for (const id of examined.filter((x) => needsDiff.includes(x))) {
-      problems.push(`признак ${id} требует сравнения версий, но --diff не передан`);
+      const reason = gitDiff.ok ? 'git diff HEAD -- по файлам прогона пуст' : `git недоступен (${gitDiff.reason})`;
+      problems.push(
+        `признак ${id} требует сравнения версий, но ${reason} — используй attest --no-diff-available, если сравнивать действительно нечем`
+      );
     }
   }
 

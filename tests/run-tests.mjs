@@ -3097,14 +3097,15 @@ section('Аттестация каталога — находки basis: diff (�
 }
 
 // ---------------------------------------------------------------------------
-section('Аттестация каталога — needs:[diff] не заявляется без --diff (task-22)');
+section('Аттестация каталога — needs:[diff] опирается на настоящий git diff (ревью round 1, task-22)');
 
 {
-  // Дефект найден A/B-прогоном на живой правке: read отчитывался о признаке qg:AI-11 в
-  // examined, а сравнения версий за этим не стояло — «проверил» и «не проверял» стали
-  // неотличимы. attest теперь отказывает needs:[diff]-признаку в examined без настоящего
-  // --diff и печатает честный `skipped` через --no-diff-available, когда сравнивать
-  // действительно нечем (новый файл без истории).
+  // Ревью round 1 (task-22): подстрочная сверка `--diff` с текстом, «упоминающим имя файла»,
+  // пропускала обычный текст, дифф без единого hunk и дифф ЧУЖОГО файла с именем целевого,
+  // дописанным в комментарий — все три фикстуры ревьюера прошли `ok: true` через прежний
+  // `loadDiff()`. attest больше не верит переданному файлу: основание — только то, что вернул
+  // `git diff HEAD --` по файлам прогона; `--diff` (если передан) лишь сверяется с этим
+  // результатом по набору заголовков `diff --git` и `@@`.
   const cat = await import(pathToFileURL(join(ROOT, 'tools', 'catalog.mjs')).href);
   const gen = await import(pathToFileURL(join(ROOT, 'tools', 'gen-catalog-index.mjs')).href);
   const journal = await import(pathToFileURL(join(ROOT, 'tools', 'run-journal.mjs')).href);
@@ -3113,53 +3114,102 @@ section('Аттестация каталога — needs:[diff] не заявл�
   const withDiff = alwaysNoTool.map((c) => c.id);
   const withoutDiff = alwaysNoTool.filter((c) => !(c.needs || []).includes('diff')).map((c) => c.id);
 
-  const root = join(WORK, 'attest-needs-diff-root');
-  rmSync(root, { recursive: true, force: true });
-  mkdirSync(join(root, 'src'), { recursive: true });
-  writeFileSync(join(root, '.1c-quality-gate.json'), '{}', 'utf8');
-  const file = 'src/Module.bsl';
-  writeFileSync(join(root, file), 'Функция Тест()\n\tВозврат 1;\nКонецФункции\n', 'utf8');
-
-  // Без --diff examined с qg:AI-11 отвергается, и журнал не пишется.
-  const claiming = { examined: withDiff, files: [file], findings: [], unreadable: [] };
-  const noDiffFlag = cat.attest({ result: claiming, files: [file], archetypes: [] , root });
-  check('needs:[diff]-признак в examined без --diff отвергается',
-    noDiffFlag.ok === false && noDiffFlag.problems.some((p) => /qg:AI-11.*--diff не передан/.test(p)), noDiffFlag.problems.join('; '));
-  const journalBefore = journal.readJournal(root).length;
+  // (A) Нет git вовсе — needs:[diff]-признак в examined отвергается, журнал не пишется.
+  const noGitRoot = join(WORK, 'attest-needs-diff-no-git');
+  rmSync(noGitRoot, { recursive: true, force: true });
+  mkdirSync(join(noGitRoot, 'src'), { recursive: true });
+  writeFileSync(join(noGitRoot, '.1c-quality-gate.json'), '{}', 'utf8');
+  const noGitFile = 'src/Module.bsl';
+  writeFileSync(join(noGitRoot, noGitFile), 'Функция Тест()\n\tВозврат 1;\nКонецФункции\n', 'utf8');
+  const claimingNoGit = { examined: withDiff, files: [noGitFile], findings: [], unreadable: [] };
+  const noGit = cat.attest({ result: claimingNoGit, files: [noGitFile], archetypes: [], root: noGitRoot });
+  check('без git needs:[diff]-признак в examined отвергается',
+    noGit.ok === false && noGit.problems.some((p) => /qg:AI-11.*--no-diff-available/.test(p)), noGit.problems.join('; '));
+  const journalBefore = journal.readJournal(noGitRoot).length;
   check('отклонённый результат журнала не пишет', journalBefore === 0, String(journalBefore));
 
-  // С валидным --diff тот же результат (examined c AI-11) принимается.
-  const diffFile = join(WORK, 'attest-needs-diff.diff');
-  writeFileSync(diffFile, `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n`, 'utf8');
-  const withDiffFlag = cat.attest({ result: claiming, files: [file], archetypes: [], root, diffFile });
-  check('тот же результат со --diff принимается', withDiffFlag.ok === true, withDiffFlag.problems.join('; '));
+  // Репозиторий с настоящей незакоммиченной правкой файла — основа для положительных проверок.
+  const gitRoot = join(WORK, 'attest-needs-diff-git');
+  rmSync(gitRoot, { recursive: true, force: true });
+  mkdirSync(join(gitRoot, 'src'), { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: gitRoot });
+  writeFileSync(join(gitRoot, '.1c-quality-gate.json'), '{}', 'utf8');
+  const file = 'src/Module.bsl';
+  writeFileSync(join(gitRoot, file), 'Функция Тест()\n\tВозврат 1;\nКонецФункции\n', 'utf8');
+  execFileSync('git', ['add', file], { cwd: gitRoot });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'база'], { cwd: gitRoot });
+  writeFileSync(join(gitRoot, file), 'Функция Тест()\n\tВозврат 2;\nКонецФункции\n', 'utf8');
 
-  // --diff, не упоминающий изменённый файл, — не тихий пропуск, а отдельная проблема.
-  const foreignDiffFile = join(WORK, 'attest-foreign.diff');
-  writeFileSync(foreignDiffFile, 'diff --git a/src/ДругойМодуль.bsl b/src/ДругойМодуль.bsl\n', 'utf8');
-  const foreignDiff = cat.attest({ result: claiming, files: [file], archetypes: [], root, diffFile: foreignDiffFile });
-  check('--diff без упоминания файла прогона отвергается',
-    foreignDiff.ok === false && foreignDiff.problems.some((p) => /--diff не упоминает/.test(p)), foreignDiff.problems.join('; '));
+  const claiming = { examined: withDiff, files: [file], findings: [], unreadable: [] };
 
-  // Регистр не должен ронять настоящий diff: `--files` из состояния гейта приходит в нижнем
-  // регистре (`run-journal.mjs normalizePath`), а заголовки git diff несут регистр рабочего
-  // дерева — на Windows это разные строки одного и того же пути.
-  const mixedCaseFile = 'src/module.bsl'; // то, что придёт из состояния гейта (в нижнем регистре)
-  const mixedCaseDiffFile = join(WORK, 'attest-mixed-case.diff');
-  writeFileSync(mixedCaseDiffFile, `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n`, 'utf8'); // регистр рабочего дерева: Module.bsl
-  const mixedCaseClaiming = { examined: withDiff, files: [mixedCaseFile], findings: [], unreadable: [] };
-  const mixedCase = cat.attest({ result: mixedCaseClaiming, files: [mixedCaseFile], archetypes: [], root, diffFile: mixedCaseDiffFile });
-  check('--diff с иным регистром пути принимается', mixedCase.ok === true, mixedCase.problems.join('; '));
+  // (B) Настоящий git diff — единственное основание; --diff не передан и не нужен.
+  const withGit = cat.attest({ result: claiming, files: [file], archetypes: [], root: gitRoot });
+  check('needs:[diff]-признак в examined принимается по одному git diff, без --diff', withGit.ok === true, withGit.problems.join('; '));
 
-  // Легитимно нечем сравнивать (новый файл без истории): examined без needs:[diff], а
-  // --no-diff-available печатает честную запись и журналирует её.
-  const honest = { examined: withoutDiff, files: [file], findings: [], unreadable: [] };
-  const noneAvailable = cat.attest({ result: honest, files: [file], archetypes: [], root, noDiffAvailable: true });
+  const realDiffText = execFileSync('git', ['diff', 'HEAD', '--', file], { cwd: gitRoot, encoding: 'utf8' });
+  const realDiffFile = join(WORK, 'attest-needs-diff-real.diff');
+  writeFileSync(realDiffFile, realDiffText, 'utf8');
+
+  // (C) --diff, совпадающий с git diff по заголовкам, — принимается.
+  const withMatchingDiff = cat.attest({ result: claiming, files: [file], archetypes: [], root: gitRoot, diffFile: realDiffFile });
+  check('--diff, совпадающий с git diff, принимается', withMatchingDiff.ok === true, withMatchingDiff.problems.join('; '));
+
+  // (D1) Регрессия ревью round 1: обычный текст, упоминающий имя файла подстрокой.
+  const plainTextDiff = join(WORK, 'attest-needs-diff-plain.diff');
+  writeFileSync(plainTextDiff, `Правка коснулась ${file}, но это не дифф вовсе.\n`, 'utf8');
+  const plainText = cat.attest({ result: claiming, files: [file], archetypes: [], root: gitRoot, diffFile: plainTextDiff });
+  check('--diff обычным текстом с именем файла отвергается',
+    plainText.ok === false && plainText.problems.some((p) => /расходится с git diff/.test(p)), plainText.problems.join('; '));
+
+  // (D2) Регрессия ревью round 1: заголовок diff --git есть, ни одного hunk-заголовка нет.
+  const noHunkDiff = join(WORK, 'attest-needs-diff-no-hunk.diff');
+  writeFileSync(noHunkDiff, `diff --git a/${file} b/${file}\nindex 0000000..1111111 100644\n--- a/${file}\n+++ b/${file}\n`, 'utf8');
+  const noHunk = cat.attest({ result: claiming, files: [file], archetypes: [], root: gitRoot, diffFile: noHunkDiff });
+  check('--diff без hunk-заголовка отвергается',
+    noHunk.ok === false && noHunk.problems.some((p) => /расходится с git diff/.test(p)), noHunk.problems.join('; '));
+
+  // (D3) Регрессия ревью round 1 — самая опасная фикстура: настоящий дифф ЧУЖОГО файла с
+  // именем целевого, дописанным в комментарий (реальные заголовки diff --git и @@ есть, но
+  // не от того файла).
+  const otherFile = 'src/Другой.bsl';
+  writeFileSync(join(gitRoot, otherFile), 'Функция Другая()\n\tВозврат 1;\nКонецФункции\n', 'utf8');
+  execFileSync('git', ['add', otherFile], { cwd: gitRoot });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'другой файл'], { cwd: gitRoot });
+  writeFileSync(join(gitRoot, otherFile), 'Функция Другая()\n\tВозврат 2;\nКонецФункции\n', 'utf8');
+  const foreignRealDiff = execFileSync('git', ['diff', 'HEAD', '--', otherFile], { cwd: gitRoot, encoding: 'utf8' });
+  const foreignDiffFile = join(WORK, 'attest-needs-diff-foreign.diff');
+  writeFileSync(foreignDiffFile, foreignRealDiff + `\n// см. также ${file}\n`, 'utf8');
+  const foreignReal = cat.attest({ result: claiming, files: [file], archetypes: [], root: gitRoot, diffFile: foreignDiffFile });
+  check('--diff чужого файла с именем целевого в комментарии отвергается',
+    foreignReal.ok === false && foreignReal.problems.some((p) => /расходится с git diff/.test(p)), foreignReal.problems.join('; '));
+
+  // (E) Регистр не должен ронять настоящий diff: `--files` из состояния гейта приходит в
+  // нижнем регистре (`run-journal.mjs normalizePath`), а сопоставление пути у git в `--` —
+  // точное, не регистронезависимое, даже на файловой системе без учёта регистра. Проверяем
+  // тем же git-основанием, без --diff.
+  const lowerCaseFile = 'src/module.bsl';
+  const claimingLower = { examined: withDiff, files: [lowerCaseFile], findings: [], unreadable: [] };
+  const lowerCase = cat.attest({ result: claimingLower, files: [lowerCaseFile], archetypes: [], root: gitRoot });
+  check('needs:[diff]-признак принимается при ином регистре пути в --files', lowerCase.ok === true, lowerCase.problems.join('; '));
+
+  // (F) Файл без версии в HEAD (никогда не коммитился) — git diff HEAD для untracked пуст,
+  // отказ называет --no-diff-available.
+  const untrackedFile = 'src/Новый.bsl';
+  writeFileSync(join(gitRoot, untrackedFile), 'Функция Тест2()\n\tВозврат 1;\nКонецФункции\n', 'utf8');
+  const claimingUntracked = { examined: withDiff, files: [untrackedFile], findings: [], unreadable: [] };
+  const untracked = cat.attest({ result: claimingUntracked, files: [untrackedFile], archetypes: [], root: gitRoot });
+  check('needs:[diff]-признак для файла без версии в HEAD отвергается с подсказкой про --no-diff-available',
+    untracked.ok === false && untracked.problems.some((p) => /qg:AI-11.*--no-diff-available/.test(p)), untracked.problems.join('; '));
+
+  // Легитимно нечем сравнивать: examined без needs:[diff], а --no-diff-available печатает
+  // честную запись и журналирует её.
+  const honest = { examined: withoutDiff, files: [untrackedFile], findings: [], unreadable: [] };
+  const noneAvailable = cat.attest({ result: honest, files: [untrackedFile], archetypes: [], root: gitRoot, noDiffAvailable: true });
   check('--no-diff-available принимает examined без needs:[diff]', noneAvailable.ok === true, noneAvailable.problems.join('; '));
   check('печатается skipped scope=ai-antipatterns-diff reason=no_diff',
     noneAvailable.evidence.some((l) => /scope=ai-antipatterns-diff, planned=\[qg:AI-11\], reason=no_diff/.test(l)),
     noneAvailable.evidence.join('\n'));
-  const noDiffRuns = journal.readJournal(root).filter((r) => r.scope === 'ai-antipatterns-diff');
+  const noDiffRuns = journal.readJournal(gitRoot).filter((r) => r.scope === 'ai-antipatterns-diff');
   check('--no-diff-available журналирует прогон', noDiffRuns.length > 0, JSON.stringify(noDiffRuns));
 
   // Отчёт с этой записью обязан пройти строгий валидатор наравне с обычным `skipped`.
@@ -3170,12 +3220,12 @@ section('Аттестация каталога — needs:[diff] не заявл�
     '## quality evidence\n\n' + scopeLine + sentinelLine + noneAvailable.evidence.join('\n') + '\n' +
       '[qg not_verified: dimension=compilation, reason=no_platform]\n'
   );
-  const reportRun = run('tools/evidence-validator.mjs', [reportFixture, '--gate'], { env: { CLAUDE_PROJECT_DIR: root } });
+  const reportRun = run('tools/evidence-validator.mjs', [reportFixture, '--gate'], { env: { CLAUDE_PROJECT_DIR: gitRoot } });
   check('отчёт со skipped scope=ai-antipatterns-diff проходит evidence-validator --gate',
     reportRun.code === 0, reportRun.out.trim().slice(0, 300));
 
   // --diff и --no-diff-available одновременно — заведомая ошибка вызова, а не молчаливый выбор.
-  const both = cat.attest({ result: claiming, files: [file], archetypes: [], root, diffFile, noDiffAvailable: true });
+  const both = cat.attest({ result: claiming, files: [file], archetypes: [], root: gitRoot, diffFile: realDiffFile, noDiffAvailable: true });
   check('--diff и --no-diff-available вместе отвергаются', both.ok === false, both.problems.join('; '));
 }
 
