@@ -63,6 +63,7 @@
 | `qg:BSL-TXN-INSIDE-TRY` | 🟠 | platform | transaction | чтение | `Попытка` раньше `НачатьТранзакцию()` в одном блоке. |
 | `qg:BSL-UNBOUNDED-STRING-COLUMN` | 🟠 | platform | query | `bsl-lint.mjs` | Колонка ТЗ без `КвалификаторыСтроки` уходит в запрос через `УстановитьПараметр`. |
 | `qg:BSL-VT-FILTER-IN-WHERE` | 🟠 | platform | query | чтение | Условие в `ГДЕ` на результате виртуальной таблицы вместо передачи фильтра в её параметры. |
+| `qg:QRY-ALIAS-RESERVED-WORD` | 🔴 | platform | query | `query-lint.mjs` | Псевдоним — служебное слово языка запросов (`КАК Первые`). |
 | `qg:QRY-ALIAS-SHADOWS-FIELD` | 🔴 | platform | query | `query-lint.mjs` | Псевдоним источника совпадает с именем колонки, видимой в этом же запросе. |
 | `qg:QRY-ALIAS-SHADOWS-NESTED-TABLE` | 🔴 | platform | query | `query-lint.mjs` | Псевдоним источника-ТЧ совпадает с именем самой табличной части при соединённом владельце. |
 | `qg:QRY-TOP-WITHOUT-ORDER` | 🟡 | platform | query | `query-lint.mjs` | `ПЕРВЫЕ N` (N > 1) без `УПОРЯДОЧИТЬ ПО` в тексте запроса. |

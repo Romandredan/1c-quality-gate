@@ -2,12 +2,14 @@
 /**
  * Лексические проверки текстов запросов, встроенных в BSL.
  *
- * Проверок три:
+ * Проверок четыре:
  *   - `qg:QRY-ALIAS-SHADOWS-FIELD` — псевдоним источника, совпадающий с именем колонки
  *     временной таблицы того же пакета;
  *   - `qg:QRY-ALIAS-SHADOWS-NESTED-TABLE` — псевдоним источника-табличной-части, совпадающий
  *     с именем самой табличной части, когда в ветке соединён её владелец;
- *   - `qg:QRY-TOP-WITHOUT-ORDER` — `ПЕРВЫЕ N` без `УПОРЯДОЧИТЬ ПО`.
+ *   - `qg:QRY-TOP-WITHOUT-ORDER` — `ПЕРВЫЕ N` без `УПОРЯДОЧИТЬ ПО`;
+ *   - `qg:QRY-ALIAS-RESERVED-WORD` — служебное слово языка запросов в псевдониме: такой
+ *     запрос не выполняется вовсе, а собирается и проходит анализ как исправный.
  *
  * Зачем отдельный инструмент. Текст запроса — строковый литерал. Его не разбирает ни
  * статический анализатор, ни валидаторы XML, ни сборка бинарника: тела модулей
@@ -455,6 +457,90 @@ function checkTopWithoutOrder(source, literal, query) {
   return findings;
 }
 
+/**
+ * Служебные слова языка запросов, которые платформа не принимает как псевдоним.
+ *
+ * Списки измерены на платформе 8.3.27, а не выведены из синтаксиса: каждое слово
+ * подставлялось псевдонимом в `ВЫБРАТЬ ПЕРВЫЕ 1 <Т>.Ссылка КАК <поле> ИЗ Справочник.Валюты
+ * КАК <Т>`, и запрос выполнялся. Из 66 кандидатов ломают 31 в обеих позициях и ещё два —
+ * только в позиции источника.
+ *
+ * Вывод из синтаксиса дал бы шум: `ИТОГИ`, `ОБЪЕДИНИТЬ`, `СОЕДИНЕНИЕ`, `УПОРЯДОЧИТЬ`,
+ * `ИНДЕКСИРОВАТЬ`, `СУММА`, `КОЛИЧЕСТВО`, `ЗНАЧЕНИЕ`, `ДАТА`, `ТИП` — ключевые слова и функции,
+ * но псевдонимом работают. `ВНУТРЕННЕЕ СОЕДИНЕНИЕ ВТ КАК Итоги` стоит в типовом менеджере
+ * обмена через универсальный формат и выполняется.
+ */
+const RESERVED_ALIAS = new Set([
+  'ПЕРВЫЕ', 'РАЗЛИЧНЫЕ', 'РАЗРЕШЕННЫЕ', 'ПОМЕСТИТЬ', 'ИЗ', 'ГДЕ', 'ПО', 'ОБЩИЕ', 'ВНУТРЕННЕЕ',
+  'ВОЗР', 'УБЫВ', 'АВТОУПОРЯДОЧИВАНИЕ', 'ПЕРИОДАМИ', 'ДЛЯ', 'И', 'ИЛИ', 'НЕ', 'В', 'МЕЖДУ',
+  'ПОДОБНО', 'СПЕЦСИМВОЛ', 'ЕСТЬ', 'ВЫБОР', 'КОГДА', 'ТОГДА', 'ИНАЧЕ', 'ВЫРАЗИТЬ', 'ИСТИНА',
+  'ЛОЖЬ', 'ТОЛЬКО', 'КАК',
+]);
+
+/** Ломают только псевдоним источника: в списке выборки эти имена законны и повсеместны. */
+const RESERVED_SOURCE_ALIAS = new Set([...RESERVED_ALIAS, 'ССЫЛКА', 'ПРЕДСТАВЛЕНИЕ']);
+
+/** Явные псевдонимы списка выборки вместе с позициями: `Т.Поле КАК Имя`. */
+function selectListAliases(list) {
+  const depth = depthMap(list);
+  const found = [];
+  for (const as of matchesAtTopLevel(list, RE_AS, depth)) {
+    const tail = list.slice(as.index + as.text.length);
+    const named = tail.match(new RegExp(`^\\s*(${IDENT})`, 'u'));
+    if (named) found.push({ name: named[1], index: as.index });
+  }
+  return found;
+}
+
+/**
+ * Служебное слово языка запросов в псевдониме.
+ *
+ * Дефект переживает всё, кроме выполнения: текст собирается, статический анализ молчит, сборка
+ * проходит. Падает платформа — и падает целиком, то есть ветка кода не работает ни разу. Именно
+ * так в контуре чеков АТОЛ прожил запрос с псевдонимом `Первые`: его нашли не инструменты, а
+ * человек, выполнивший запрос руками.
+ *
+ * Позиция псевдонима различается: у источника запрещённых слов на два больше, потому что
+ * `Ссылка` и `Представление` в позиции таблицы разбираются как обращение и как функция.
+ */
+function checkReservedAliases(source, literal, branch, aliases) {
+  const findings = [];
+
+  const report = (name, pos, where) => {
+    findings.push({
+      severity: 'error',
+      rule: 'qg:QRY-ALIAS-RESERVED-WORD',
+      line: lineAt(source, pos),
+      alias: name,
+      position: where,
+      message:
+        `псевдоним ${where === 'source' ? 'источника' : 'поля'} «${name}» — служебное слово языка ` +
+        'запросов: платформа откажется выполнять запрос, хотя текст собирается и анализ молчит',
+    });
+  };
+
+  for (const alias of aliases) {
+    if (!RESERVED_SOURCE_ALIAS.has(alias.name.toUpperCase())) continue;
+    report(alias.name, literal.start + branch.offset + alias.index, 'source');
+  }
+
+  const depth = depthMap(branch.text);
+  const select = matchesAtTopLevel(branch.text, RE_SELECT, depth)[0];
+  if (select) {
+    const stopper = matchesAtTopLevel(branch.text, RE_INTO, depth)[0]
+      || matchesAtTopLevel(branch.text, RE_FROM, depth)[0];
+    const listStart = select.index + select.text.length;
+    const listEnd = stopper && stopper.index > listStart ? stopper.index : branch.text.length;
+    const list = branch.text.slice(listStart, listEnd);
+    for (const alias of selectListAliases(list)) {
+      if (!RESERVED_ALIAS.has(alias.name.toUpperCase())) continue;
+      report(alias.name, literal.start + branch.offset + listStart + alias.index, 'field');
+    }
+  }
+
+  return findings;
+}
+
 /** Номер строки в файле по абсолютному смещению. */
 function lineAt(source, pos) {
   let line = 1;
@@ -564,6 +650,10 @@ function lintOneLiteral(source, literal, masked, findings) {
 
     for (const branch of branches) {
       const { aliases, sourcesText } = parseSources(branch);
+
+      // До отсечки по источникам: псевдоним поля запрещён и в запросе без единого источника.
+      findings.push(...checkReservedAliases(source, literal, branch, aliases));
+
       if (aliases.length === 0) continue;
 
       // До отсечки по временным таблицам намеренно: затенение табличной части ни одной ВТ
@@ -648,6 +738,7 @@ const EVIDENCE_SCOPES = [
   { scope: 'query-alias-shadowing', id: 'qg:QRY-ALIAS-SHADOWS-FIELD' },
   { scope: 'query-alias-vs-nested-table', id: 'qg:QRY-ALIAS-SHADOWS-NESTED-TABLE' },
   { scope: 'query-top-order', id: 'qg:QRY-TOP-WITHOUT-ORDER' },
+  { scope: 'query-alias-reserved-word', id: 'qg:QRY-ALIAS-RESERVED-WORD' },
 ];
 
 function evidenceBlock(findings, queriesSeen, files = []) {
