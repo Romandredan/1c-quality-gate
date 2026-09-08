@@ -494,6 +494,7 @@ node "$QG/tools/evidence-validator.mjs" <файл отчёта> --gate   # ст�
 печатают свою строку сами и отмечаются в журнале `.claude/.state/qg-runs.jsonl`, а валидатор
 сверяет с ним каждую запись `applied`, у чьей проверки инструмент есть: `static-analysis`,
 `platform-api`, `query-alias-shadowing`, `query-alias-vs-nested-table`, `query-top-order`,
+`query-alias-reserved-word`,
 `transaction-nesting`, `enum-string-assign`, `unbounded-string-column`, `attribute-access`,
 `form-attribute-shadowing`, `dispatch-fallback`, `db-read-in-loop`, `stale-local-calls`,
 `file-encoding`, `registration-check`,

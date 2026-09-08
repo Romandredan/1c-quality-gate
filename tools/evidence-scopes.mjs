@@ -88,6 +88,15 @@ export const SCOPES = {
     granularity: 'files',
     applies: ['.bsl', '.os', '.xml']
   },
+  // Отдельный скоуп: предмет проверки — не коллизия имён, а само слово. Запрос с таким
+  // псевдонимом не выполняется вовсе, тогда как затенение роняет лишь обращение через точку.
+  'query-alias-reserved-word': {
+    layer: 'code',
+    tool: 'tools/query-lint.mjs',
+    about: 'служебное слово языка запросов в псевдониме источника или поля',
+    granularity: 'files',
+    applies: ['.bsl', '.os', '.xml']
+  },
   'transaction-nesting': {
     layer: 'code',
     tool: 'tools/bsl-lint.mjs',
@@ -336,6 +345,7 @@ export const QG_IDS = {
   'qg:QRY-ALIAS-SHADOWS-FIELD': { tool: 'tools/query-lint.mjs' },
   'qg:QRY-ALIAS-SHADOWS-NESTED-TABLE': { tool: 'tools/query-lint.mjs' },
   'qg:QRY-TOP-WITHOUT-ORDER': { tool: 'tools/query-lint.mjs' },
+  'qg:QRY-ALIAS-RESERVED-WORD': { tool: 'tools/query-lint.mjs' },
   'qg:BSL-TXN-IN-HANDLER': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-ENUM-STRING-ASSIGN': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-UNBOUNDED-STRING-COLUMN': { tool: 'tools/bsl-lint.mjs' },
