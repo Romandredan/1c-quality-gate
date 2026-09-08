@@ -730,6 +730,7 @@ function mustCloseList({ archetypeLabels, resolvedCode, bslFiles }) {
   const ids = ['compilation'];
   if (archetypeLabels.includes('query')) ids.push('query-execution');
   if (catalogScopesApply(resolvedCode, bslFiles)) ids.push('ai-antipatterns', 'platform-antipatterns');
+  if (resolvedCode === 'L2') ids.push('logic-review');
   return ids;
 }
 
@@ -742,6 +743,8 @@ function closeNote(id) {
     case 'ai-antipatterns':
     case 'platform-antipatterns':
       return 'печатает catalog.mjs attest: applied либо skipped reason=not_applicable/unreadable';
+    case 'logic-review':
+      return 'слой 2 (advisor(), холодный читатель при высокой цене ошибки): applied либо skipped reason=...';
     default:
       return '';
   }

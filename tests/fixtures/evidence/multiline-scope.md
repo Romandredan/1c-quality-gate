@@ -10,5 +10,6 @@
 [qg applied: layer=code, scope=query-in-loop, ids=[std436], verdict=violation:std436]
 [qg skipped: layer=code, scope=ai-antipatterns, reason=reader_unavailable]
 [qg skipped: layer=code, scope=platform-antipatterns, reason=reader_unavailable]
+[qg skipped: layer=code, scope=logic-review, reason=advisor_unavailable]
 [qg not_verified: dimension=compilation, reason=no_platform]
 [qg not_verified: dimension=query-execution, reason=no_platform]

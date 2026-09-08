@@ -40,6 +40,11 @@ const CATALOG_DECLARED =
   '[qg skipped: layer=code, scope=ai-antipatterns, reason=reader_unavailable]\n' +
   '[qg skipped: layer=code, scope=platform-antipatterns, reason=reader_unavailable]\n';
 
+// Контур кода на L2 — валидатор требует заявить слой 2 (advisor(), холодный читатель),
+// иначе предупреждает (task-22): без записи его пропуск на классе C3 не оставляет иного
+// следа. Фикстуры, собранные вручную и не вызывавшие advisor(), заявляют законный пропуск.
+const LOGIC_REVIEW_DECLARED = '[qg skipped: layer=code, scope=logic-review, reason=advisor_unavailable]\n';
+
 let passed = 0;
 const failures = [];
 
@@ -351,7 +356,7 @@ section('Запросы — НЕ придирается к корректным 
     printed + '\n' +
     '[qg not_verified: dimension=compilation, reason=no_platform]\n' +
     '[qg not_verified: dimension=query-execution, reason=no_platform]\n' +
-    CATALOG_DECLARED);
+    CATALOG_DECLARED + LOGIC_REVIEW_DECLARED);
   const r = run('tools/evidence-validator.mjs', [report, '--gate']);
   check('запись следа из query-lint проходит валидатор', r.code === 0, `${printed} → ${r.out.trim().slice(0, 140)}`);
 }
@@ -2076,18 +2081,18 @@ const evProj = { env: { CLAUDE_PROJECT_DIR: EV_PROJ } };
   check('в нестрогом режиме молчание об исполнении — предупреждение', rLint.code === 1, rLint.out.trim().slice(0, 140));
 
   const declared = writeBytes('ev-query-declared.md',
-    head('query') + violation + compilation + '[qg not_verified: dimension=query-execution, reason=no_platform]\n' + CATALOG_DECLARED);
+    head('query') + violation + compilation + '[qg not_verified: dimension=query-execution, reason=no_platform]\n' + CATALOG_DECLARED + LOGIC_REVIEW_DECLARED);
   check('заявленная непроверяемость исполнения принимается',
     run('tools/evidence-validator.mjs', [declared, '--gate']).code === 0);
 
   const executed = writeBytes('ev-query-executed.md',
     head('query') + violation + compilation +
-    '[qg applied: layer=code, scope=query-execution, ids=[qg:QRY-EXECUTED], verdict=clean]\n' + CATALOG_DECLARED);
+    '[qg applied: layer=code, scope=query-execution, ids=[qg:QRY-EXECUTED], verdict=clean]\n' + CATALOG_DECLARED + LOGIC_REVIEW_DECLARED);
   check('фактическое исполнение запроса закрывает требование',
     run('tools/evidence-validator.mjs', [executed, '--gate']).code === 0);
 
   // Требование адресное: без архетипа query отчитываться об исполнении не с чего.
-  const noQuery = writeBytes('ev-no-query.md', head('transaction') + violation + compilation + CATALOG_DECLARED);
+  const noQuery = writeBytes('ev-no-query.md', head('transaction') + violation + compilation + CATALOG_DECLARED + LOGIC_REVIEW_DECLARED);
   check('без архетипа query требование не предъявляется',
     run('tools/evidence-validator.mjs', [noQuery, '--gate']).code === 0);
 
@@ -2126,7 +2131,7 @@ const evProj = { env: { CLAUDE_PROJECT_DIR: EV_PROJ } };
   const customArch = writeBytes('ev-archetype-custom.md',
     '## quality evidence\n\n' +
     '[qg scope: volume=C2, files=1, archetypes=[exchange], driver=archetype:exchange, resolved=code:L2, config=custom:archetypes]\n' +
-    '[qg sentinel: target=v8std, id=std454, status=found]\n' + violation + compilation + CATALOG_DECLARED);
+    '[qg sentinel: target=v8std, id=std454, status=found]\n' + violation + compilation + CATALOG_DECLARED + LOGIC_REVIEW_DECLARED);
   const rCustom = run('tools/evidence-validator.mjs', [customArch, '--gate'], { env: { CLAUDE_PROJECT_DIR: archProj } });
   check('проектный архетип принимается как метка', rCustom.code === 0, rCustom.out.trim().slice(0, 160));
 
@@ -2158,6 +2163,30 @@ const evProj = { env: { CLAUDE_PROJECT_DIR: EV_PROJ } };
   const withRecord = text + '\n[qg applied: layer=code, scope=ai-antipatterns, ids=[qg:AI-01], verdict=clean]\n[qg skipped: layer=code, scope=platform-antipatterns, reason=not_applicable]\n';
   const res2 = v.validate(withRecord, { gate: false });
   check('с записями о проходах предупреждения нет', !res2.problems.some((p) => /ai-antipatterns|platform-antipatterns/.test(p.message)), JSON.stringify(res2.problems));
+}
+
+// Слой 2 (advisor(), холодный читатель) на L2 не оставляет иного следа, кроме этой записи —
+// A/B-прогон на живой правке (task-22) показал, что его пропуск на классе C3 не заметил
+// никто. Предупреждение адресное: только на L2, и только пока запись не заявлена ни одной
+// из двух законных форм.
+{
+  const v = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+  const isLogicReviewWarn = (p) => p.severity === 'warn' && /scope=logic-review/.test(p.message);
+  const l2Head = '## quality evidence\n\n[qg scope: volume=C2, files=1, archetypes=[query], driver=archetype:query, resolved=code:L2, config=default]\n[qg sentinel: target=v8std, id=std454, status=found]\n';
+  const l1Head = '## quality evidence\n\n[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, config=default]\n[qg sentinel: target=v8std, id=std454, status=found]\n';
+  const tail = CATALOG_DECLARED + '[qg not_verified: dimension=compilation, reason=no_platform]\n';
+
+  const l2Silent = v.validate(l2Head + tail, { gate: false });
+  check('L2 без записи logic-review — предупреждение', l2Silent.problems.some(isLogicReviewWarn), JSON.stringify(l2Silent.problems));
+
+  const l1Silent = v.validate(l1Head + tail, { gate: false });
+  check('L1 без записи logic-review — без предупреждения этого рода', !l1Silent.problems.some(isLogicReviewWarn), JSON.stringify(l1Silent.problems));
+
+  const l2Applied = v.validate(l2Head + '[qg applied: layer=code, scope=logic-review, ids=[std000], verdict=clean]\n' + tail, { gate: false });
+  check('L2 с applied logic-review — без предупреждения', !l2Applied.problems.some(isLogicReviewWarn), JSON.stringify(l2Applied.problems));
+
+  const l2Skipped = v.validate(l2Head + LOGIC_REVIEW_DECLARED + tail, { gate: false });
+  check('L2 со skipped logic-review — без предупреждения', !l2Skipped.problems.some(isLogicReviewWarn), JSON.stringify(l2Skipped.problems));
 }
 
 // ---------------------------------------------------------------------------
@@ -6323,10 +6352,27 @@ section('План прогона печатает инструмент');
   check('в плане есть вход читателя с архетипом query', plan.tools.some((t) => /catalog\.mjs" index --archetypes query/.test(t)), plan.tools.join('\n'));
   check('справочники под архетип названы', plan.references.includes('bsl-query-optimization.md'), JSON.stringify(plan.references));
   check('требования к следу перечислены', plan.mustClose.includes('query-execution') && plan.mustClose.includes('compilation'), JSON.stringify(plan.mustClose));
-  // task-22: diff сохраняется ДО делегирования читателю, а attest получает --diff.
+  // Архетип query держит minCode=L2 — слой 2 обязан появиться в «Закрыть в следе» (task-22).
+  check('на L2 logic-review в mustClose', plan.profile.resolved.code === 'L2' && plan.mustClose.includes('logic-review'), JSON.stringify(plan.mustClose));
   check('строка про git diff перед index/attest в инструментах',
     plan.tools.some((t) => /^git diff HEAD --/.test(t)), plan.tools.join('\n'));
   check('строка attest несёт --diff', plan.tools.some((t) => /catalog\.mjs" attest.*--diff/.test(t)), plan.tools.join('\n'));
+
+  // Обратный случай: класс C1 без архетипов держит resolved.code на L1 — logic-review не
+  // требуется, пока контур не дошёл до слоя 2.
+  const l1Root = join(WORK, 'plan-root-l1');
+  rmSync(l1Root, { recursive: true, force: true });
+  mkdirSync(join(l1Root, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: l1Root });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: l1Root });
+  writeFileSync(join(l1Root, '.1c-quality-gate.json'), '{}', 'utf8');
+  const l1File = 'src/cf/CommonModules/М/Ext/Module.bsl';
+  writeFileSync(join(l1Root, l1File), 'Процедура П() Экспорт\n\tА = 1;\nКонецПроцедуры\n', 'utf8');
+  const l1Run = run('tools/gate.mjs', ['plan', '--files', l1File, '--no-analyzer', '--json'], { env: { QG_PROJECT_DIR: l1Root } });
+  check('plan (L1) завершается успешно', l1Run.code === 0, l1Run.out.slice(0, 300));
+  const l1Plan = JSON.parse(l1Run.out);
+  check('на L1 logic-review в mustClose отсутствует',
+    l1Plan.profile.resolved.code === 'L1' && !l1Plan.mustClose.includes('logic-review'), JSON.stringify({ code: l1Plan.profile.resolved.code, mustClose: l1Plan.mustClose }));
   const text = run('tools/gate.mjs', ['plan', '--files', file, '--no-analyzer'], { env: { QG_PROJECT_DIR: root } });
   check('текстовый план содержит разделы', /## Профиль/.test(text.out) && /## Инструменты/.test(text.out), text.out.slice(0, 400));
 

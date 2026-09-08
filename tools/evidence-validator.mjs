@@ -481,6 +481,21 @@ export function validate(text, { gate = false, root = null, session = null } = {
           `[qg applied: layer=code, scope=${s}, ...] либо [qg skipped: layer=code, scope=${s}, reason=...]`
       );
     }
+
+    // Слой 2 (advisor() и холодный читатель) заявлен глубиной L2, но следа не оставляет
+    // ничем, кроме этой записи — его пропуск на классе C3 в живом A/B-прогоне не заметил
+    // никто (task-22). Пока предупреждение: блокирующим станет следующим MINOR
+    // (docs/RELEASING.md, переходное окно).
+    if (codeDepth === 'L2' && !closes.has('logic-review') && !skippedScopes.has('logic-review')) {
+      add(
+        'warn',
+        records.find((r) => r.type === 'scope')?.line || 0,
+        'контур code запущен на L2, но о слое 2 (ревью логики: advisor() и холодный читатель) не ' +
+          'заявлено: нужна запись [qg applied: layer=code, scope=logic-review, ids=[...], verdict=...] ' +
+          'либо [qg skipped: layer=code, scope=logic-review, reason=...]. В следующем MINOR это станет ' +
+          'ошибкой (docs/RELEASING.md, переходное окно)'
+      );
+    }
   }
 
   if (!gate) {
