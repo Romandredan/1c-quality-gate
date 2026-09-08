@@ -828,7 +828,16 @@ function cmdPlan(args) {
   const { ok: analyzerOk, metrics, reason: analyzerReason } = analyzerMetrics(rootDir, files, { skip: noAnalyzer });
   if (!analyzerOk) diag(`сложность не считалась: ${analyzerReason}\n`);
 
-  const profile = computeProfile({ files, root: rootDir, config, metrics, configState });
+  let profile;
+  try {
+    profile = computeProfile({ files, root: rootDir, config, metrics, configState });
+  } catch (e) {
+    // Неверная запись `archetypes.custom` (extends на неизвестную метку, попытка понизить
+    // минимум, name и extends вместе или ни одного) — план печатать не для чего: молча
+    // применённая частично неверная настройка хуже отказа.
+    process.stderr.write(`Настройка проекта отклонена: ${e.message}\n`);
+    return 2;
+  }
   const { resolved, archetypes: archetypeLabels, volume, driver } = profile;
   const complexityFired = analyzerOk && profile.complexity.length > 0;
   const complexityDisplay = analyzerOk ? (profile.complexity.length ? profile.complexity.join(',') : 'none') : 'not_computed';

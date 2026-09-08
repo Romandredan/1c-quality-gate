@@ -229,19 +229,120 @@ export function methodRanges(source) {
   return routines;
 }
 
-/** Архетипы проекта (`archetypes.custom` настройки) в той же форме, что и встроенные. */
-function customArchetypes(config) {
+/**
+ * Минимум `minCode` записи `extends`, поднятый над встроенным. Понижение — ошибка настройки:
+ * молча применённое пониженное требование неотличимо от верного, а платформенные обёртки
+ * («выполнить HTTP-запрос через свой общий модуль») — тот самый случай, где минимум встроенного
+ * архетипа сознательно поднимают, а не снижают (см. брифинг задачи).
+ */
+function raiseMinCode(base, given, label) {
+  if (given === undefined || given === null || given === '') return base;
+  if (given !== 'L1' && given !== 'L2') {
+    throw new Error(`archetypes.custom: extends="${label}" — minCode="${given}" не L1 и не L2`);
+  }
+  if (CODE_RANK[given] < CODE_RANK[base]) {
+    throw new Error(
+      `archetypes.custom: extends="${label}" задаёт minCode="${given}", а встроенный минимум архетипа — "${base}"; ` +
+        'extends повышает минимум, но не понижает'
+    );
+  }
+  return given;
+}
+
+/** То же для `minArch` — с той оговоркой, что у части архетипов (`form-module`) минимум условный. */
+function raiseMinArch(base, given, label) {
+  if (given === undefined || given === null || given === '') return base;
+  if (base !== null && typeof base === 'object') {
+    throw new Error(
+      `archetypes.custom: extends="${label}" задаёт minArch, но встроенный минимум этого архетипа условный ` +
+        '(зависит от объёма правки) — extends не может его поднять'
+    );
+  }
+  const g = Number(given);
+  if (!Number.isInteger(g) || g < 1 || g > 3) {
+    throw new Error(`archetypes.custom: extends="${label}" — minArch="${given}" не целое число 1..3`);
+  }
+  if (base !== null && g < base) {
+    throw new Error(
+      `archetypes.custom: extends="${label}" задаёт minArch=${g}, а встроенный минимум архетипа — ${base}; ` +
+        'extends повышает минимум, но не понижает'
+    );
+  }
+  return g;
+}
+
+/**
+ * Каталог архетипов проекта: встроенная таблица `ARCHETYPES`, с записями `archetypes.custom`
+ * применёнными поверх.
+ *
+ * Запись бывает двух видов, и ровно одного поля из двух — `name` ЛИБО `extends`:
+ *   - `name` — прежнее поведение: самостоятельный проектный архетип со своей меткой, метка
+ *     идёт в `archetypes` записи следа как есть;
+ *   - `extends` — расширение встроенного архетипа (мотивация — обёртки платформенных вызовов
+ *     вроде общего модуля HTTP-клиента, за именем которого спрятан `HTTPСоединение`: сама
+ *     обёртка проектная и в публичный пакет не попадает, а архетип `integration`, который она
+ *     должна поднимать, — общий, см. брифинг задачи). Метка НЕ заводится новая: находка идёт
+ *     под встроенной меткой, и всё, что к ней привязано (справочники, разделы чеклиста,
+ *     минимумы), действует без изменений. `markers` записи ДОБАВЛЯЮТСЯ к маркерам встроенного
+ *     архетипа; `minCode`/`minArch` могут ТОЛЬКО поднять минимум.
+ *
+ * Запись, нарушающая форму (оба поля, ни одного поля, extends на неизвестную метку, попытка
+ * понизить минимум), отклоняется целиком — `throw`, а не молчаливый пропуск: неверная запись,
+ * применённая частично, выглядит как рабочее расширение и в этом хуже отсутствующей.
+ */
+function buildArchetypeCatalog(config) {
   const list = config?.archetypes?.custom;
-  if (!Array.isArray(list)) return [];
-  return list
-    .filter((a) => a && a.name)
-    .map((a) => ({
-      label: String(a.name),
-      markers: Array.isArray(a.markers) ? a.markers.map((m) => new RegExp(escapeRegExp(m), 'i')) : [],
-      minCode: a.minCode === 'L2' ? 'L2' : 'L1',
-      minArch: a.minArch === undefined || a.minArch === null || a.minArch === '' ? null : Number(a.minArch),
+  if (!Array.isArray(list) || list.length === 0) return ARCHETYPES;
+
+  const byLabel = new Map(ARCHETYPES.map((a) => [a.label, { ...a }]));
+  const extra = [];
+
+  for (const entry of list) {
+    if (!entry || typeof entry !== 'object') continue;
+    const hasName = typeof entry.name === 'string' && entry.name.trim() !== '';
+    const hasExtends = typeof entry.extends === 'string' && entry.extends.trim() !== '';
+
+    if (hasName && hasExtends) {
+      throw new Error(
+        `archetypes.custom: запись задаёт одновременно "name" ("${entry.name}") и "extends" ` +
+          `("${entry.extends}") — нужно одно из двух: новая метка (name) либо расширение встроенной (extends)`
+      );
+    }
+    if (!hasName && !hasExtends) {
+      throw new Error(
+        'archetypes.custom: запись без "name" и без "extends" — непонятно, заводит она новую метку ' +
+          'или расширяет встроенную'
+      );
+    }
+
+    if (hasExtends) {
+      const label = entry.extends.trim();
+      const base = byLabel.get(label);
+      if (!base) {
+        throw new Error(
+          `archetypes.custom: extends="${label}" — нет такого встроенного архетипа. Известные метки: ` +
+            `${ARCHETYPES.map((a) => a.label).join(', ')}`
+        );
+      }
+      const addedMarkers = Array.isArray(entry.markers)
+        ? entry.markers.map((m) => new RegExp(escapeRegExp(m), 'i'))
+        : [];
+      base.markers = [...base.markers, ...addedMarkers];
+      base.minCode = raiseMinCode(base.minCode, entry.minCode, label);
+      base.minArch = raiseMinArch(base.minArch, entry.minArch, label);
+      continue;
+    }
+
+    extra.push({
+      label: String(entry.name),
+      markers: Array.isArray(entry.markers) ? entry.markers.map((m) => new RegExp(escapeRegExp(m), 'i')) : [],
+      minCode: entry.minCode === 'L2' ? 'L2' : 'L1',
+      minArch: entry.minArch === undefined || entry.minArch === null || entry.minArch === '' ? null : Number(entry.minArch),
       refs: [],
-    }));
+    });
+  }
+
+  return [...byLabel.values(), ...extra];
 }
 
 function normalize(p) {
@@ -554,7 +655,7 @@ export function computeProfile({ files, root, config, metrics, configState }) {
 
   // --- ось 2: архетипы --------------------------------------------------------
   const dirsPresent = new Set(diffs.map((d) => normalize(d.rel).toLowerCase()));
-  const catalog = [...ARCHETYPES, ...customArchetypes(config)];
+  const catalog = buildArchetypeCatalog(config);
   const fired = [];
   for (const a of catalog) {
     const byMarker =

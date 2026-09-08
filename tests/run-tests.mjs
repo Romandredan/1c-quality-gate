@@ -2411,6 +2411,14 @@ section('Проектная настройка — создание, разре�
     const inTemplate = new Set(Object.keys(JSON.parse(config.template())).filter((k) => !k.startsWith('//')));
     const missing = Object.keys(config.DEFAULTS).filter((k) => !inTemplate.has(k));
     check('каждая секция настройки описана в создаваемом файле', missing.length === 0, missing.join(', '));
+
+    // Task 21: ключ `extends` записи `archetypes.custom` — та же проверка «документировано →
+    // читается», что и выше по секциям, только на уровень глубже (поле элемента массива, а не
+    // сама секция), поэтому цикл по DEFAULTS его не ловит. Половина «читается» — поведенческие
+    // проверки (f)-(l) в секции «Профиль изменения считает инструмент»; здесь только
+    // «документировано».
+    const archetypesDoc = String(JSON.parse(config.template()).archetypes?.['//'] || '');
+    check('archetypes.custom: ключ extends назван в шаблоне', archetypesDoc.includes('extends'), archetypesDoc);
   }
   check('ключи-комментарии не доходят до потребителя', !JSON.stringify(fromTemplate.values).includes('//'));
   check('комментарии снимаются на любой глубине', JSON.stringify(config.stripDocs({ a: { '//': 'x', b: [{ '//': 'y', c: 1 }] } })) === '{"a":{"b":[{"c":1}]}}');
@@ -6044,6 +6052,135 @@ section('Профиль изменения считает инструмент')
     const pE = prof.computeProfile({ files: [fileE], root: rootE, config, metrics: {} });
     check('(e) integration находится по телу задетого метода, а не только по добавленным строкам',
       pE.archetypes.includes('integration'), JSON.stringify(pE.archetypes));
+  }
+
+  // Task 21: `archetypes.custom` расширяет встроенный архетип (`extends`), а не заводит новую
+  // метку. Мотивация — тот же случай, что и (e) выше, только маркер архетипа `integration`
+  // теперь не платформенное имя, а вызов ПРОЕКТНОЙ обёртки: HTTP-транспорт модуля вызывает
+  // общий модуль `ОбщийМодульHTTPКлиент` (тот же generic-пример, что в шаблоне config.mjs и
+  // docs/CONFIG.md — реального имени проекта в пакете быть не должно), и без расширения
+  // архетип integration молчит, хотя правка ровно того рода, для которого он заведён.
+  {
+    // (f) маркер обёртки — в теле задетого метода, не в добавленной строке (та же постановка,
+    // что и в (e), но через extends): находка идёт под встроенной меткой integration, а не
+    // под именем обёртки, и минимум code встроенного архетипа (L2) применяется.
+    const rootF = join(WORK, 'profile-extends-root-f');
+    rmSync(rootF, { recursive: true, force: true });
+    mkdirSync(join(rootF, 'src', 'cf', 'CommonModules', 'HTTPТранспорт', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: rootF });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: rootF });
+    const fileF = 'src/cf/CommonModules/HTTPТранспорт/Ext/Module.bsl';
+    writeFileSync(
+      join(rootF, fileF),
+      'Процедура ОтправитьЗапрос(Знач Данные)\n\tОбщийМодульHTTPКлиент.ВыполнитьЗапрос(Данные);\n\tРез = Данные;\nКонецПроцедуры\n',
+      'utf8'
+    );
+    execFileSync('git', ['add', '.'], { cwd: rootF });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'база F'], { cwd: rootF });
+    writeFileSync(
+      join(rootF, fileF),
+      'Процедура ОтправитьЗапрос(Знач Данные)\n\tОбщийМодульHTTPКлиент.ВыполнитьЗапрос(Данные);\n\tРез = Данные + 1;\nКонецПроцедуры\n',
+      'utf8'
+    );
+    const diffF = execFileSync('git', ['diff', '-U0', 'HEAD', '--', fileF], { cwd: rootF, encoding: 'utf8' });
+    const addedLinesF = diffF.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++'));
+    check('(f) постановка теста: добавленные строки диффа НЕ содержат маркер обёртки',
+      !addedLinesF.some((l) => /ОбщийМодульHTTPКлиент/.test(l)), diffF);
+    const extendsCfg = {
+      ...config,
+      archetypes: { custom: [{ extends: 'integration', markers: ['ОбщийМодульHTTPКлиент'] }] },
+    };
+    const pF = prof.computeProfile({ files: [fileF], root: rootF, config: extendsCfg, metrics: {} });
+    check('(f) extends: метка остаётся встроенной (integration), своей метки не заведено',
+      pF.archetypes.includes('integration') && !pF.archetypes.includes('ОбщийМодульHTTPКлиент'), JSON.stringify(pF.archetypes));
+    check('(f) extends: минимум code встроенного архетипа применяется (L2)',
+      pF.resolved.code === 'L2', JSON.stringify(pF.resolved));
+
+    // (g) extends поднимает minArch НАД встроенным минимумом (integration: minArch=1 → 2).
+    const rootG = join(WORK, 'profile-extends-root-g');
+    rmSync(rootG, { recursive: true, force: true });
+    mkdirSync(join(rootG, 'src', 'cf', 'CommonModules', 'HTTPТранспорт2', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: rootG });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: rootG });
+    const fileG = 'src/cf/CommonModules/HTTPТранспорт2/Ext/Module.bsl';
+    writeFileSync(
+      join(rootG, fileG),
+      'Процедура П() Экспорт\n\tОбщийМодульHTTPКлиент.ВыполнитьЗапрос();\nКонецПроцедуры\n',
+      'utf8'
+    );
+    const raiseCfg = {
+      ...config,
+      archetypes: { custom: [{ extends: 'integration', markers: ['ОбщийМодульHTTPКлиент'], minArch: 2 }] },
+    };
+    const pG = prof.computeProfile({ files: [fileG], root: rootG, config: raiseCfg, metrics: {} });
+    check('(g) extends: minArch поднят над встроенным минимумом (arch >= 2)',
+      pG.archetypes.includes('integration') && pG.resolved.arch !== null && pG.resolved.arch >= 2, JSON.stringify(pG));
+
+    // (h)-(k): неверная запись `archetypes.custom` отклоняется целиком — throw с сообщением,
+    // а не молчаливый пропуск или частичное применение. Общий проект для всех четырёх — файл
+    // существовать не обязан валидным по содержанию, важно только, что git и root читаемы.
+    const rootH = join(WORK, 'profile-extends-root-h');
+    rmSync(rootH, { recursive: true, force: true });
+    mkdirSync(join(rootH, 'src', 'cf', 'CommonModules', 'Х', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: rootH });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: rootH });
+    const fileH = 'src/cf/CommonModules/Х/Ext/Module.bsl';
+    writeFileSync(join(rootH, fileH), 'Процедура П() Экспорт\nКонецПроцедуры\n', 'utf8');
+    const tryProfile = (customCfg) => {
+      try {
+        prof.computeProfile({ files: [fileH], root: rootH, config: { ...config, archetypes: { custom: customCfg } }, metrics: {} });
+        return null;
+      } catch (e) {
+        return e;
+      }
+    };
+
+    // (h) понижение минимума встроенного архетипа — отклонено, сообщение называет оба значения.
+    const lowerErr = tryProfile([{ extends: 'integration', minCode: 'L1' }]);
+    check('(h) extends: понижение minCode отклонено, сообщение называет оба значения',
+      Boolean(lowerErr) && lowerErr.message.includes('L1') && lowerErr.message.includes('L2'), String(lowerErr && lowerErr.message));
+
+    // (i) extends на неизвестную метку — отклонено, сообщение перечисляет известные.
+    const unknownErr = tryProfile([{ extends: 'нет-такого-архетипа' }]);
+    check('(i) extends: неизвестная метка отклонена, сообщение перечисляет известные архетипы',
+      Boolean(unknownErr) && unknownErr.message.includes('integration') && unknownErr.message.includes('query'),
+      String(unknownErr && unknownErr.message));
+
+    // (j) запись с name и extends одновременно — отклонено.
+    const bothErr = tryProfile([{ name: 'x', extends: 'integration' }]);
+    check('(j) archetypes.custom: name и extends одновременно отклонены',
+      Boolean(bothErr) && bothErr.message.includes('name') && bothErr.message.includes('extends'), String(bothErr && bothErr.message));
+
+    // (k) запись без name и без extends — отклонено.
+    const neitherErr = tryProfile([{ markers: ['x'] }]);
+    check('(k) archetypes.custom: запись без name и без extends отклонена', Boolean(neitherErr), String(neitherErr && neitherErr.message));
+
+    // (l) регрессия: старая форма (`name`) и новая (`extends`) работают вместе в одном списке
+    // `archetypes.custom` — оба маркера обязаны сработать одновременно на одной правке,
+    // иначе проверка не отличила бы «обе формы разобраны» от «разобрана только одна».
+    const rootL = join(WORK, 'profile-extends-root-l');
+    rmSync(rootL, { recursive: true, force: true });
+    mkdirSync(join(rootL, 'src', 'cf', 'CommonModules', 'HTTPТранспорт3', 'Ext'), { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: rootL });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: rootL });
+    const fileL = 'src/cf/CommonModules/HTTPТранспорт3/Ext/Module.bsl';
+    writeFileSync(
+      join(rootL, fileL),
+      'Процедура П() Экспорт\n\tОбщийМодульHTTPКлиент.ВыполнитьЗапрос();\n\tПланОбмена.ЗаписатьИзменения();\nКонецПроцедуры\n',
+      'utf8'
+    );
+    const mixedCfg = {
+      ...config,
+      archetypes: {
+        custom: [
+          { name: 'exchange', markers: ['ПланОбмена'], minCode: 'L2' },
+          { extends: 'integration', markers: ['ОбщийМодульHTTPКлиент'] },
+        ],
+      },
+    };
+    const pMixed = prof.computeProfile({ files: [fileL], root: rootL, config: mixedCfg, metrics: {} });
+    check('(l) старая форма (name) и extends срабатывают одновременно в одном списке',
+      pMixed.archetypes.includes('integration') && pMixed.archetypes.includes('exchange'), JSON.stringify(pMixed.archetypes));
   }
 }
 
