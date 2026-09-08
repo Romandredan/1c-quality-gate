@@ -634,9 +634,13 @@ function buildToolCommands({ files, resolvedCode, archetypeLabels, bslFiles }) {
       case 'tools/catalog.mjs':
         if (catalogScopesApply(resolvedCode, bslFiles)) {
           const arch = archetypeLabels.length ? archetypeLabels.join(',') : 'none';
+          // qg:AI-11 (needs: diff) проверяется по сравнению версий, а не по коду как он есть —
+          // сохрани его ДО делегирования читателю: у него нет оболочки, чтобы построить diff
+          // самому. Без файла attest не примет карточку в examined (task-22).
+          lines.push(`git diff HEAD -- ${quoteAll(bslFiles)} > <файл.diff>  # сначала сравнение версий, потом читатель`);
           lines.push(`node "$QG/tools/catalog.mjs" index --archetypes ${arch}`);
           lines.push(
-            `node "$QG/tools/catalog.mjs" attest --result <файл.json> --files ${quoteAll(bslFiles)} --archetypes ${arch}`
+            `node "$QG/tools/catalog.mjs" attest --result <файл.json> --files ${quoteAll(bslFiles)} --archetypes ${arch} --diff <файл.diff>`
           );
         }
         break;

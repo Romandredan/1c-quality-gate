@@ -498,7 +498,8 @@ node "$QG/tools/evidence-validator.mjs" <файл отчёта> --gate   # ст�
 `form-attribute-shadowing`, `dispatch-fallback`, `db-read-in-loop`, `stale-local-calls`,
 `file-encoding`, `registration-check`,
 `uuid-uniqueness`, `structure-validation`, `form-binding`, `ai-antipatterns`,
-`platform-antipatterns` (обе — `tools/catalog.mjs`, аттестация результата читателя). Отметка должна быть не старше
+`platform-antipatterns`, `ai-antipatterns-diff` (все три — `tools/catalog.mjs`, аттестация
+результата читателя; последний — признаки `needs: [diff]`, когда `--diff` недоступен). Отметка должна быть не старше
 последней правки файлов своей сессии — прогон до правки описывает состояние, которого уже нет.
 
 **Сверяется и покрытие.** В журнале лежат пути файлов, которые инструмент видел; они

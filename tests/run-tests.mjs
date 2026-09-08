@@ -2902,7 +2902,13 @@ section('Аттестация результата читателя катало
   const bsl = join(root, 'src', 'Module.bsl');
   writeFileSync(bsl, 'Функция ПодобратьЦены(ТаблицаТоваров)\n\tВозврат ТаблицаТоваров.Количество();\nКонецФункции\n', 'utf8');
 
-  const expectedExamined = gen.readCatalog().filter((c) => !c.tool && c.archetypes.includes('always')).map((c) => c.id);
+  // qg:AI-11 (needs: [diff]) исключён из базового набора: этот блок не передаёт --diff (root
+  // без git), и с task-22 такой признак в examined без диффа отдельно проверяется ниже, в
+  // секции про --diff/--no-diff-available.
+  const expectedExamined = gen
+    .readCatalog()
+    .filter((c) => !c.tool && c.archetypes.includes('always') && !(c.needs || []).includes('diff'))
+    .map((c) => c.id);
   const good = {
     examined: expectedExamined,
     files: ['src/Module.bsl'],
@@ -2994,9 +3000,19 @@ section('Аттестация каталога — находки basis: diff (�
   // рабочее дерево уже не содержит. Находка с `basis: "diff"` сверяется не с текущим файлом,
   // а с удалёнными строками `git diff HEAD -- <файл>`; настоящая git-история нужна, поэтому
   // фикстура — с `git init`/commit, как в тестах профиля метод-ориентированных правил выше.
+  //
+  // С task-22 признак с `needs: [diff]` (сегодня один — qg:AI-11) требует ещё и `--diff` у
+  // самого attest: без него он не вправе появиться в `examined`, даже если находка честная.
+  // Фикстуры этого блока передают diffFile — настоящий `git diff HEAD -- <файл>`, сохранённый
+  // в файл так же, как это делает оркестратор по плану `gate.mjs`.
   const cat = await import(pathToFileURL(join(ROOT, 'tools', 'catalog.mjs')).href);
   const gen = await import(pathToFileURL(join(ROOT, 'tools', 'gen-catalog-index.mjs')).href);
   const expectedExamined = gen.readCatalog().filter((c) => !c.tool && c.archetypes.includes('always')).map((c) => c.id);
+  const needsDiffIds = gen
+    .readCatalog()
+    .filter((c) => !c.tool && c.archetypes.includes('always') && (c.needs || []).includes('diff'))
+    .map((c) => c.id);
+  check('в контрольном наборе есть needs:[diff]-признак (иначе блок ничего не проверяет)', needsDiffIds.includes('qg:AI-11'), needsDiffIds.join(','));
 
   const dRoot = join(WORK, 'attest-diff-root');
   rmSync(dRoot, { recursive: true, force: true });
@@ -3014,34 +3030,124 @@ section('Аттестация каталога — находки basis: diff (�
   // Правка: guard редкого случая исчез — в рабочем дереве его больше нет.
   writeFileSync(join(dRoot, dFile), 'Функция Тест(Знач П)\n\tВозврат Строка(П);\nКонецФункции\n', 'utf8');
 
+  const diffFile = join(WORK, 'attest-diff-root.diff');
+  writeFileSync(diffFile, execFileSync('git', ['diff', 'HEAD', '--', dFile], { cwd: dRoot, encoding: 'utf8' }), 'utf8');
+
   const diffGood = {
     examined: expectedExamined,
     files: [dFile],
     unreadable: [],
     findings: [{ id: 'qg:AI-11', file: dFile, line: 2, method: 'Тест', quote: 'Если П = Неопределено Тогда', basis: 'diff', note: 'guard редкого случая исчез' }],
   };
-  const okDiff = cat.attest({ result: diffGood, files: [dFile], archetypes: [], root: dRoot });
+  const okDiff = cat.attest({ result: diffGood, files: [dFile], archetypes: [], root: dRoot, diffFile });
   check('находка basis=diff с цитатой из удалённой строки аттестуется', okDiff.ok === true, okDiff.problems.join('; '));
   check('печатается violation по qg:AI-11 (ai-antipatterns)',
     okDiff.evidence.some((l) => /scope=ai-antipatterns.*verdict=violation:qg:AI-11/.test(l)), okDiff.evidence.join('\n'));
 
   const diffBadQuote = { ...diffGood, findings: [{ ...diffGood.findings[0], quote: 'Такой строки среди удалённых нет' }] };
-  const badDiffQuote = cat.attest({ result: diffBadQuote, files: [dFile], archetypes: [], root: dRoot });
+  const badDiffQuote = cat.attest({ result: diffBadQuote, files: [dFile], archetypes: [], root: dRoot, diffFile });
   check('находка basis=diff с цитатой не из удалённых строк отвергается',
     badDiffQuote.ok === false && badDiffQuote.problems.some((p) => /basis=diff/.test(p)), badDiffQuote.problems.join('; '));
 
   // Файл без версии в HEAD (никогда не коммитился) — не с чем сравнивать, находка не проходит.
+  // Диф-файл для этого под-теста фиктивный: он должен лишь упомянуть файл (чтобы пройти
+  // gate --diff task-22), а сам разбор находки идёт независимым путём — git show HEAD:<файл>.
   const noHeadFile = 'src/Новый.bsl';
   writeFileSync(join(dRoot, noHeadFile), 'Функция Тест2()\n\tВозврат 1;\nКонецФункции\n', 'utf8');
+  const noHeadDiffFile = join(WORK, 'attest-diff-nohead.diff');
+  writeFileSync(noHeadDiffFile, `diff --git a/${noHeadFile} b/${noHeadFile}\n`, 'utf8');
   const diffNoHead = {
     examined: expectedExamined,
     files: [noHeadFile],
     unreadable: [],
     findings: [{ id: 'qg:AI-11', file: noHeadFile, line: 1, method: 'Тест2', quote: 'Функция Тест2()', basis: 'diff', note: 'x' }],
   };
-  const badNoHead = cat.attest({ result: diffNoHead, files: [noHeadFile], archetypes: [], root: dRoot });
+  const badNoHead = cat.attest({ result: diffNoHead, files: [noHeadFile], archetypes: [], root: dRoot, diffFile: noHeadDiffFile });
   check('находка basis=diff по файлу без версии в HEAD отвергается',
     badNoHead.ok === false && badNoHead.problems.some((p) => /basis=diff/.test(p)), badNoHead.problems.join('; '));
+}
+
+// ---------------------------------------------------------------------------
+section('Аттестация каталога — needs:[diff] не заявляется без --diff (task-22)');
+
+{
+  // Дефект найден A/B-прогоном на живой правке: read отчитывался о признаке qg:AI-11 в
+  // examined, а сравнения версий за этим не стояло — «проверил» и «не проверял» стали
+  // неотличимы. attest теперь отказывает needs:[diff]-признаку в examined без настоящего
+  // --diff и печатает честный `skipped` через --no-diff-available, когда сравнивать
+  // действительно нечем (новый файл без истории).
+  const cat = await import(pathToFileURL(join(ROOT, 'tools', 'catalog.mjs')).href);
+  const gen = await import(pathToFileURL(join(ROOT, 'tools', 'gen-catalog-index.mjs')).href);
+  const journal = await import(pathToFileURL(join(ROOT, 'tools', 'run-journal.mjs')).href);
+  const cardsAll = gen.readCatalog();
+  const alwaysNoTool = cardsAll.filter((c) => !c.tool && c.archetypes.includes('always'));
+  const withDiff = alwaysNoTool.map((c) => c.id);
+  const withoutDiff = alwaysNoTool.filter((c) => !(c.needs || []).includes('diff')).map((c) => c.id);
+
+  const root = join(WORK, 'attest-needs-diff-root');
+  rmSync(root, { recursive: true, force: true });
+  mkdirSync(join(root, 'src'), { recursive: true });
+  writeFileSync(join(root, '.1c-quality-gate.json'), '{}', 'utf8');
+  const file = 'src/Module.bsl';
+  writeFileSync(join(root, file), 'Функция Тест()\n\tВозврат 1;\nКонецФункции\n', 'utf8');
+
+  // Без --diff examined с qg:AI-11 отвергается, и журнал не пишется.
+  const claiming = { examined: withDiff, files: [file], findings: [], unreadable: [] };
+  const noDiffFlag = cat.attest({ result: claiming, files: [file], archetypes: [] , root });
+  check('needs:[diff]-признак в examined без --diff отвергается',
+    noDiffFlag.ok === false && noDiffFlag.problems.some((p) => /qg:AI-11.*--diff не передан/.test(p)), noDiffFlag.problems.join('; '));
+  const journalBefore = journal.readJournal(root).length;
+  check('отклонённый результат журнала не пишет', journalBefore === 0, String(journalBefore));
+
+  // С валидным --diff тот же результат (examined c AI-11) принимается.
+  const diffFile = join(WORK, 'attest-needs-diff.diff');
+  writeFileSync(diffFile, `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n`, 'utf8');
+  const withDiffFlag = cat.attest({ result: claiming, files: [file], archetypes: [], root, diffFile });
+  check('тот же результат со --diff принимается', withDiffFlag.ok === true, withDiffFlag.problems.join('; '));
+
+  // --diff, не упоминающий изменённый файл, — не тихий пропуск, а отдельная проблема.
+  const foreignDiffFile = join(WORK, 'attest-foreign.diff');
+  writeFileSync(foreignDiffFile, 'diff --git a/src/ДругойМодуль.bsl b/src/ДругойМодуль.bsl\n', 'utf8');
+  const foreignDiff = cat.attest({ result: claiming, files: [file], archetypes: [], root, diffFile: foreignDiffFile });
+  check('--diff без упоминания файла прогона отвергается',
+    foreignDiff.ok === false && foreignDiff.problems.some((p) => /--diff не упоминает/.test(p)), foreignDiff.problems.join('; '));
+
+  // Регистр не должен ронять настоящий diff: `--files` из состояния гейта приходит в нижнем
+  // регистре (`run-journal.mjs normalizePath`), а заголовки git diff несут регистр рабочего
+  // дерева — на Windows это разные строки одного и того же пути.
+  const mixedCaseFile = 'src/module.bsl'; // то, что придёт из состояния гейта (в нижнем регистре)
+  const mixedCaseDiffFile = join(WORK, 'attest-mixed-case.diff');
+  writeFileSync(mixedCaseDiffFile, `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n`, 'utf8'); // регистр рабочего дерева: Module.bsl
+  const mixedCaseClaiming = { examined: withDiff, files: [mixedCaseFile], findings: [], unreadable: [] };
+  const mixedCase = cat.attest({ result: mixedCaseClaiming, files: [mixedCaseFile], archetypes: [], root, diffFile: mixedCaseDiffFile });
+  check('--diff с иным регистром пути принимается', mixedCase.ok === true, mixedCase.problems.join('; '));
+
+  // Легитимно нечем сравнивать (новый файл без истории): examined без needs:[diff], а
+  // --no-diff-available печатает честную запись и журналирует её.
+  const honest = { examined: withoutDiff, files: [file], findings: [], unreadable: [] };
+  const noneAvailable = cat.attest({ result: honest, files: [file], archetypes: [], root, noDiffAvailable: true });
+  check('--no-diff-available принимает examined без needs:[diff]', noneAvailable.ok === true, noneAvailable.problems.join('; '));
+  check('печатается skipped scope=ai-antipatterns-diff reason=no_diff',
+    noneAvailable.evidence.some((l) => /scope=ai-antipatterns-diff, planned=\[qg:AI-11\], reason=no_diff/.test(l)),
+    noneAvailable.evidence.join('\n'));
+  const noDiffRuns = journal.readJournal(root).filter((r) => r.scope === 'ai-antipatterns-diff');
+  check('--no-diff-available журналирует прогон', noDiffRuns.length > 0, JSON.stringify(noDiffRuns));
+
+  // Отчёт с этой записью обязан пройти строгий валидатор наравне с обычным `skipped`.
+  const scopeLine = '[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, config=default]\n';
+  const sentinelLine = '[qg sentinel: target=v8std, id=std454, status=found]\n';
+  const reportFixture = writeBytes(
+    'ev-catalog-no-diff.md',
+    '## quality evidence\n\n' + scopeLine + sentinelLine + noneAvailable.evidence.join('\n') + '\n' +
+      '[qg not_verified: dimension=compilation, reason=no_platform]\n'
+  );
+  const reportRun = run('tools/evidence-validator.mjs', [reportFixture, '--gate'], { env: { CLAUDE_PROJECT_DIR: root } });
+  check('отчёт со skipped scope=ai-antipatterns-diff проходит evidence-validator --gate',
+    reportRun.code === 0, reportRun.out.trim().slice(0, 300));
+
+  // --diff и --no-diff-available одновременно — заведомая ошибка вызова, а не молчаливый выбор.
+  const both = cat.attest({ result: claiming, files: [file], archetypes: [], root, diffFile, noDiffAvailable: true });
+  check('--diff и --no-diff-available вместе отвергаются', both.ok === false, both.problems.join('; '));
 }
 
 // Регрессия, которая в репозитории уже была: справочник языка подавал РАЗРЕШЕННЫЕ как выбор
@@ -6217,6 +6323,10 @@ section('План прогона печатает инструмент');
   check('в плане есть вход читателя с архетипом query', plan.tools.some((t) => /catalog\.mjs" index --archetypes query/.test(t)), plan.tools.join('\n'));
   check('справочники под архетип названы', plan.references.includes('bsl-query-optimization.md'), JSON.stringify(plan.references));
   check('требования к следу перечислены', plan.mustClose.includes('query-execution') && plan.mustClose.includes('compilation'), JSON.stringify(plan.mustClose));
+  // task-22: diff сохраняется ДО делегирования читателю, а attest получает --diff.
+  check('строка про git diff перед index/attest в инструментах',
+    plan.tools.some((t) => /^git diff HEAD --/.test(t)), plan.tools.join('\n'));
+  check('строка attest несёт --diff', plan.tools.some((t) => /catalog\.mjs" attest.*--diff/.test(t)), plan.tools.join('\n'));
   const text = run('tools/gate.mjs', ['plan', '--files', file, '--no-analyzer'], { env: { QG_PROJECT_DIR: root } });
   check('текстовый план содержит разделы', /## Профиль/.test(text.out) && /## Инструменты/.test(text.out), text.out.slice(0, 400));
 

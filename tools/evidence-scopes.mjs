@@ -201,6 +201,17 @@ export const SCOPES = {
     granularity: 'files',
     applies: ['.bsl', '.os'],
   },
+  // Признаки needs: [diff] (сегодня — qg:AI-11) проверяются не по коду, а по сравнению версий,
+  // которого у attest без --diff нет: заявлять их examined в этом случае значило бы повторять
+  // дефект, из-за которого скоуп появился (task-22, разбор — AI-11.md). Строку печатает
+  // `catalog.mjs attest --no-diff-available`, когда сравнивать действительно нечем (новый файл
+  // без истории). У `applied` этот скоуп не бывает — проход по needs:[diff]-признакам при
+  // наличии дифа закрывает сам `ai-antipatterns`.
+  'ai-antipatterns-diff': {
+    layer: 'code',
+    tool: 'tools/catalog.mjs',
+    about: 'признаки каталога, требующие сравнения версий (needs: [diff]), когда diff недоступен',
+  },
 
   // --- контур arch ---------------------------------------------------------
   'module-responsibility': {

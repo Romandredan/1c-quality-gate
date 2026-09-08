@@ -14,6 +14,7 @@
  *   node tools/catalog.mjs card qg:AI-07
  *   node tools/catalog.mjs list --json
  *   node tools/catalog.mjs attest --result <файл.json> --files <f> [<f> ...] [--archetypes a,b]
+ *                                  [--diff <файл> | --no-diff-available]
  */
 
 import { readFileSync, existsSync } from 'node:fs';
@@ -85,14 +86,74 @@ function diffRemovedLinesOf(fileRel, root) {
   return { ok: true, removed: parseRemovedLines(diff.stdout || '') };
 }
 
-export function attest({ result, files, archetypes = [], root = projectRoot() }) {
+/** Строки удалённого пути к файлу без ведущего `./`, слэши приведены к прямым. */
+function posixPath(f) {
+  return String(f).split(sep).join('/').replace(/^\.\//, '');
+}
+
+/**
+ * Файл `--diff`: настоящее сравнение версий, а не пустышка или диф от других файлов.
+ *
+ * Диф не строит сам attest — он приходит от оркестратора (`git diff HEAD -- <файлы>`,
+ * сохранённый ДО делегирования читателю: у него нет оболочки). Здесь только проверка, что
+ * переданный файл годится: непустой и упоминает каждый файл из `--files` — без этого пустой
+ * или чужой файл, подставленный за `--diff`, проходил бы точно так же, как настоящий, и
+ * признак `needs: [diff]` снова заявлялся бы без сравнения версий за ним.
+ */
+function loadDiff(diffFile, files, root, problems) {
+  if (!diffFile) return null;
+  let text;
+  try {
+    text = readFileSync(resolve(root, diffFile), 'utf8');
+  } catch {
+    problems.push(`--diff указывает на файл, который не читается: ${diffFile}`);
+    return null;
+  }
+  if (!text.trim()) {
+    problems.push(`--diff файл пуст: сравнения версий в нём нет (${diffFile})`);
+    return null;
+  }
+  // Регистр без строгости: `--files` приходит из состояния гейта уже в нижнем регистре
+  // (`run-journal.mjs normalizePath`), а заголовки диффа несут регистр рабочего дерева —
+  // `Module.bsl` против `module.bsl` для одного и того же файла на Windows. Строгое
+  // сравнение отвергало бы настоящий diff как «не упоминает файл», а это дороже пропуска.
+  const textLower = text.toLowerCase();
+  const missing = files.filter((f) => !textLower.includes(posixPath(f).toLowerCase()));
+  if (missing.length) {
+    problems.push(`--diff не упоминает файлы состава прогона: ${missing.join(', ')} (${diffFile})`);
+    return null;
+  }
+  return text;
+}
+
+export function attest({ result, files, archetypes = [], root = projectRoot(), diffFile = null, noDiffAvailable = false }) {
   const problems = [];
   const cards = readCatalog();
-  const expected = expectedExamined(archetypes, cards);
+  const expectedAll = expectedExamined(archetypes, cards);
+  // Признаки, которым для проверки нужно сравнение версий (сегодня — только qg:AI-11): без
+  // переданного `--diff` их нечем проверить, и заявлять проход по ним — тот самый разрыв
+  // между «числится examined» и «действительно проверено» (task-22).
+  const needsDiff = activeCards(cards, archetypes)
+    .filter((c) => !c.tool && (c.needs || []).includes('diff'))
+    .map((c) => c.id);
+
   const examined = Array.isArray(result?.examined) ? [...new Set(result.examined)].sort() : [];
-  if (JSON.stringify(examined) !== JSON.stringify(expected)) {
-    const missing = expected.filter((id) => !examined.includes(id));
-    const extra = examined.filter((id) => !expected.includes(id));
+
+  if (diffFile && noDiffAvailable) problems.push('--diff и --no-diff-available нельзя передавать одновременно');
+  const diffText = loadDiff(diffFile, files, root, problems);
+  const diffAvailable = diffText !== null;
+
+  if (!diffAvailable) {
+    for (const id of examined.filter((x) => needsDiff.includes(x))) {
+      problems.push(`признак ${id} требует сравнения версий, но --diff не передан`);
+    }
+  }
+
+  const expected = diffAvailable ? expectedAll : expectedAll.filter((id) => !needsDiff.includes(id));
+  const examinedForCompare = diffAvailable ? examined : examined.filter((id) => !needsDiff.includes(id));
+  if (JSON.stringify(examinedForCompare) !== JSON.stringify(expected)) {
+    const missing = expected.filter((id) => !examinedForCompare.includes(id));
+    const extra = examinedForCompare.filter((id) => !expected.includes(id));
     problems.push(`examined не совпадает с активными признаками каталога: не хватает [${missing.join(', ')}], лишние [${extra.join(', ')}]`);
   }
 
@@ -188,6 +249,15 @@ export function attest({ result, files, archetypes = [], root = projectRoot() })
     evidence.push(`[qg applied: layer=code, scope=${scope}, ids=[${ids.join(',')}], verdict=${verdict}]`);
     recordRun({ scope, tool: TOOL, verdict: hit ? 'violation' : 'clean', files, root });
   }
+
+  // Честность на случай, когда сравнивать действительно не с чем (новый файл без истории,
+  // репозиторий без git): --no-diff-available печатает эту запись явно, а не оставляет
+  // needs:[diff]-признаки молча выпавшими из examined без единого следа их отсутствия.
+  if (noDiffAvailable && !diffAvailable && needsDiff.length > 0) {
+    evidence.push(`[qg skipped: layer=code, scope=ai-antipatterns-diff, planned=[${needsDiff.join(',')}], reason=no_diff]`);
+    recordRun({ scope: 'ai-antipatterns-diff', tool: TOOL, verdict: 'no_diff', files, root });
+  }
+
   return { ok: true, problems: [], evidence };
 }
 
@@ -198,6 +268,8 @@ function parseArgs(argv) {
     if (a === '--files') { while (argv[i + 1] && !argv[i + 1].startsWith('--')) out.files.push(argv[++i]); }
     else if (a === '--archetypes') out.archetypes = String(argv[++i] || '').split(',').map((s) => s.trim()).filter(Boolean);
     else if (a === '--result') out.result = argv[++i];
+    else if (a === '--diff') out.diff = argv[++i];
+    else if (a === '--no-diff-available') out.noDiffAvailable = true;
     else if (a === '--json') out.json = true;
     else out._ = [...(out._ || []), a];
   }
@@ -227,13 +299,22 @@ function main(argv) {
     case 'attest': {
       if (!args.result || args.files.length === 0) { process.stderr.write('нужны --result <json> и --files <f> ...\n'); return 1; }
       const result = JSON.parse(readFileSync(args.result, 'utf8'));
-      const r = attest({ result, files: args.files, archetypes: args.archetypes });
+      const r = attest({
+        result,
+        files: args.files,
+        archetypes: args.archetypes,
+        diffFile: args.diff || null,
+        noDiffAvailable: !!args.noDiffAvailable,
+      });
       if (!r.ok) { process.stderr.write('Результат читателя отвергнут:\n' + r.problems.map((p) => `  - ${p}`).join('\n') + '\n'); return 2; }
       process.stdout.write(r.evidence.join('\n') + '\n');
       return 0;
     }
     default:
-      process.stderr.write('Команды: index | card <ID> | list [--json] | attest --result <json> --files <f>...\n');
+      process.stderr.write(
+        'Команды: index | card <ID> | list [--json] | ' +
+          'attest --result <json> --files <f>... [--diff <файл> | --no-diff-available]\n'
+      );
       return 1;
   }
 }
