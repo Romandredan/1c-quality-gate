@@ -494,8 +494,11 @@ const TOOL_ORDER = [
   'tools/rename-check.mjs',
   'tools/xml/orphan-check.mjs',
   'tools/xml/uuid-unique.mjs',
+  // Под этим именем — все пофайловые валидаторы XML, каждый файл идёт в свой (`xmlFileValidator`);
+  // форма — отдельной строкой ниже, корни расширения и внешнего объекта — строкой cfe-validate.
   'tools/xml/meta-validate.py',
   'tools/xml/form-validate.py',
+  'tools/xml/cfe-validate.py',
   'tools/catalog.mjs',
 ];
 
@@ -542,12 +545,101 @@ function quoteAll(files) {
  * которому раскладка не соответствует, помечается плейсхолдером — приближение заявлено,
  * а не выдано за точный разбор.
  */
-function xmlTreeRoot(file) {
+function xmlTreeRoot(file, rootDir) {
   const cf = file.match(/^(src\/cf)\//i);
   if (cf) return cf[1];
   const cfe = file.match(/^(src\/cfe\/[^/]+)\//i);
   if (cfe) return cfe[1];
+  const ext = externalRoot(file, rootDir);
+  if (ext) return ext.root;
   return '<каталог выгрузки — src/cf или src/cfe/<Имя>>';
+}
+
+/**
+ * Корень внешней обработки или отчёта: каталог, где лежат описание `<Имя>.xml` и одноимённый
+ * каталог объекта. Ищется по раскладке и наличию описания на диске; берётся самое внешнее
+ * совпадение — ближе к файлу лежат описания формы и макета (`Forms/<Имя>.xml`) того же объекта.
+ * Файл внутри выгрузки конфигурации (`src/cf`, `src/cfe/<Имя>`) внешним не бывает: там у
+ * каждого объекта тоже есть `<Имя>.xml` рядом с каталогом.
+ */
+function externalRoot(file, rootDir) {
+  if (!rootDir || /^src\/cfe?\//i.test(file)) return null;
+  const segs = file.split('/');
+  for (let i = 1; i < segs.length; i++) {
+    const dir = segs.slice(0, i).join('/');
+    if (existsSync(join(rootDir, `${dir}.xml`))) {
+      return { root: segs.slice(0, i - 1).join('/') || '.', descriptor: `${dir}.xml` };
+    }
+  }
+  // Сам файл — описание, рядом одноимённый каталог объекта.
+  if (/\.xml$/i.test(file) && existsSync(join(rootDir, file.replace(/\.xml$/i, '')))) {
+    return { root: segs.slice(0, -1).join('/') || '.', descriptor: file };
+  }
+  return null;
+}
+
+/**
+ * Описание управляемой формы: `Forms/<Имя>/Ext/Form.xml` (у общей формы — `CommonForms/…`).
+ * Прежний шаблон ждал `Ext/Form/Form.xml` — так лежит модуль формы (`Ext/Form/Module.bsl`), а не
+ * её описание, — и валидатор форм план не называл ни разу.
+ */
+const FORM_XML_PATH = /(^|\/)(Common)?Forms\/[^/]+\/Ext\/Form\.xml$/i;
+
+/**
+ * Пофайловый валидатор XML по раскладке выгрузки — либо null, если отдельного нет и файл
+ * проверяется валидатором корня (`cfe-validate.py`, `epf-validate.py`).
+ *
+ * Зачем. План отправлял в `meta-validate.py` каждый XML правки, а тот понимает только описания
+ * объектов: на `Configuration.xml`, описаниях формы и макета, самом макете схемы компоновки,
+ * описании внешнего отчёта и справке он давал `violation:qg:XML-STRUCT` — шесть ложных нарушений
+ * из восьми видов файлов, проверено на живой выгрузке (третий и четвёртый A/B). Модель переносила
+ * их в след дословно. Таблица «вид файла → валидатор» — та же, что в навыке xml-structure-review.
+ *
+ * Тип макета берётся из его описания (`Templates/<Имя>.xml`, поле `TemplateType`), а не из
+ * содержимого: схема компоновки и табличный документ лежат по одному и тому же пути.
+ */
+function xmlFileValidator(file, rootDir) {
+  if (FORM_XML_PATH.test(file)) return 'tools/xml/form-validate.py';
+  const tpl = file.match(/^(.*\/Templates\/[^/]+)\/Ext\/Template\.xml$/i);
+  if (tpl) {
+    let type = '';
+    try {
+      type = (readFileSync(join(rootDir, `${tpl[1]}.xml`), 'utf8').match(/<TemplateType>\s*([^<\s]+)/) || [])[1] || '';
+    } catch {
+      /* описания нет — его отсутствие ловит валидатор корня */
+    }
+    if (type === 'DataCompositionSchema') return 'tools/xml/skd-validate.py';
+    if (type === 'SpreadsheetDocument') return 'tools/xml/mxl-validate.py';
+    return null;
+  }
+  if (/\/Roles\/[^/]+(\.xml|\/Ext\/Rights\.xml)$/i.test(file)) return 'tools/xml/role-validate.py';
+  if (/\/Ext\/CommandInterface\.xml$/i.test(file)) return 'tools/xml/interface-validate.py';
+  if (/(^|\/)Configuration\.xml$/i.test(file)) return null; // корень — валидатор расширения
+  if (/\/Ext\//i.test(file)) return null; // служебные файлы объекта: справка, предопределённые
+  if (/\/(Forms|Templates|Commands)\/[^/]+\.xml$/i.test(file)) return null; // описание подчинённого — в составе владельца
+  if (/(^|\/)Subsystems\//i.test(file)) return 'tools/xml/subsystem-validate.py';
+  if (externalRoot(file, rootDir)?.descriptor === file) return null; // описание внешнего объекта — epf-validate
+  return 'tools/xml/meta-validate.py';
+}
+
+/**
+ * Валидаторы корня: расширение целиком (`cfe-validate.py` — заимствования, порядок состава,
+ * типы полей схем компоновки на незаимствованные объекты) и внешний объект (`epf-validate.py` —
+ * регистрация форм и макетов в описании). Основная конфигурация целиком не валидируется: это
+ * минуты работы и почти одни старые находки, а план проверяет то, что правка тронула.
+ */
+function xmlRootValidators(xmlFiles, rootDir) {
+  const out = new Map();
+  for (const f of xmlFiles) {
+    const cfe = f.match(/^(src\/cfe\/[^/]+)\//i);
+    if (cfe) {
+      out.set(`cfe:${cfe[1]}`, `python "$QG/tools/xml/cfe-validate.py" -Path "${cfe[1]}"`);
+      continue;
+    }
+    const ext = externalRoot(f, rootDir);
+    if (ext) out.set(`epf:${ext.descriptor}`, `python "$QG/tools/xml/epf-validate.py" -Path "${ext.descriptor}"`);
+  }
+  return [...out.values()];
 }
 
 /**
@@ -565,9 +657,10 @@ function catalogScopesApply(resolvedCode, bslFiles) {
 }
 
 /** Строит команды инструментов в порядке `TOOL_ORDER`, каждая — с буквальным `$QG`. */
-function buildToolCommands({ files, resolvedCode, archetypeLabels, bslFiles }) {
+function buildToolCommands({ files, resolvedCode, archetypeLabels, bslFiles, rootDir }) {
   const appliesMap = toolAppliesMap();
-  const hasXmlChange = files.some((f) => /\.xml$/i.test(f));
+  const xmlFiles = files.filter((f) => /\.xml$/i.test(f));
+  const hasXmlChange = xmlFiles.length > 0;
   const lines = [];
 
   for (const tool of TOOL_ORDER) {
@@ -605,28 +698,30 @@ function buildToolCommands({ files, resolvedCode, archetypeLabels, bslFiles }) {
         break;
       case 'tools/xml/orphan-check.mjs':
         if (hasXmlChange) {
-          const roots = [...new Set(files.filter((f) => /\.xml$/i.test(f)).map(xmlTreeRoot))].sort();
+          const roots = [...new Set(xmlFiles.map((f) => xmlTreeRoot(f, rootDir)))].sort();
           for (const r of roots) lines.push(`node "$QG/tools/xml/orphan-check.mjs" "${r}"`);
         }
         break;
       case 'tools/xml/uuid-unique.mjs':
         if (hasXmlChange) {
-          const roots = [...new Set(files.filter((f) => /\.xml$/i.test(f)).map(xmlTreeRoot))].sort();
+          const roots = [...new Set(xmlFiles.map((f) => xmlTreeRoot(f, rootDir)))].sort();
           for (const r of roots) lines.push(`node "$QG/tools/xml/uuid-unique.mjs" "${r}"`);
         }
         break;
       case 'tools/xml/meta-validate.py':
-        if (hasXmlChange) {
-          for (const f of files.filter((f) => /\.xml$/i.test(f))) {
-            lines.push(`python "$QG/tools/xml/meta-validate.py" -Path "${f}"`);
-          }
+        for (const f of xmlFiles) {
+          const v = xmlFileValidator(f, rootDir);
+          if (v && v !== 'tools/xml/form-validate.py') lines.push(`python "$QG/${v}" -Path "${f}"`);
         }
+        break;
+      case 'tools/xml/cfe-validate.py':
+        lines.push(...xmlRootValidators(xmlFiles, rootDir));
         break;
       case 'tools/xml/form-validate.py':
         if (hasXmlChange) {
           // Только реальные Form.xml — form-validate проверяет связность обработчиков формы,
           // а не любую XML.
-          for (const f of files.filter((f) => /\/Forms?\/[^/]+\/(Ext\/Form\/)?Form\.xml$/i.test(f))) {
+          for (const f of files.filter((f) => FORM_XML_PATH.test(f))) {
             lines.push(`python "$QG/tools/xml/form-validate.py" -Path "${f}"`);
           }
         }
@@ -866,7 +961,7 @@ function cmdPlan(args) {
   write(`${profile.scopeLine}\n\n`);
 
   const bslFiles = files.filter((f) => /\.(bsl|os)$/i.test(f));
-  const tools = buildToolCommands({ files, resolvedCode: resolved.code, archetypeLabels, bslFiles });
+  const tools = buildToolCommands({ files, resolvedCode: resolved.code, archetypeLabels, bslFiles, rootDir });
   write('## Инструменты (в этом порядке)\n');
   for (const t of tools) write(`${t}\n`);
   write('\n');

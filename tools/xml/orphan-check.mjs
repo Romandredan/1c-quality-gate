@@ -135,6 +135,25 @@ function readOnDisk(root) {
   return { found, unknownDirs };
 }
 
+/** Корень внешней обработки или отчёта: рядом лежит описание с корнем `ExternalReport`/`ExternalDataProcessor`. */
+function isExternalObjectRoot(root) {
+  let entries;
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return false;
+  }
+  return entries
+    .filter((e) => e.toLowerCase().endsWith('.xml'))
+    .some((e) => {
+      try {
+        return /<External(Report|DataProcessor)[\s>]/.test(readFileSync(join(root, e), 'utf8').slice(0, 4096));
+      } catch {
+        return false;
+      }
+    });
+}
+
 function main(argv) {
   const args = argv.slice(2);
   const asJson = args.includes('--json');
@@ -147,6 +166,23 @@ function main(argv) {
 
   const configXml = join(root, 'Configuration.xml');
   if (!existsSync(configXml)) {
+    // Внешняя обработка или отчёт: состава конфигурации у них нет по устройству формата, и
+    // сверять не с чем. Раньше инструмент выходил с ошибкой и без отметки в журнале — тогда
+    // законной записи «неприменимо» не существовало вовсе: валидатор требует прогона для
+    // `skipped reason=not_applicable`, а прогона не было. Модель в A/B-прогоне на внешнем отчёте
+    // так и оставила сверку без следа. Регистрацию форм и макетов внешнего объекта проверяет
+    // `epf-validate.py`.
+    if (isExternalObjectRoot(root)) {
+      const evidence = '[qg skipped: layer=xml, scope=registration-check, planned=[qg:XML-ORPHAN], reason=not_applicable]';
+      recordRun({ scope: 'registration-check', tool: 'tools/xml/orphan-check.mjs', verdict: 'not_applicable', files: [root] });
+      process.stdout.write(
+        asJson
+          ? JSON.stringify({ root, external: true, evidence }, null, 2) + '\n'
+          : 'Внешняя обработка или отчёт: состава конфигурации нет, сверка «диск ↔ состав» неприменима.\n\n' +
+              `## quality evidence\n\n${evidence}\n`
+      );
+      return 0;
+    }
     process.stderr.write(`Не найден Configuration.xml в ${root}\n`);
     return 2;
   }

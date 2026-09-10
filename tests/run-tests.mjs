@@ -2579,6 +2579,8 @@ const mustContain = [
   ['skills/bsl-code-review/SKILL.md', 'НЕ РАЗОБРАНО', 'неразобранные файлы называются явно'],
   ['skills/xml-structure-review/SKILL.md', '-Path', 'универсальное имя параметра валидаторов XML'],
   ['skills/xml-structure-review/SKILL.md', 'uuid-unique.mjs', 'контур прогоняет проверку уникальности UUID'],
+  ['skills/xml-structure-review/SKILL.md', 'Находку снимает только прочитанный источник', 'довод против находки опирается на прочитанный файл'],
+  ['skills/xml-structure-review/SKILL.md', 'Принадлежность считается у самого объекта', 'собственная команда в заимствованном отчёте требует прав'],
   ['skills/xml-structure-review/SKILL.md', 'Графические схемы не читаются', 'исключение для карт маршрута названо, а не подразумевается'],
   ['agents/xml-runner.md', 'uuid-unique.mjs', 'субагент знает про проверку UUID'],
   ['skills/xml-structure-review/SKILL.md', 'reason=lxml_unavailable', 'падение валидатора без lxml — не находка в XML'],
@@ -3744,6 +3746,87 @@ section('Находка 🔴/🟠 из текста отчёта закрыта 
     JSON.stringify(res.problems.map((p) => p.message.slice(0, 90))));
   check('признак логики в verdict не считается вымышленным',
     !res.problems.some((p) => /LOGIC-CONTRACT/.test(p.message) && /не из реестра/.test(p.message)));
+}
+
+// ---------------------------------------------------------------------------
+section('План направляет каждый XML в свой валидатор');
+
+// Дефект, найденный третьим и четвёртым A/B: план отправлял в meta-validate.py каждый XML правки,
+// и тот давал ложные violation на Configuration.xml, описаниях формы и макета, макете схемы
+// компоновки, описании внешнего отчёта и справке. Валидатор форм план не называл ни разу:
+// шаблон ждал Ext/Form/Form.xml вместо Ext/Form.xml. Сверка «диск ↔ состав» на внешнем отчёте
+// выходила с ошибкой без отметки в журнале — законной записи «неприменимо» не существовало.
+{
+  const MDO = (tag, extra = '') =>
+    `<?xml version="1.0" encoding="UTF-8"?>\n<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses"><${tag} uuid="00000000-0000-0000-0000-000000000001"><Properties><Name>X</Name>${extra}</Properties></${tag}></MetaDataObject>\n`;
+  const mkRoot = (name) => {
+    const r = join(WORK, name);
+    rmSync(r, { recursive: true, force: true });
+    mkdirSync(r, { recursive: true });
+    execFileSync('git', ['init', '-q'], { cwd: r });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: r });
+    writeFileSync(join(r, '.1c-quality-gate.json'), '{}', 'utf8');
+    return r;
+  };
+  const put = (r, rel, text) => {
+    mkdirSync(dirname(join(r, rel)), { recursive: true });
+    writeFileSync(join(r, rel), text, 'utf8');
+  };
+  const xmlLines = (out) => out.split('\n').filter((l) => /tools\/xml\//.test(l));
+
+  // Расширение: заимствованный отчёт со схемой компоновки, справочник, состав.
+  const cfeRoot = mkRoot('plan-xml-cfe');
+  const cfe = {
+    config: 'src/cfe/Расш/Configuration.xml',
+    report: 'src/cfe/Расш/Reports/Отчет.xml',
+    tplDesc: 'src/cfe/Расш/Reports/Отчет/Templates/Схема.xml',
+    tpl: 'src/cfe/Расш/Reports/Отчет/Templates/Схема/Ext/Template.xml',
+    catalog: 'src/cfe/Расш/Catalogs/Спр.xml',
+  };
+  put(cfeRoot, cfe.config, MDO('Configuration', '<ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose>'));
+  put(cfeRoot, cfe.report, MDO('Report'));
+  put(cfeRoot, cfe.tplDesc, MDO('Template', '<TemplateType>DataCompositionSchema</TemplateType>'));
+  put(cfeRoot, cfe.tpl, '<?xml version="1.0" encoding="UTF-8"?>\n<DataCompositionSchema/>\n');
+  put(cfeRoot, cfe.catalog, MDO('Catalog'));
+  const cfePlan = run('tools/gate.mjs', ['plan', '--no-analyzer', '--files', ...Object.values(cfe)], { env: { QG_PROJECT_DIR: cfeRoot } });
+  const cfeXml = xmlLines(cfePlan.out);
+  const metaTargets = cfeXml.filter((l) => l.includes('meta-validate.py')).map((l) => l.match(/-Path "([^"]+)"/)[1]).sort();
+  check('расширение: валидатор объектов получает только описания объектов',
+    JSON.stringify(metaTargets) === JSON.stringify([cfe.catalog, cfe.report].sort()), cfeXml.join(' | '));
+  check('расширение: макет схемы компоновки — в skd-validate',
+    cfeXml.some((l) => l.includes('skd-validate.py') && l.includes(cfe.tpl)), cfeXml.join(' | '));
+  check('расширение: корень — в cfe-validate',
+    cfeXml.some((l) => l.includes('cfe-validate.py') && l.includes('-Path "src/cfe/Расш"')), cfeXml.join(' | '));
+
+  // Внешний отчёт: описание, форма, справка — вне выгрузки конфигурации.
+  const erfRoot = mkRoot('plan-xml-erf');
+  const erf = {
+    desc: 'src/erf/Отч/ВнОтчет.xml',
+    formDesc: 'src/erf/Отч/ВнОтчет/Forms/Форма.xml',
+    form: 'src/erf/Отч/ВнОтчет/Forms/Форма/Ext/Form.xml',
+    help: 'src/erf/Отч/ВнОтчет/Ext/Help.xml',
+  };
+  put(erfRoot, erf.desc, MDO('ExternalReport'));
+  put(erfRoot, erf.formDesc, MDO('Form'));
+  put(erfRoot, erf.form, '<?xml version="1.0" encoding="UTF-8"?>\n<Form/>\n');
+  put(erfRoot, erf.help, '<?xml version="1.0" encoding="UTF-8"?>\n<Help/>\n');
+  const erfPlan = run('tools/gate.mjs', ['plan', '--no-analyzer', '--files', ...Object.values(erf)], { env: { QG_PROJECT_DIR: erfRoot } });
+  const erfXml = xmlLines(erfPlan.out);
+  check('внешний отчёт: ни одного файла в валидатор объектов', !erfXml.some((l) => l.includes('meta-validate.py')), erfXml.join(' | '));
+  check('внешний отчёт: форма — в form-validate (шаблон пути Ext/Form.xml)',
+    erfXml.some((l) => l.includes('form-validate.py') && l.includes(erf.form)), erfXml.join(' | '));
+  check('внешний отчёт: описание — в epf-validate', erfXml.some((l) => l.includes('epf-validate.py') && l.includes(erf.desc)), erfXml.join(' | '));
+  check('внешний отчёт: у сверки состава настоящий корень, а не заглушка',
+    erfXml.some((l) => l.includes('orphan-check.mjs') && l.includes('"src/erf/Отч"')) && !erfPlan.out.includes('<каталог выгрузки'),
+    erfXml.join(' | '));
+
+  // Сверка состава на корне внешнего отчёта: законная запись «неприменимо» и отметка в журнале.
+  const oc = run('tools/xml/orphan-check.mjs', [join(erfRoot, 'src/erf/Отч')], { env: { CLAUDE_PROJECT_DIR: erfRoot } });
+  check('orphan-check на внешнем отчёте завершается успешно', oc.code === 0, `код ${oc.code}: ${oc.out.trim().slice(0, 160)}`);
+  check('orphan-check на внешнем отчёте печатает skipped not_applicable',
+    oc.out.includes('[qg skipped: layer=xml, scope=registration-check, planned=[qg:XML-ORPHAN], reason=not_applicable]'), oc.out.trim().slice(-200));
+  const journal = readFileSync(join(erfRoot, '.claude', '.state', 'qg-runs.jsonl'), 'utf8');
+  check('orphan-check на внешнем отчёте отмечается в журнале', /"scope":"registration-check"/.test(journal), journal.slice(-200));
 }
 
 // ---------------------------------------------------------------------------
