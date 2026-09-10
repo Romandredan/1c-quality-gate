@@ -3664,6 +3664,89 @@ section('Реестр признаков — вымышленный qg:* не п
 }
 
 // ---------------------------------------------------------------------------
+section('Находка 🔴/🟠 из текста отчёта закрыта записью violation');
+
+// Дефект третьего A/B: блокирующая находка слоя 2 и ещё одна существенная стояли только в
+// тексте отчёта, в следе ни одна запись их не покрывала (признака под дефект логики не было),
+// и валидатор принял отчёт с нулём предупреждений. Сверка разбирает прозу приближённо, поэтому
+// тесты держат именно правила, отделяющие находку от похожего на неё текста.
+{
+  const v = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+  const scopesMod = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-scopes.mjs')).href);
+  const uncovered = (text) => v.uncoveredFindings(text, v.extractRecords(text)).map((f) => f.title);
+
+  for (const id of ['qg:LOGIC-CONTRACT', 'qg:LOGIC-CASE-LOSS']) {
+    check(`${id} в реестре и проверяется моделью`, scopesMod.QG_IDS[id] && scopesMod.QG_IDS[id].tool === null,
+      JSON.stringify(scopesMod.QG_IDS[id]));
+  }
+
+  // Разметка разделами важности («## 🔴 Critical» и находки под ним).
+  const byMarkers = [
+    '# Отчёт',
+    'Вердикт: одна блокирующая (🔴) и одна существенная — в абзаце это не находки.',
+    '## 🔴 Critical',
+    '### C1. Флажок не влияет на отбор',
+    '**Правило:** qg:LOGIC-CONTRACT',
+    '```',
+    '## 🔴 заголовок внутри блока кода — не находка',
+    '```',
+    '## 🟠 Major',
+    '### M1. Два значения молча выпадают',
+    '**Правило:** qg:LOGIC-CASE-LOSS',
+    '### M2. Безопасный режим выключен',
+    '#### Контр-сигнал',
+    'Проверен по #std669.',
+    '## 🟡 Minor',
+    '### N1. Опечатка в описании',
+    '## Отклонённые находки',
+    '### 🔴 Отклонена: всё сломано',
+    'qg:AI-01',
+    '## Что осталось непроверенным',
+    '### 🟠 Не проверено: компиляция',
+    '',
+    '## quality evidence',
+    '[qg applied: layer=code, scope=logic-review, ids=[qg:LOGIC-CONTRACT], verdict=violation:qg:LOGIC-CONTRACT]',
+    '[qg applied: layer=code, scope=logic-review, ids=[std669], verdict=violation:std669]',
+    '',
+  ].join('\n');
+  const got = uncovered(byMarkers);
+  check('незакрытой остаётся только находка без записи violation', JSON.stringify(got) === JSON.stringify(['M1. Два значения молча выпадают']),
+    JSON.stringify(got));
+
+  // Вложенная разметка («### 🟠 Major» → «#### 1.») и находка с важностью в собственном
+  // заголовке под нейтральным разделом.
+  const nested = [
+    '## Находки',
+    '### 🟠 Major',
+    '#### 1. Безопасный режим выключен',
+    '**Правило:** #std669',
+    '#### 2. Скрытый отбор без пояснения',
+    'Кода диагностики нет.',
+    '## Контур архитектуры',
+    '### 🟠 А1. Одно знание в четырёх местах',
+    '**Признак:** qg:ARCH-A3',
+    '### Признаки по графу вызовов — находок нет',
+    'qg:ARCH-A9 проверен.',
+    '',
+    '## quality evidence',
+    '[qg applied: layer=code, scope=logic-review, ids=[std669], verdict=violation:std669]',
+    '[qg applied: layer=arch, scope=module-responsibility, ids=[qg:ARCH-A3], verdict=violation:qg:ARCH-A3]',
+    '',
+  ].join('\n');
+  const gotNested = v.uncoveredFindings(nested, v.extractRecords(nested));
+  check('вложенная разметка: незакрыта одна находка, и без идентификаторов',
+    gotNested.length === 1 && gotNested[0].title.startsWith('2.') && gotNested[0].ids.length === 0, JSON.stringify(gotNested));
+
+  // Сквозь validate(): предупреждение, а не ошибка, в обоих режимах.
+  const res = v.validate(byMarkers, { gate: false });
+  const warn = res.problems.find((p) => /не закрыта в следе/.test(p.message));
+  check('validate называет незакрытую находку предупреждением', warn && warn.severity === 'warn' && /M1\./.test(warn.message),
+    JSON.stringify(res.problems.map((p) => p.message.slice(0, 90))));
+  check('признак логики в verdict не считается вымышленным',
+    !res.problems.some((p) => /LOGIC-CONTRACT/.test(p.message) && /не из реестра/.test(p.message)));
+}
+
+// ---------------------------------------------------------------------------
 section('Реестр признаков — полнота: источники истины не разъезжаются');
 
 {
@@ -6110,6 +6193,25 @@ section('Профиль изменения считает инструмент')
     check('checklist по архетипам не разъехался с брифом Task 12', mismatches.length === 0, mismatches.join('; '));
   }
 
+  // Дефект третьего A/B: разделы чеклиста без архетипа-хозяина план не печатал никогда, а навык
+  // велит читать только напечатанное — раздел 16 «Локализация» стал недостижим, и находка про
+  // пользовательские тексты литералами в запросе пропала. Инвариант: каждый раздел чеклиста
+  // либо общий (BASE_CHECKLIST), либо назван архетипом; и наоборот — номер без раздела не бывает.
+  {
+    const text = readFileSync(join(ROOT, 'skills/bsl-code-review/references/checklist-code.md'), 'utf8');
+    const sections = [...text.matchAll(/^## (\d+)\./gm)].map((m) => Number(m[1]));
+    const owned = new Set(prof.ARCHETYPES.flatMap((a) => a.checklist || []));
+    const base = new Set(prof.BASE_CHECKLIST);
+    const orphan = sections.filter((s) => !base.has(s) && !owned.has(s));
+    check('каждый раздел checklist-code.md либо общий, либо назван архетипом',
+      sections.length > 0 && orphan.length === 0, `без хозяина: ${orphan.join(', ')}`);
+    const dangling = [...base, ...owned].filter((s) => !sections.includes(s));
+    check('BASE_CHECKLIST и архетипы не ссылаются на несуществующие разделы', dangling.length === 0,
+      `нет таких разделов: ${dangling.join(', ')}`);
+    const both = [...base].filter((s) => owned.has(s));
+    check('общий раздел не повторяется в архетипе', both.length === 0, `в обоих: ${both.join(', ')}`);
+  }
+
   // Дефект A/B-прогона: реальная правка «один новый метод + правки в двух существующих
   // методах» (+33/-2, один файл) давала C1 — объём считался только по числу строк/файлов, а
   // определение C1 требует ещё и «правку внутри существующих методов; нет новых экспортов,
@@ -6431,6 +6533,11 @@ section('План прогона печатает инструмент');
   const expectedKeys = ['profile', 'scopeLine', 'tools', 'references', 'checklist', 'modelPasses', 'contours', 'mustClose'];
   const missingKeys = expectedKeys.filter((k) => !Object.prototype.hasOwnProperty.call(plan, k));
   check('в --json есть все ключи контракта', missingKeys.length === 0, `не хватает: ${missingKeys.join(', ')}`);
+  const { BASE_CHECKLIST } = await import(pathToFileURL(join(ROOT, 'tools', 'profile.mjs')).href);
+  check('план называет общие разделы чеклиста при любом архетипе',
+    BASE_CHECKLIST.every((s) => plan.checklist.includes(s)), JSON.stringify(plan.checklist));
+  check('текстовый план печатает общие разделы как «всегда»', /разделы 1, 2, 3, 4, 5, 11, 16, 17 — всегда/.test(text.out),
+    (text.out.match(/чеклист[^\n]*/) || [''])[0]);
 
   // Без --files и без взведённого гейта печатать план не для чего — отказ обязан быть
   // однозначным (не «пустой список файлов молча»), а не падением с кодом 0.

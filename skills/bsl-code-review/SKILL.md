@@ -134,9 +134,9 @@ license: MIT
 
 ### 3. Стандарты под архетип
 
-Не весь свод подряд — только релевантное: какие справочники открыть и какие разделы
-`checklist-code.md` прочесть под сработавший архетип — печатает план (`gate.mjs plan`);
-полный перечень по архетипам — `ARCHETYPES[*].refs` в `tools/profile.mjs`. Глубокая
+Не весь свод подряд — только релевантное: справочники и разделы `checklist-code.md`
+печатает план (`gate.mjs plan`) — общие разделы всегда, прочие под архетип; перечень —
+`BASE_CHECKLIST` и `ARCHETYPES` в `tools/profile.mjs`. Глубокая
 вложенность и длинные методы архетипом не считаются и в план не попадают — при такой правке
 открывай `bsl-refactoring.md` сам. Тексты самих стандартов запрашивай через MCP `v8std` по
 номеру.
@@ -202,10 +202,11 @@ license: MIT
 **Модель не дешевле основной:** уровень не ниже модели сессии. Расхождение с `advisor()` —
 сигнал, а не шум: код допускает два прочтения.
 
-**Слой заканчивается записью следа** — иначе его пропуск на C3 неотличим от прогона:
+**Слой заканчивается записью следа** — иначе его пропуск на C3 неотличим от прогона; дефект
+без своего признака — `qg:LOGIC-CONTRACT` или `qg:LOGIC-CASE-LOSS`:
 
 ```
-[qg applied: layer=code, scope=logic-review, ids=[qg:...], verdict=clean]
+[qg applied: layer=code, scope=logic-review, ids=[qg:LOGIC-CONTRACT], verdict=violation:qg:LOGIC-CONTRACT]
 [qg skipped: layer=code, scope=logic-review, reason=advisor_unavailable]
 ```
 
@@ -266,8 +267,7 @@ license: MIT
 [qg skipped: layer=code, scope=static-analysis, planned=[bslls:*], reason=analyzer_unavailable]
 ```
 
-Вторая строка — из тех, что печатает инструмент: `attribute-access` стал инструментальным, и
-написанная руками, она валидатор больше не проходит.
+Вторую строку печатает инструмент: написанная руками, она валидатор не проходит.
 
 Формат — `../quality-gate/references/evidence-format.md`.
 

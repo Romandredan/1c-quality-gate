@@ -317,6 +317,88 @@ function isCovered(file, covered) {
   return false;
 }
 
+// --- находки отчёта против записей violation ------------------------------------------
+//
+// Отчёт гейта — две части: проза для человека и след для машины. Валидатор читает след, гейт
+// снимается по нему же. Третий A/B показал дыру между ними: блокирующая находка и ещё одна
+// существенная стояли в прозе, а в следе ни одна запись их не закрывала — у дефекта логики
+// не было своего признака, — и валидатор принял отчёт с нулём предупреждений.
+//
+// Цель узкая: находка 🔴/🟠 покрыта записью `verdict=violation:<id>` хотя бы по одному
+// идентификатору, названному в её тексте. Это не сверка «след противоречит прозе»: `clean`
+// по соседнему признаку рядом с находкой логики — не противоречие.
+//
+// Разбор прозы приближённый, поэтому только предупреждение. Три правила держат его от
+// ложных срабатываний: важность берётся только из заголовка (в абзаце 🔴 бывает цитатой);
+// идентификаторы ищутся по всему телу находки, а не в одной строке «Правило:» — форма находок
+// в отчётах разная; разделы отклонённого, непроверенного и предложений находками не считаются.
+const SEVERE = ['🔴', '🟠'];
+const SEVERITY_LEAD = /^(🔴|🟠|🟡|🟢|⚪)\s*(.*)$/u;
+const SEVERITY_LABEL =
+  /^(critical|major|minor|blocker|блокирующ\S*|критическ\S*|существенн\S*|мелк\S*|второстепенн\S*)?[\s\d().:—–-]*$/i;
+const NOT_FINDINGS = /отклон|не\s*провер|непровер|предложени/i;
+const FINDING_ID = /qg:[A-Z][A-Z0-9-]*[A-Z0-9]|#?std\d{3,4}|bslls:[A-Za-z][\w-]*|acc:\d{3,4}|v8cs:[\w-]+/g;
+
+/** Находки 🔴/🟠 из прозы отчёта, ни один идентификатор которых не стоит в verdict=violation. */
+export function uncoveredFindings(text, records) {
+  const norm = (id) => id.replace(/^#/, '');
+  const violated = new Set();
+  for (const r of records) {
+    const m = r.type === 'applied' ? String(r.fields.verdict || '').match(/^violation:(.+)$/) : null;
+    if (m) violated.add(norm(m[1].trim()));
+  }
+
+  const at = text.indexOf(SECTION);
+  const lines = (at === -1 ? text : text.slice(0, at)).split(/\r?\n/);
+  const findings = [];
+  const stack = []; // { level, excluded, markerSev, finding }
+  let current = null;
+  let fence = false;
+  lines.forEach((line, i) => {
+    if (/^\s*(```|~~~)/.test(line)) fence = !fence;
+    const h = fence ? null : line.match(/^(#{1,6})\s+(.*)$/);
+    if (!h) {
+      if (current) current.body.push(line);
+      return;
+    }
+    const level = h[1].length;
+    const title = h[2].trim();
+    while (stack.length && stack[stack.length - 1].level >= level) stack.pop();
+
+    // Подзаголовок внутри находки — часть её тела, а не новая находка.
+    const owner = stack.find((s) => s.finding);
+    if (owner) {
+      owner.finding.body.push(line);
+      stack.push({ level });
+      current = owner.finding;
+      return;
+    }
+
+    const entry = { level, excluded: stack.some((s) => s.excluded) || NOT_FINDINGS.test(title) };
+    current = null;
+    if (!entry.excluded) {
+      const lead = title.match(SEVERITY_LEAD);
+      const inherited = stack.map((s) => s.markerSev).filter(Boolean).pop();
+      let sev = null;
+      if (lead && SEVERITY_LABEL.test(lead[2])) entry.markerSev = lead[1];
+      else sev = lead ? lead[1] : inherited || null;
+      if (sev) {
+        entry.finding = { title: lead ? lead[2] : title, sev, line: i + 1, body: [] };
+        current = entry.finding;
+        if (SEVERE.includes(sev)) findings.push(entry.finding);
+      }
+    }
+    stack.push(entry);
+  });
+
+  const out = [];
+  for (const f of findings) {
+    const ids = [...new Set(([f.title, ...f.body].join('\n').match(FINDING_ID) || []).map(norm))];
+    if (!ids.some((id) => violated.has(id))) out.push({ title: f.title, sev: f.sev, line: f.line, ids });
+  }
+  return out;
+}
+
 export function validate(text, { gate = false, root = null, session = null } = {}) {
   const projectDir = root || projectRoot();
   const problems = [];
@@ -496,6 +578,22 @@ export function validate(text, { gate = false, root = null, session = null } = {
           'ошибкой (docs/RELEASING.md, переходное окно)'
       );
     }
+  }
+
+  // Находка 🔴/🟠 из прозы отчёта обязана быть закрыта записью violation в следе — см.
+  // `uncoveredFindings`. Предупреждение в обоих режимах: разбор прозы приближённый, и это
+  // новое требование (docs/RELEASING.md, переходное окно).
+  for (const f of uncoveredFindings(text, records)) {
+    add(
+      'warn',
+      f.line,
+      `находка «${f.title.length > 70 ? f.title.slice(0, 70) + '…' : f.title}» (${f.sev}) не закрыта в следе: ` +
+        (f.ids.length
+          ? `ни один из её идентификаторов (${f.ids.join(', ')}) не стоит в verdict=violation`
+          : 'в её тексте нет ни одного идентификатора признака') +
+        '. Нужна запись [qg applied: ..., verdict=violation:<id>]; дефект логики без своего признака — ' +
+        'qg:LOGIC-CONTRACT или qg:LOGIC-CASE-LOSS. Сверка по тексту отчёта приближённая'
+    );
   }
 
   if (!gate) {

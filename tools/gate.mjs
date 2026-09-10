@@ -23,7 +23,7 @@ import { resolveProjectRoot } from './project-root.mjs';
 import { readConfig, resolve as resolveConfigState, versionSuffix, pluginVersion } from './config.mjs';
 import { removeFileSync } from './fs-safe.mjs';
 import { stateDirSegments } from './state-dir.mjs';
-import { computeProfile, ARCHETYPES } from './profile.mjs';
+import { computeProfile, ARCHETYPES, BASE_CHECKLIST } from './profile.mjs';
 import { SCOPES } from './evidence-scopes.mjs';
 import { readCatalog } from './gen-catalog-index.mjs';
 import { expectedExamined } from './catalog.mjs';
@@ -651,11 +651,14 @@ function buildToolCommands({ files, resolvedCode, archetypeLabels, bslFiles }) {
   return lines;
 }
 
-/** Справочники и разделы чеклиста сработавших архетипов — по данным `profile.mjs`. */
+/**
+ * Справочники сработавших архетипов и разделы чеклиста к прочтению — по данным `profile.mjs`.
+ * В `checklist` — все разделы: общие (`BASE_CHECKLIST`) плюс разделы архетипов.
+ */
 function refsAndChecklist(archetypeLabels) {
   const lookup = new Map(ARCHETYPES.map((a) => [a.label, a]));
   const refs = [];
-  const checklist = new Set();
+  const checklist = new Set(BASE_CHECKLIST);
   for (const label of archetypeLabels) {
     const a = lookup.get(label);
     if (!a) continue; // проектный архетип (archetypes.custom) — своих refs/checklist не несёт
@@ -682,11 +685,11 @@ function codeModelPasses({ resolvedCode, volume, archetypeLabels, bslFiles, refs
     passes.push('каталог антипаттернов: не применимо — модулей (.bsl/.os) в составе нет');
   }
 
+  const archetypeSections = checklist.filter((c) => !BASE_CHECKLIST.includes(c));
   passes.push(
-    refs.length || checklist.length
-      ? `стандарты под архетип: ${refs.length ? refs.join(', ') : 'нет специфичных'}; ` +
-        `чеклист checklist-code.md ${checklist.length ? `разделы ${checklist.join(', ')}` : 'разделы не заданы архетипом'}`
-      : 'стандарты под архетип: архетипы не задают ни справочников, ни разделов чеклиста'
+    `стандарты под архетип: ${refs.length ? refs.join(', ') : 'нет специфичных'}; ` +
+      `чеклист checklist-code.md: разделы ${BASE_CHECKLIST.join(', ')} — всегда` +
+      (archetypeSections.length ? `, под архетип — ${archetypeSections.join(', ')}` : '')
   );
 
   passes.push('api-verification: субагент bsl-verifier');
