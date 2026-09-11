@@ -709,7 +709,7 @@ node tests/recall.mjs                # полнота срабатывания �
 | [assets/analyzer/](assets/analyzer/runtime-manifest.json) | гейтовые конфиги движков, закреплённая версия с суммами, фикстура часового |
 | [tests/](tests/run-tests.mjs) | самодостаточный раннер; фикстуры с байтовой семантикой генерируются, а не хранятся; [`tests/recall/`](tests/recall/cases/) — контрольные примеры (`tests/recall.mjs` — замер полноты читателя каталога), результаты в `.gitignore` |
 | [docs/](docs/INSTALL.md) | установка, интеграция анализатора, замеры ложных срабатываний, порядок выпуска релизов |
-| [.github/workflows/](.github/workflows/validate.yml) | CI: проверка на каждый push и выпуск релиза по тегу |
+| [.github/workflows/](.github/workflows/) | CI: проверка на каждый push, выпуск релиза по тегу, еженедельный сдвиг закрепления движков через PR |
 
 ---
 
