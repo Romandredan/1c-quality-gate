@@ -1,0 +1,58 @@
+[
+  {
+    "tag_name": "v0.2.81",
+    "draft": true,
+    "prerelease": false,
+    "published_at": null,
+    "body": "черновик",
+    "assets": []
+  },
+  {
+    "tag_name": "v0.2.80-rc1",
+    "draft": false,
+    "prerelease": true,
+    "published_at": "2026-09-11T10:00:00Z",
+    "body": "кандидат",
+    "assets": []
+  },
+  {
+    "tag_name": "v0.2.79",
+    "draft": false,
+    "prerelease": false,
+    "published_at": "2026-09-10T17:46:20Z",
+    "body": "## 0.2.79\n- исправлен разбор псевдонимов\n",
+    "assets": [
+      { "name": "bsl-analyzer-app-darwin-arm64", "size": 57986432, "digest": "sha256:33799e9e3066922046506915b7b162286d6405a1157c361a214787f78309c067", "browser_download_url": "https://github.com/itrous/bsl-analyzer/releases/download/v0.2.79/bsl-analyzer-app-darwin-arm64" },
+      { "name": "bsl-analyzer-app-linux-amd64", "size": 74314376, "digest": "sha256:f62c5d561f9aa9da46cffa2b88676ec3304751a90f43cb005701170500b29aef", "browser_download_url": "https://github.com/itrous/bsl-analyzer/releases/download/v0.2.79/bsl-analyzer-app-linux-amd64" },
+      { "name": "bsl-analyzer-app-windows-amd64.exe", "size": 68738048, "digest": "sha256:f52cf2e0af6e988e45601477f1961cf094ee52e89565bec7e34aa02852c2294e", "browser_download_url": "https://github.com/itrous/bsl-analyzer/releases/download/v0.2.79/bsl-analyzer-app-windows-amd64.exe" },
+      { "name": "bsl-analyzer-windows-amd64.exe", "size": 4774912, "digest": "sha256:000b0d34b7cf6b27a40b1a14c25766e7eb87dfbf10d99dce1ad5a42cedb3acf5", "browser_download_url": "https://github.com/itrous/bsl-analyzer/releases/download/v0.2.79/bsl-analyzer-windows-amd64.exe" }
+    ]
+  },
+  {
+    "tag_name": "v0.2.73",
+    "draft": false,
+    "prerelease": false,
+    "published_at": "2026-08-25T02:45:11Z",
+    "body": "## 0.2.73\n",
+    "assets": []
+  },
+  {
+    "tag_name": "v0.2.77",
+    "draft": false,
+    "prerelease": false,
+    "published_at": "2026-09-03T16:30:36Z",
+    "body": "## 0.2.77\n- новая диагностика\n",
+    "assets": [
+      { "name": "bsl-analyzer-app-linux-amd64", "size": 1, "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000001", "browser_download_url": "https://example.invalid/a" },
+      { "name": "bsl-analyzer-app-windows-amd64.exe", "size": 1, "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000002", "browser_download_url": "https://example.invalid/b" }
+    ]
+  },
+  {
+    "tag_name": "v0.2.72",
+    "draft": false,
+    "prerelease": false,
+    "published_at": "2026-08-24T19:27:13Z",
+    "body": "## 0.2.72\n",
+    "assets": []
+  }
+]

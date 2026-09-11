@@ -6886,6 +6886,53 @@ section('Валидатор сверяет заявленный профиль �
 }
 
 // ---------------------------------------------------------------------------
+section('Сдвиг закрепления движков — выбор релиза и сборка целей');
+
+// Закрепление не самообновление: скрипт лишь готовит новую версию манифеста, а решение и
+// проверка остаются за ревью PR. Здесь проверяется чистая часть: без сети и без записи.
+{
+  const rb = await import(pathToFileURL(join(ROOT, 'tools', 'runtime-bump.mjs')).href);
+  const analyzerReleases = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'analyzer-releases.json'), 'utf8'));
+  const pcReleases = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'platform-context-releases.json'), 'utf8'));
+  const analyzerManifest = JSON.parse(readFileSync(join(ROOT, 'assets', 'analyzer', 'runtime-manifest.json'), 'utf8'));
+  const pcManifest = JSON.parse(readFileSync(join(ROOT, 'assets', 'platform-context', 'runtime-manifest.json'), 'utf8'));
+
+  check('сравнение версий: числовое, а не строковое', rb.compareVersions('0.2.79', '0.2.9') > 0 && rb.compareVersions('0.16.0', '0.16.0') === 0);
+
+  const latest = rb.pickLatest(analyzerReleases);
+  check('последний релиз — без черновиков и предрелизов, порядок в ответе не важен', latest?.version === '0.2.79', JSON.stringify(latest?.version));
+  check('пустой список релизов — null', rb.pickLatest([]) === null);
+  check('тег без вида X.Y.Z пропускается', rb.pickLatest([{ tag_name: 'nightly', draft: false, prerelease: false }]) === null);
+
+  const built = rb.buildTargets(analyzerManifest, latest.release, latest.version);
+  check('все три цели анализатора найдены по постоянным именам', built.ok && Object.keys(built.targets).length === 3, JSON.stringify(built.missing));
+  check('сумма берётся из digest без префикса', built.targets['win32-x64'].sha256 === 'f52cf2e0af6e988e45601477f1961cf094ee52e89565bec7e34aa02852c2294e');
+  check('размер берётся из size', built.targets['linux-x64'].size === 74314376);
+  check('адрес скачивания сохранён для запасного подсчёта', built.targets['darwin-arm64'].url.endsWith('/v0.2.79/bsl-analyzer-app-darwin-arm64'));
+  check('лаунчер автора (bsl-analyzer-windows-amd64.exe) не спутан с рабочим бинарником', built.targets['win32-x64'].asset === 'bsl-analyzer-app-windows-amd64.exe');
+
+  const partial = analyzerReleases.find((r) => r.tag_name === 'v0.2.77');
+  const broken = rb.buildTargets(analyzerManifest, partial, '0.2.77');
+  check('релиз без одной цели — отказ целиком', !broken.ok && broken.missing.includes('darwin-arm64'), JSON.stringify(broken.missing));
+
+  const pcLatest = rb.pickLatest(pcReleases);
+  const pcBuilt = rb.buildTargets(pcManifest, pcLatest.release, pcLatest.version);
+  check('имя архива bsl-context собрано по шаблону с версией', pcBuilt.ok && pcBuilt.targets['win32-x64'].asset === 'bsl-context-v0.18.1-x86_64-pc-windows-msvc.zip', JSON.stringify(pcBuilt.missing));
+  check('каталог внутри архива собран по шаблону', pcBuilt.targets['linux-x64'].dir === 'bsl-context-v0.18.1-x86_64-unknown-linux-gnu');
+  check('asset без digest помечен для подсчёта скачиванием', pcBuilt.unsigned.includes('linux-x64') && pcBuilt.targets['linux-x64'].sha256 === null);
+  check('digest не sha256 отвергнут и тоже идёт в подсчёт', pcBuilt.unsigned.includes('darwin-arm64') && pcBuilt.targets['darwin-arm64'].sha256 === null);
+  check('шаблоны в целях сохранены после сборки', pcBuilt.targets['win32-x64'].assetTemplate === pcManifest.targets['win32-x64'].assetTemplate);
+
+  const next = rb.updatedManifest(pcManifest, pcLatest.version, pcBuilt.targets);
+  check('переписанный манифест: версия новая', next.version === '0.18.1');
+  check('переписанный манифест: порядок верхних полей исходный', JSON.stringify(Object.keys(next)) === JSON.stringify(Object.keys(pcManifest)));
+  check('переписанный манифест: порядок полей цели исходный', JSON.stringify(Object.keys(next.targets['win32-x64'])) === JSON.stringify(Object.keys(pcManifest.targets['win32-x64'])));
+  check('переписанный манифест: url в цели не попал', !('url' in next.targets['win32-x64']));
+  check('переписанный манифест: _comment сохранён', next._comment === pcManifest._comment);
+  check('исходный манифест не тронут', pcManifest.version === '0.16.0');
+}
+
+// ---------------------------------------------------------------------------
 // Изолированные наборы тестов — отдельными процессами: у них собственные счётчики
 // и временные каталоги, а их падение обязано быть видно в общем итоге CI.
 for (const suite of ['tests/gate-core.test.mjs', 'tests/opencode-plugin.test.mjs']) {
