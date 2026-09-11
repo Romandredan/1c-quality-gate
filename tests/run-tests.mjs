@@ -7141,6 +7141,25 @@ section('Сдвиг закрепления движков — прогон и CL
 }
 
 // ---------------------------------------------------------------------------
+section('Workflow сдвига закрепления');
+
+// YAML не исполняется в тестах; проверяется то, что теряется молча при правке: расписание,
+// ручной запуск, права на PR, назначение на владельца и повторный запрос ревью.
+{
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'runtime-bump.yml'), 'utf8');
+  check('workflow: расписание и ручной запуск', wf.includes('schedule:') && wf.includes('workflow_dispatch:'));
+  check('workflow: права на ветку и PR', wf.includes('contents: write') && wf.includes('pull-requests: write'));
+  check('workflow: матрица по двум движкам', wf.includes('engine: [analyzer, platform-context]'));
+  check('workflow: проверка через --check с кодом 3', wf.includes('--check --json') && wf.includes('-eq 3'));
+  check('workflow: часовой анализатора и install-only сервера справки', wf.includes('analyzer-run.mjs --sentinel') && wf.includes('--install-only'));
+  check('workflow: те же проверки, что validate.yml', wf.includes('validate-package.mjs') && wf.includes('tests/run-tests.mjs') && wf.includes('gen-catalog-index.mjs --check'));
+  check('workflow: PR на владельца с запросом ревью', wf.includes('--assignee "$OWNER"') && wf.includes('--reviewer "$OWNER"') && wf.includes('github.repository_owner'));
+  check('workflow: открытый PR обновляется, а не дублируется', wf.includes('gh pr list --head') && wf.includes('gh pr edit'));
+  check('workflow: ветка на движок', wf.includes('chore/bump-'));
+  check('workflow: подсказка про настройку репозитория при отказе создать PR', wf.includes('create and approve pull requests'));
+}
+
+// ---------------------------------------------------------------------------
 // Изолированные наборы тестов — отдельными процессами: у них собственные счётчики
 // и временные каталоги, а их падение обязано быть видно в общем итоге CI.
 for (const suite of ['tests/gate-core.test.mjs', 'tests/opencode-plugin.test.mjs']) {
