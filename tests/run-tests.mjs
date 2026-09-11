@@ -5535,6 +5535,23 @@ section('Самозаведение контура платформенного 
       `https://github.com/Regsorm/bsl-context/releases/download/v${man.version}/${man.targets['win32-x64'].asset}`
   );
 
+  // Имя архива содержит версию, и скрипт сдвига закрепления (runtime-bump.mjs) собирает его
+  // по шаблону. Шаблон обязан сходиться с закреплённым именем, иначе сдвиг соберёт имя,
+  // которого в релизе нет, и откажет по всем целям сразу.
+  for (const key of ['win32-x64', 'linux-x64', 'darwin-arm64']) {
+    const t = man.targets[key];
+    check(
+      `цель ${key}: шаблон имени архива сходится с закреплённым именем`,
+      Boolean(t.assetTemplate) && t.assetTemplate.replace('{version}', man.version) === t.asset,
+      `${t.assetTemplate} → ${t.asset}`
+    );
+    check(
+      `цель ${key}: шаблон каталога сходится с закреплённым каталогом`,
+      Boolean(t.dirTemplate) && t.dirTemplate.replace('{version}', man.version) === t.dir,
+      `${t.dirTemplate} → ${t.dir}`
+    );
+  }
+
   // --- распаковка ------------------------------------------------------------
   // Тот `tar`, что приходит с Git for Windows, — GNU, и на zip отвечает «This does not look
   // like a tar archive». Системный bsdtar zip читает, поэтому путь берётся явно, а не по PATH:
