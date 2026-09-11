@@ -1,0 +1,141 @@
+name: runtime-bump
+
+# Сдвиг закрепления внешних движков (bsl-analyzer, bsl-context) — через PR, а не
+# самообновлением у пользователя: движок, меняющийся между прогонами, делает вердикт гейта
+# невоспроизводимым (docs/INSTALL.md). Здесь новая версия проходит те же проверки, что
+# validate.yml, и приходит владельцу как PR с запросом ревью.
+# Спецификация — docs/superpowers/specs/2026-09-12-runtime-bump-design.md, порядок ревью —
+# docs/RELEASING.md, раздел «Сдвиг закрепления движков».
+#
+# PR, открытый штатным GITHUB_TOKEN, не запускает validate.yml — поэтому проверки прогоняются
+# здесь же, до создания PR. Личный токен снял бы ограничение, но GitHub не уведомляет автора о
+# его собственных действиях, и уведомление о PR пропало бы.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: "Какой движок проверять"
+        type: choice
+        options: [both, analyzer, platform-context]
+        default: both
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [analyzer, platform-context]
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
+      OWNER: ${{ github.repository_owner }}
+      # Ручной запуск с выбором одного движка: второе задание матрицы ничего не делает.
+      SELECTED: ${{ github.event_name == 'schedule' || inputs.engine == 'both' || inputs.engine == matrix.engine }}
+
+    steps:
+      - uses: actions/checkout@v7
+        if: env.SELECTED == 'true'
+
+      - uses: actions/setup-node@v7
+        if: env.SELECTED == 'true'
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v7
+        if: env.SELECTED == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Зависимости валидаторов XML
+        if: env.SELECTED == 'true'
+        run: pip install --disable-pip-version-check "lxml==6.1.1"
+
+      - name: Есть ли релиз новее закреплённого
+        id: check
+        if: env.SELECTED == 'true'
+        run: |
+          set +e
+          node tools/runtime-bump.mjs --engine "${{ matrix.engine }}" --check --json | tee check.json
+          code=${PIPESTATUS[0]}
+          set -e
+          if [ "$code" -eq 3 ]; then
+            echo "update=yes" >> "$GITHUB_OUTPUT"
+          elif [ "$code" -eq 0 ]; then
+            echo "update=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::runtime-bump --check завершился с кодом $code"
+            exit "$code"
+          fi
+
+      - name: Переписать манифест и INSTALL.md
+        if: steps.check.outputs.update == 'yes'
+        run: node tools/runtime-bump.mjs --engine "${{ matrix.engine }}" --apply --json | tee bump.json
+
+      # Анализатор: бинарник скачивается по новому манифесту, сумма сверяется, часовой на
+      # фикстуре плагина обязан найти свою диагностику. Платформа 1С для этого не нужна.
+      - name: Анализатор скачивается, сумма сходится, часовой найден
+        if: steps.check.outputs.update == 'yes' && matrix.engine == 'analyzer'
+        run: |
+          node tools/analyzer-bootstrap.mjs
+          node tools/analyzer-run.mjs --sentinel | tee sentinel.txt
+
+      # Сервер справки: скачать, сверить сумму, распаковать. Запустить его без установленной
+      # платформы нельзя — об этом сказано в теле PR.
+      - name: Сервер справки скачивается, сумма сходится, архив распаковывается
+        if: steps.check.outputs.update == 'yes' && matrix.engine == 'platform-context'
+        run: node tools/platform-context-bootstrap.mjs --install-only
+
+      - name: Целостность пакета
+        if: steps.check.outputs.update == 'yes'
+        run: node tools/validate-package.mjs
+
+      - name: Индекс каталога антипаттернов синхронен с карточками
+        if: steps.check.outputs.update == 'yes'
+        run: node tools/gen-catalog-index.mjs --check
+
+      - name: Тесты программных проверок
+        if: steps.check.outputs.update == 'yes'
+        run: node tests/run-tests.mjs
+
+      - name: Ветка и PR на владельца
+        if: steps.check.outputs.update == 'yes'
+        run: |
+          NAME=$(node -e "console.log(JSON.parse(require('fs').readFileSync('bump.json','utf8')).name)")
+          CURRENT=$(node -e "console.log(JSON.parse(require('fs').readFileSync('bump.json','utf8')).current)")
+          LATEST=$(node -e "console.log(JSON.parse(require('fs').readFileSync('bump.json','utf8')).latest)")
+          BRANCH="chore/bump-$NAME"
+          TITLE="chore(закрепление): $NAME $CURRENT → $LATEST"
+
+          node tools/runtime-bump.mjs --body bump.json --sentinel sentinel.txt > body.md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Ветка принадлежит workflow и пересобирается от main при каждом прогоне; ручных
+          # коммитов в ней не ожидается. Ссылку на удалённую ветку дотягиваем, чтобы
+          # --force-with-lease имел с чем сверяться.
+          git fetch origin "$BRANCH" || true
+          git checkout -B "$BRANCH"
+          git add assets docs/INSTALL.md
+          git commit -m "$TITLE" -m "Собрано workflow runtime-bump. Проверки: см. тело PR."
+          git push --force-with-lease origin "$BRANCH"
+
+          EXISTING=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" --title "$TITLE" --body-file body.md
+            gh pr edit "$EXISTING" --add-reviewer "$OWNER"
+            gh pr comment "$EXISTING" --body "Обновлено: $CURRENT → $LATEST, проверки прогнаны заново."
+            echo "PR #$EXISTING обновлён"
+          else
+            if ! gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file body.md --assignee "$OWNER" --reviewer "$OWNER"; then
+              echo "::error::Не удалось создать PR. Проверьте Settings → Actions → General → «Allow GitHub Actions to create and approve pull requests»."
+              exit 1
+            fi
+          fi

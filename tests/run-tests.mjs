@@ -23,6 +23,7 @@ import { removeTreeSync } from '../tools/fs-safe.mjs';
 import { join, dirname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -1677,8 +1678,17 @@ section('Валидатор пакета — состав компонентов
   writeBytes('pkg-broken/skills/big-skill/SKILL.md', `---\nname: big-skill\ndescription: тест\n---\n\n${'т'.repeat(40000)}\n`);
   writeBytes('pkg-broken/skills/big-skill/references/anchors.md', 'раздел «Нет такого» навыка `big-skill`\n');
   writeBytes('pkg-broken/skills/big-skill/references/links.md', 'см. `references/no-such.md`\n');
+  // Фразы INSTALL.md о текущем закреплении обязаны совпадать с манифестами: анализатор здесь
+  // отстал, сервер справки совпадает — ругаться валидатор должен ровно на одно.
+  writeBytes('pkg-broken/assets/analyzer/runtime-manifest.json', JSON.stringify({ engine: 'bsl-analyzer', version: '0.2.79', repo: 'itrous/bsl-analyzer', urlTemplate: 'https://github.com/{repo}/releases/download/v{version}/{asset}', targets: {} }));
+  writeBytes('pkg-broken/assets/platform-context/runtime-manifest.json', JSON.stringify({ engine: 'bsl-context', version: '0.18.1', repo: 'Regsorm/bsl-context', urlTemplate: 'https://github.com/{repo}/releases/download/v{version}/{asset}', targets: {} }));
+  writeBytes('pkg-broken/docs/INSTALL.md', 'проверено на **0.2.73**\nengine=bsl-context@0.18.1/8.3.27.1688\n');
 
   const r = run('tools/validate-package.mjs', ['--root', pkg]);
+  check('INSTALL.md отстал от манифеста анализатора — ошибка',
+    r.out.includes('INSTALL.md') && r.out.includes('проверено на **0.2.79**'), r.out.trim().slice(0, 300));
+  check('INSTALL.md, совпадающий с манифестом сервера справки, не ругается',
+    !r.out.includes('engine=bsl-context@0.18.1/'), r.out.trim().slice(0, 300));
   check('имя агента сверяется с именем файла', r.out.includes('не совпадает с именем файла'), r.out.trim().slice(0, 200));
   check('модель агента вне набора — ошибка', r.out.includes('model "gpt"'), r.out.trim().slice(0, 200));
   check('у агента требуется tools', /нет поля tools/.test(r.out), r.out.trim().slice(0, 200));
@@ -5535,6 +5545,40 @@ section('Самозаведение контура платформенного 
       `https://github.com/Regsorm/bsl-context/releases/download/v${man.version}/${man.targets['win32-x64'].asset}`
   );
 
+  // Имя архива содержит версию, и скрипт сдвига закрепления (runtime-bump.mjs) собирает его
+  // по шаблону. Шаблон обязан сходиться с закреплённым именем, иначе сдвиг соберёт имя,
+  // которого в релизе нет, и откажет по всем целям сразу.
+  for (const key of ['win32-x64', 'linux-x64', 'darwin-arm64']) {
+    const t = man.targets[key];
+    check(
+      `цель ${key}: шаблон имени архива сходится с закреплённым именем`,
+      Boolean(t.assetTemplate) && t.assetTemplate.replace('{version}', man.version) === t.asset,
+      `${t.assetTemplate} → ${t.asset}`
+    );
+    check(
+      `цель ${key}: шаблон каталога сходится с закреплённым каталогом`,
+      Boolean(t.dirTemplate) && t.dirTemplate.replace('{version}', man.version) === t.dir,
+      `${t.dirTemplate} → ${t.dir}`
+    );
+  }
+
+  // --install-only нужен CI сдвига закрепления: на раннере нет платформы 1С, а скачать
+  // архив, сверить сумму и распаковать можно и без неё. Проверяется на готовой установке:
+  // сеть в тестах запрещена, а ветка «уже установлен» проходит тот же путь до скачивания.
+  {
+    const dataDir = join(WORK, 'pc-install-only');
+    const bin = boot.binaryPath(man, dataDir);
+    mkdirSync(dirname(bin), { recursive: true });
+    writeFileSync(bin, 'не бинарник', 'utf8');
+    writeFileSync(join(dirname(bin), '.ready'), JSON.stringify({ version: man.version, sha256: man.targets[boot.targetKey()].sha256 }), 'utf8');
+    const r = spawnSync(process.execPath, [join(ROOT, 'tools', 'platform-context-bootstrap.mjs'), '--install-only'], {
+      encoding: 'utf8',
+      env: { ...process.env, QG_DATA_DIR: dataDir },
+    });
+    check('--install-only на готовой установке: код 0 и путь', r.status === 0 && r.stdout.includes('Уже установлен'), `${r.status}: ${r.stdout}${r.stderr}`.slice(0, 200));
+    check('--install-only не поднимает демон и не ищет платформу', !r.stdout.includes('Готово:') && !r.stderr.includes('Контур не заведён'));
+  }
+
   // --- распаковка ------------------------------------------------------------
   // Тот `tar`, что приходит с Git for Windows, — GNU, и на zip отвечает «This does not look
   // like a tar archive». Системный bsdtar zip читает, поэтому путь берётся явно, а не по PATH:
@@ -6866,6 +6910,253 @@ section('Валидатор сверяет заявленный профиль �
     const { problems } = ev.validate(text, { gate: true, root, session: 'S' });
     check('нет состояния гейта — сверка профиля пропущена молча', !problems.some(isVolumeMismatch) && !problems.some(isArchetypeMismatch), JSON.stringify(problems));
   }
+}
+
+// ---------------------------------------------------------------------------
+section('Сдвиг закрепления движков — выбор релиза и сборка целей');
+
+// Закрепление не самообновление: скрипт лишь готовит новую версию манифеста, а решение и
+// проверка остаются за ревью PR. Здесь проверяется чистая часть: без сети и без записи.
+{
+  const rb = await import(pathToFileURL(join(ROOT, 'tools', 'runtime-bump.mjs')).href);
+  const analyzerReleases = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'analyzer-releases.json'), 'utf8'));
+  const pcReleases = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'platform-context-releases.json'), 'utf8'));
+  const analyzerManifest = JSON.parse(readFileSync(join(ROOT, 'assets', 'analyzer', 'runtime-manifest.json'), 'utf8'));
+  const pcManifest = JSON.parse(readFileSync(join(ROOT, 'assets', 'platform-context', 'runtime-manifest.json'), 'utf8'));
+
+  check('сравнение версий: числовое, а не строковое', rb.compareVersions('0.2.79', '0.2.9') > 0 && rb.compareVersions('0.16.0', '0.16.0') === 0);
+
+  const latest = rb.pickLatest(analyzerReleases);
+  check('последний релиз — без черновиков и предрелизов, порядок в ответе не важен', latest?.version === '0.2.79', JSON.stringify(latest?.version));
+  check('пустой список релизов — null', rb.pickLatest([]) === null);
+  check('тег без вида X.Y.Z пропускается', rb.pickLatest([{ tag_name: 'nightly', draft: false, prerelease: false }]) === null);
+
+  const built = rb.buildTargets(analyzerManifest, latest.release, latest.version);
+  check('все три цели анализатора найдены по постоянным именам', built.ok && Object.keys(built.targets).length === 3, JSON.stringify(built.missing));
+  check('сумма берётся из digest без префикса', built.targets['win32-x64'].sha256 === 'f52cf2e0af6e988e45601477f1961cf094ee52e89565bec7e34aa02852c2294e');
+  check('размер берётся из size', built.targets['linux-x64'].size === 74314376);
+  check('адрес скачивания сохранён для запасного подсчёта', built.targets['darwin-arm64'].url.endsWith('/v0.2.79/bsl-analyzer-app-darwin-arm64'));
+  check('лаунчер автора (bsl-analyzer-windows-amd64.exe) не спутан с рабочим бинарником', built.targets['win32-x64'].asset === 'bsl-analyzer-app-windows-amd64.exe');
+
+  const partial = analyzerReleases.find((r) => r.tag_name === 'v0.2.77');
+  const broken = rb.buildTargets(analyzerManifest, partial, '0.2.77');
+  check('релиз без одной цели — отказ целиком', !broken.ok && broken.missing.includes('darwin-arm64'), JSON.stringify(broken.missing));
+
+  const pcLatest = rb.pickLatest(pcReleases);
+  const pcBuilt = rb.buildTargets(pcManifest, pcLatest.release, pcLatest.version);
+  check('имя архива bsl-context собрано по шаблону с версией', pcBuilt.ok && pcBuilt.targets['win32-x64'].asset === 'bsl-context-v0.18.1-x86_64-pc-windows-msvc.zip', JSON.stringify(pcBuilt.missing));
+  check('каталог внутри архива собран по шаблону', pcBuilt.targets['linux-x64'].dir === 'bsl-context-v0.18.1-x86_64-unknown-linux-gnu');
+  check('asset без digest помечен для подсчёта скачиванием', pcBuilt.unsigned.includes('linux-x64') && pcBuilt.targets['linux-x64'].sha256 === null);
+  check('digest не sha256 отвергнут и тоже идёт в подсчёт', pcBuilt.unsigned.includes('darwin-arm64') && pcBuilt.targets['darwin-arm64'].sha256 === null);
+  check('шаблоны в целях сохранены после сборки', pcBuilt.targets['win32-x64'].assetTemplate === pcManifest.targets['win32-x64'].assetTemplate);
+
+  const next = rb.updatedManifest(pcManifest, pcLatest.version, pcBuilt.targets);
+  check('переписанный манифест: версия новая', next.version === '0.18.1');
+  check('переписанный манифест: порядок верхних полей исходный', JSON.stringify(Object.keys(next)) === JSON.stringify(Object.keys(pcManifest)));
+  check('переписанный манифест: порядок полей цели исходный', JSON.stringify(Object.keys(next.targets['win32-x64'])) === JSON.stringify(Object.keys(pcManifest.targets['win32-x64'])));
+  check('переписанный манифест: url в цели не попал', !('url' in next.targets['win32-x64']));
+  check('переписанный манифест: _comment сохранён', next._comment === pcManifest._comment);
+  check('исходный манифест не тронут', pcManifest.version === '0.16.0');
+}
+
+// ---------------------------------------------------------------------------
+section('Сдвиг закрепления движков — сеть');
+
+{
+  const rb = await import(pathToFileURL(join(ROOT, 'tools', 'runtime-bump.mjs')).href);
+  const analyzerReleases = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'analyzer-releases.json'), 'utf8'));
+
+  // fetchReleases: адрес, заголовки, токен, ошибка HTTP.
+  const calls = [];
+  const fetchOk = async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, status: 200, json: async () => analyzerReleases };
+  };
+  const got = await rb.fetchReleases('itrous/bsl-analyzer', { fetchImpl: fetchOk, token: 'T' });
+  check('релизы запрошены у GitHub API по репозиторию из манифеста', calls[0].url === 'https://api.github.com/repos/itrous/bsl-analyzer/releases?per_page=30', calls[0].url);
+  check('токен уходит в Authorization, формат API объявлен', calls[0].init.headers.Authorization === 'Bearer T' && calls[0].init.headers.Accept === 'application/vnd.github+json');
+  check('ответ отдан как есть', got.length === analyzerReleases.length);
+  const noToken = [];
+  await rb.fetchReleases('a/b', { fetchImpl: async (u, i) => (noToken.push(i), { ok: true, json: async () => [] }), token: '' });
+  check('без токена заголовка Authorization нет', !('Authorization' in noToken[0].headers));
+  let thrown = null;
+  try {
+    await rb.fetchReleases('a/b', { fetchImpl: async () => ({ ok: false, status: 403, json: async () => ({}) }), token: '' });
+  } catch (e) {
+    thrown = e;
+  }
+  check('не-2xx от API — ошибка с кодом HTTP', thrown && /403/.test(thrown.message), thrown?.message);
+
+  // releaseNotesBetween: только пропущенные версии, по возрастанию, без предрелизов, обрезка.
+  const notes = rb.releaseNotesBetween(analyzerReleases, '0.2.73', '0.2.79');
+  check('заметки — за версии строго новее текущей и не новее последней', notes.map((n) => n.version).join(',') === '0.2.77,0.2.79', notes.map((n) => n.version).join(','));
+  check('заметка несёт тег, дату и тело', notes[0].tag === 'v0.2.77' && notes[0].publishedAt === '2026-09-03T16:30:36Z' && notes[0].body.includes('новая диагностика'));
+  const cut = rb.releaseNotesBetween([{ tag_name: 'v9.9.9', draft: false, prerelease: false, body: 'x'.repeat(5000) }], '0.0.0', '9.9.9', { limit: 10 });
+  check('тело заметки обрезано до предела', cut[0].body.length === 10);
+
+  // sha256Of: сумма и размер считаются по потоку, без буферизации всего файла.
+  const bytes = Buffer.from('содержимое архива для теста');
+  const expected = createHash('sha256').update(bytes).digest('hex');
+  const d = await rb.sha256Of('https://example.invalid/x', { fetchImpl: async () => ({ ok: true, status: 200, body: new Blob([bytes]).stream() }) });
+  check('сумма скачиванием совпадает с эталоном', d.sha256 === expected && d.size === bytes.length, JSON.stringify(d));
+  let dlErr = null;
+  try {
+    await rb.sha256Of('https://example.invalid/x', { fetchImpl: async () => ({ ok: false, status: 404 }) });
+  } catch (e) {
+    dlErr = e;
+  }
+  check('неудачное скачивание — ошибка с адресом и кодом', dlErr && /404/.test(dlErr.message) && dlErr.message.includes('example.invalid'), dlErr?.message);
+}
+
+// ---------------------------------------------------------------------------
+section('Сдвиг закрепления движков — документация');
+
+{
+  const rb = await import(pathToFileURL(join(ROOT, 'tools', 'runtime-bump.mjs')).href);
+
+  const install = readFileSync(join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
+  const a = rb.patchInstall(install, 'analyzer', '0.2.73', '0.2.79');
+  check('INSTALL.md: фраза «проверено на» и пример конфига анализатора переписаны', a.changed === 2 && a.text.includes('проверено на **0.2.79**') && a.text.includes('"version": "0.2.79"'), `changed=${a.changed}`);
+  check('INSTALL.md: история переходов и чужие упоминания не тронуты', a.text.includes('engine=bsl-context@0.16.0/'));
+  const p = rb.patchInstall(install, 'platform-context', '0.16.0', '0.18.1');
+  check('INSTALL.md: штамп сервера справки переписан', p.changed === 1 && p.text.includes('engine=bsl-context@0.18.1/'), `changed=${p.changed}`);
+  const none = rb.patchInstall('текст без версии', 'analyzer', '0.2.73', '0.2.79');
+  check('фраз нет — ноль замен, текст тот же', none.changed === 0 && none.text === 'текст без версии');
+
+  // mentions: перечисление для ревьюера, не правка. История, тесты и служебные каталоги вне списка.
+  const root = join(WORK, 'bump-mentions');
+  writeBytes('bump-mentions/README.md', 'engine=bsl-analyzer@0.2.73\n');
+  writeBytes('bump-mentions/docs/false-positives-cfe.md', 'Переход 0.2.66 → 0.2.73\n');
+  writeBytes('bump-mentions/docs/INSTALL.md', 'проверено на **0.2.73**\n');
+  writeBytes('bump-mentions/tests/run-tests.mjs', "'0.2.73'\n");
+  writeBytes('bump-mentions/.remember/now.md', '0.2.73\n');
+  writeBytes('bump-mentions/tools/rename-check.mjs', '// bsl-analyzer 0.2.73 связывает\n');
+  writeBytes('bump-mentions/assets/analyzer/runtime-manifest.json', '{"version":"0.2.73"}\n');
+  writeBytes('bump-mentions/bin.exe', 'двоичное 0.2.73\n');
+  const m = rb.mentions(root, '0.2.73', { exclude: ['assets/analyzer/runtime-manifest.json'] });
+  check('упоминания: README и код перечислены', m.includes('README.md') && m.includes('tools/rename-check.mjs'), JSON.stringify(m));
+  check('упоминания: история, INSTALL.md, тесты, .remember, манифест и не-текст исключены',
+    !m.some((f) => /false-positives|INSTALL|tests\/|\.remember|runtime-manifest|bin\.exe/.test(f)), JSON.stringify(m));
+  check('упоминания отсортированы и с прямыми слэшами', JSON.stringify(m) === JSON.stringify([...m].sort()) && !m.some((f) => f.includes('\\')));
+}
+
+// ---------------------------------------------------------------------------
+section('Сдвиг закрепления движков — прогон и CLI');
+
+{
+  const rb = await import(pathToFileURL(join(ROOT, 'tools', 'runtime-bump.mjs')).href);
+  const analyzerReleases = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'analyzer-releases.json'), 'utf8'));
+  const pcReleases = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'platform-context-releases.json'), 'utf8'));
+
+  // Временный корень: настоящие манифесты, урезанный INSTALL.md, один файл с упоминанием.
+  const root = join(WORK, 'bump-root');
+  const seed = () => {
+    removeTreeSync(root);
+    for (const f of ['assets/analyzer/runtime-manifest.json', 'assets/platform-context/runtime-manifest.json']) {
+      writeBytes(`bump-root/${f}`, readFileSync(join(ROOT, f), 'utf8'));
+    }
+    writeBytes('bump-root/docs/INSTALL.md', 'проверено на **0.2.73**; пример `"version": "0.2.73"`; след `engine=bsl-context@0.16.0/8.3.27.1688`\n');
+    writeBytes('bump-root/README.md', 'engine=bsl-analyzer@0.2.73\n');
+  };
+  const apiFor = (releases, files = {}) => async (url) => {
+    if (url.includes('/releases')) return { ok: true, status: 200, json: async () => releases };
+    const bytes = files[url];
+    if (!bytes) return { ok: false, status: 404 };
+    return { ok: true, status: 200, body: new Blob([bytes]).stream() };
+  };
+
+  // --check: ничего не пишет, но всё сообщает.
+  seed();
+  const checked = await rb.bump({ engine: 'analyzer', root, apply: false, fetchImpl: apiFor(analyzerReleases), token: '' });
+  check('check: обновление найдено, версии названы', checked.ok && !checked.upToDate && checked.current === '0.2.73' && checked.latest === '0.2.79', JSON.stringify(checked).slice(0, 200));
+  check('check: имя движка из манифеста для ветки и заголовка', checked.name === 'bsl-analyzer');
+  check('check: манифест на диске не тронут', JSON.parse(readFileSync(join(root, 'assets/analyzer/runtime-manifest.json'), 'utf8')).version === '0.2.73');
+  check('check: заметки автора и упоминания приложены', checked.releaseNotes.length === 2 && checked.mentions.includes('README.md'), JSON.stringify(checked.mentions));
+  check('check: updated=false', checked.updated === false);
+  check('код возврата check при обновлении — 3', rb.exitCode(checked, 'check') === 3);
+
+  // --apply: манифест и INSTALL.md переписаны, суммы из digest.
+  const applied = await rb.bump({ engine: 'analyzer', root, apply: true, fetchImpl: apiFor(analyzerReleases), token: '' });
+  const manAfter = JSON.parse(readFileSync(join(root, 'assets/analyzer/runtime-manifest.json'), 'utf8'));
+  check('apply: манифест переписан на новую версию с суммами из digest', applied.updated && manAfter.version === '0.2.79' && manAfter.targets['win32-x64'].sha256.startsWith('f52cf2e0'), JSON.stringify(manAfter.targets['win32-x64']));
+  check('apply: манифест заканчивается переводом строки', readFileSync(join(root, 'assets/analyzer/runtime-manifest.json'), 'utf8').endsWith('}\n'));
+  check('apply: INSTALL.md переписан по двум фразам', applied.installPatched === 2 && readFileSync(join(root, 'docs/INSTALL.md'), 'utf8').includes('проверено на **0.2.79**'));
+  check('код возврата apply — 0', rb.exitCode(applied, 'apply') === 0);
+
+  // Повтор после apply: обновления нет.
+  const again = await rb.bump({ engine: 'analyzer', root, apply: false, fetchImpl: apiFor(analyzerReleases), token: '' });
+  check('после сдвига: upToDate, код 0', again.ok && again.upToDate && rb.exitCode(again, 'check') === 0);
+
+  // Отказ при неполном релизе: манифест не тронут.
+  seed();
+  const partialOnly = analyzerReleases.filter((r) => r.tag_name !== 'v0.2.79');
+  const refused = await rb.bump({ engine: 'analyzer', root, apply: true, fetchImpl: apiFor(partialOnly), token: '' });
+  check('релиз без одной цели — отказ с перечнем целей, манифест не тронут',
+    !refused.ok && refused.reason === 'target_missing' && refused.missing.includes('darwin-arm64') &&
+      JSON.parse(readFileSync(join(root, 'assets/analyzer/runtime-manifest.json'), 'utf8')).version === '0.2.73', JSON.stringify(refused));
+  check('код возврата при отказе — 1 в обоих режимах', rb.exitCode(refused, 'check') === 1 && rb.exitCode(refused, 'apply') === 1);
+
+  // Запасной подсчёт суммы скачиванием для целей без digest.
+  seed();
+  const linuxBytes = Buffer.from('linux-архив');
+  const macBytes = Buffer.from('mac-архив');
+  const pc = await rb.bump({
+    engine: 'platform-context', root, apply: true, token: '',
+    fetchImpl: apiFor(pcReleases, { 'https://example.invalid/linux.tar.gz': linuxBytes, 'https://example.invalid/mac.tar.gz': macBytes }),
+  });
+  const pcMan = JSON.parse(readFileSync(join(root, 'assets/platform-context/runtime-manifest.json'), 'utf8'));
+  check('bsl-context: цели без digest посчитаны скачиванием и отмечены в результате',
+    pc.ok && pc.computed.sort().join(',') === 'darwin-arm64,linux-x64' &&
+      pcMan.targets['linux-x64'].sha256 === createHash('sha256').update(linuxBytes).digest('hex') && pcMan.targets['linux-x64'].size === linuxBytes.length,
+    JSON.stringify(pc.computed));
+  check('bsl-context: цель с digest суммы не скачивала', pcMan.targets['win32-x64'].sha256 === '1'.repeat(64));
+  check('bsl-context: INSTALL.md переписан по штампу', readFileSync(join(root, 'docs/INSTALL.md'), 'utf8').includes('engine=bsl-context@0.18.1/'));
+
+  // Неизвестный движок и пустой список релизов.
+  const unknown = await rb.bump({ engine: 'нет-такого', root, fetchImpl: apiFor([]), token: '' });
+  check('неизвестный движок — отказ', !unknown.ok && unknown.reason === 'unknown_engine');
+  seed();
+  const empty = await rb.bump({ engine: 'analyzer', root, fetchImpl: apiFor([]), token: '' });
+  check('нет обычных релизов — отказ no_release', !empty.ok && empty.reason === 'no_release');
+
+  // Тело PR.
+  const body = rb.prBody(checked, { sentinel: 'Часовой (bsl-analyzer@0.2.79): found' });
+  check('тело PR: таблица версий, цели, заметки, упоминания, часовой', ['0.2.73', '0.2.79', 'win32-x64', 'новая диагностика', 'README.md', 'found', 'false-positives-cfe.md'].every((s) => body.includes(s)), body.slice(0, 300));
+  const pcBody = rb.prBody(pc, {});
+  check('тело PR сервера справки: сказано, что сервер не запускался', pcBody.includes('не запускался'));
+
+  // Разбор аргументов.
+  const pa = rb.parseArgs(['--engine', 'analyzer', '--apply', '--json']);
+  check('аргументы: движок, режим, json', pa.engine === 'analyzer' && pa.mode === 'apply' && pa.json === true);
+  check('аргументы: режим по умолчанию check', rb.parseArgs(['--engine', 'analyzer']).mode === 'check');
+  check('аргументы: --check и --apply вместе — ошибка', rb.parseArgs(['--engine', 'analyzer', '--check', '--apply']).error != null);
+  writeBytes('bump-root/bump.json', JSON.stringify(checked));
+  check('аргументы: без движка — ошибка, кроме режима --body', rb.parseArgs([]).error != null && rb.parseArgs(['--body', join(root, 'bump.json')]).error == null);
+
+  // CLI: неверный вызов даёт код 1 и подсказку, --body печатает тело из файла результата.
+  const bad = run('tools/runtime-bump.mjs', []);
+  check('CLI без движка — код 1 и подсказка', bad.code === 1 && bad.out.includes('--engine'), `${bad.code}: ${bad.out.slice(0, 120)}`);
+  const bodyRun = run('tools/runtime-bump.mjs', ['--body', join(root, 'bump.json')]);
+  check('CLI --body печатает тело PR', bodyRun.code === 0 && bodyRun.out.includes('0.2.79'), bodyRun.out.slice(0, 120));
+}
+
+// ---------------------------------------------------------------------------
+section('Workflow сдвига закрепления');
+
+// YAML не исполняется в тестах; проверяется то, что теряется молча при правке: расписание,
+// ручной запуск, права на PR, назначение на владельца и повторный запрос ревью.
+{
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'runtime-bump.yml'), 'utf8');
+  check('workflow: расписание и ручной запуск', wf.includes('schedule:') && wf.includes('workflow_dispatch:'));
+  check('workflow: права на ветку и PR', wf.includes('contents: write') && wf.includes('pull-requests: write'));
+  check('workflow: матрица по двум движкам', wf.includes('engine: [analyzer, platform-context]'));
+  check('workflow: проверка через --check с кодом 3', wf.includes('--check --json') && wf.includes('-eq 3'));
+  check('workflow: часовой анализатора и install-only сервера справки', wf.includes('analyzer-run.mjs --sentinel') && wf.includes('--install-only'));
+  check('workflow: те же проверки, что validate.yml', wf.includes('validate-package.mjs') && wf.includes('tests/run-tests.mjs') && wf.includes('gen-catalog-index.mjs --check'));
+  check('workflow: PR на владельца с запросом ревью', wf.includes('--assignee "$OWNER"') && wf.includes('--reviewer "$OWNER"') && wf.includes('github.repository_owner'));
+  check('workflow: открытый PR обновляется, а не дублируется', wf.includes('gh pr list --head') && wf.includes('gh pr edit'));
+  check('workflow: ветка на движок', wf.includes('chore/bump-'));
+  check('workflow: подсказка про настройку репозитория при отказе создать PR', wf.includes('create and approve pull requests'));
 }
 
 // ---------------------------------------------------------------------------
