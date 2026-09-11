@@ -150,3 +150,45 @@ export async function sha256Of(url, { fetchImpl = globalThis.fetch } = {}) {
   }
   return { sha256: hash.digest('hex'), size };
 }
+
+/** Где старая версия — история или пример следа, а не утверждение о текущем закреплении. */
+export const HISTORY_FILES = ['docs/false-positives-cfe.md', 'docs/analyzer-integration.md', 'docs/INSTALL.md'];
+
+const SKIP_DIRS = new Set(['.git', 'node_modules', '.remember', '.state', '.qg-analyzer', 'tests']);
+const TEXT_FILE = /\.(md|mjs|js|json|py|yml|yaml|toml|txt)$/;
+
+/** Фразы INSTALL.md о текущем закреплении. Замена дословная: ничего, кроме этих фраз, не меняется. */
+export function patchInstall(text, engine, oldV, newV) {
+  let out = text;
+  let changed = 0;
+  for (const [from, to] of ENGINES[engine].installPhrases(oldV, newV)) {
+    if (!out.includes(from)) continue;
+    out = out.split(from).join(to);
+    changed++;
+  }
+  return { text: out, changed };
+}
+
+/**
+ * Файлы, где встречается старая версия, кроме истории и того, что скрипт правит сам.
+ * Список идёт в PR для ревьюера: пример следа в README можно оставить, а фразу «проверено на»
+ * в навыке — нет; отличить одно от другого скрипт не берётся.
+ */
+export function mentions(root, oldV, { exclude = [] } = {}) {
+  const skip = new Set([...HISTORY_FILES, ...exclude]);
+  const found = [];
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      const rel = relative(root, p).split(sep).join('/');
+      if (statSync(p).isDirectory()) {
+        if (!SKIP_DIRS.has(name) && !rel.startsWith('docs/superpowers')) walk(p);
+        continue;
+      }
+      if (!TEXT_FILE.test(name) || skip.has(rel)) continue;
+      if (readFileSync(p, 'utf8').includes(oldV)) found.push(rel);
+    }
+  };
+  walk(root);
+  return found.sort();
+}

@@ -6983,6 +6983,38 @@ section('Сдвиг закрепления движков — сеть');
 }
 
 // ---------------------------------------------------------------------------
+section('Сдвиг закрепления движков — документация');
+
+{
+  const rb = await import(pathToFileURL(join(ROOT, 'tools', 'runtime-bump.mjs')).href);
+
+  const install = readFileSync(join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
+  const a = rb.patchInstall(install, 'analyzer', '0.2.73', '0.2.79');
+  check('INSTALL.md: фраза «проверено на» и пример конфига анализатора переписаны', a.changed === 2 && a.text.includes('проверено на **0.2.79**') && a.text.includes('"version": "0.2.79"'), `changed=${a.changed}`);
+  check('INSTALL.md: история переходов и чужие упоминания не тронуты', a.text.includes('engine=bsl-context@0.16.0/'));
+  const p = rb.patchInstall(install, 'platform-context', '0.16.0', '0.18.1');
+  check('INSTALL.md: штамп сервера справки переписан', p.changed === 1 && p.text.includes('engine=bsl-context@0.18.1/'), `changed=${p.changed}`);
+  const none = rb.patchInstall('текст без версии', 'analyzer', '0.2.73', '0.2.79');
+  check('фраз нет — ноль замен, текст тот же', none.changed === 0 && none.text === 'текст без версии');
+
+  // mentions: перечисление для ревьюера, не правка. История, тесты и служебные каталоги вне списка.
+  const root = join(WORK, 'bump-mentions');
+  writeBytes('bump-mentions/README.md', 'engine=bsl-analyzer@0.2.73\n');
+  writeBytes('bump-mentions/docs/false-positives-cfe.md', 'Переход 0.2.66 → 0.2.73\n');
+  writeBytes('bump-mentions/docs/INSTALL.md', 'проверено на **0.2.73**\n');
+  writeBytes('bump-mentions/tests/run-tests.mjs', "'0.2.73'\n");
+  writeBytes('bump-mentions/.remember/now.md', '0.2.73\n');
+  writeBytes('bump-mentions/tools/rename-check.mjs', '// bsl-analyzer 0.2.73 связывает\n');
+  writeBytes('bump-mentions/assets/analyzer/runtime-manifest.json', '{"version":"0.2.73"}\n');
+  writeBytes('bump-mentions/bin.exe', 'двоичное 0.2.73\n');
+  const m = rb.mentions(root, '0.2.73', { exclude: ['assets/analyzer/runtime-manifest.json'] });
+  check('упоминания: README и код перечислены', m.includes('README.md') && m.includes('tools/rename-check.mjs'), JSON.stringify(m));
+  check('упоминания: история, INSTALL.md, тесты, .remember, манифест и не-текст исключены',
+    !m.some((f) => /false-positives|INSTALL|tests\/|\.remember|runtime-manifest|bin\.exe/.test(f)), JSON.stringify(m));
+  check('упоминания отсортированы и с прямыми слэшами', JSON.stringify(m) === JSON.stringify([...m].sort()) && !m.some((f) => f.includes('\\')));
+}
+
+// ---------------------------------------------------------------------------
 // Изолированные наборы тестов — отдельными процессами: у них собственные счётчики
 // и временные каталоги, а их падение обязано быть видно в общем итоге CI.
 for (const suite of ['tests/gate-core.test.mjs', 'tests/opencode-plugin.test.mjs']) {
