@@ -1678,8 +1678,17 @@ section('Валидатор пакета — состав компонентов
   writeBytes('pkg-broken/skills/big-skill/SKILL.md', `---\nname: big-skill\ndescription: тест\n---\n\n${'т'.repeat(40000)}\n`);
   writeBytes('pkg-broken/skills/big-skill/references/anchors.md', 'раздел «Нет такого» навыка `big-skill`\n');
   writeBytes('pkg-broken/skills/big-skill/references/links.md', 'см. `references/no-such.md`\n');
+  // Фразы INSTALL.md о текущем закреплении обязаны совпадать с манифестами: анализатор здесь
+  // отстал, сервер справки совпадает — ругаться валидатор должен ровно на одно.
+  writeBytes('pkg-broken/assets/analyzer/runtime-manifest.json', JSON.stringify({ engine: 'bsl-analyzer', version: '0.2.79', repo: 'itrous/bsl-analyzer', urlTemplate: 'https://github.com/{repo}/releases/download/v{version}/{asset}', targets: {} }));
+  writeBytes('pkg-broken/assets/platform-context/runtime-manifest.json', JSON.stringify({ engine: 'bsl-context', version: '0.18.1', repo: 'Regsorm/bsl-context', urlTemplate: 'https://github.com/{repo}/releases/download/v{version}/{asset}', targets: {} }));
+  writeBytes('pkg-broken/docs/INSTALL.md', 'проверено на **0.2.73**\nengine=bsl-context@0.18.1/8.3.27.1688\n');
 
   const r = run('tools/validate-package.mjs', ['--root', pkg]);
+  check('INSTALL.md отстал от манифеста анализатора — ошибка',
+    r.out.includes('INSTALL.md') && r.out.includes('проверено на **0.2.79**'), r.out.trim().slice(0, 300));
+  check('INSTALL.md, совпадающий с манифестом сервера справки, не ругается',
+    !r.out.includes('engine=bsl-context@0.18.1/'), r.out.trim().slice(0, 300));
   check('имя агента сверяется с именем файла', r.out.includes('не совпадает с именем файла'), r.out.trim().slice(0, 200));
   check('модель агента вне набора — ошибка', r.out.includes('model "gpt"'), r.out.trim().slice(0, 200));
   check('у агента требуется tools', /нет поля tools/.test(r.out), r.out.trim().slice(0, 200));

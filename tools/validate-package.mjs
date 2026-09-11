@@ -15,6 +15,7 @@ import { join, dirname, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { TOOL_BACKED, RENAMED, isKnownScope } from './evidence-scopes.mjs';
+import { ENGINES } from './runtime-bump.mjs';
 
 /**
  * Корень проверяемого пакета. По умолчанию — сам плагин; `--root` нужен тестам, чтобы
@@ -209,6 +210,31 @@ for (const f of files.filter((f) => f.endsWith('.json'))) {
     JSON.parse(readFileSync(f, 'utf8'));
   } catch (e) {
     fail(rel(f), `невалидный JSON: ${e.message}`);
+  }
+}
+
+// --- 2а. INSTALL.md называет закреплённые версии движков --------------------------
+// Фразы INSTALL.md о текущем закреплении обязаны совпадать с манифестами: сдвиг закрепления
+// (runtime-bump.mjs) правит их сам, а правка манифеста руками — нет, и документ отстаёт молча.
+{
+  const installPath = join(ROOT, 'docs', 'INSTALL.md');
+  if (existsSync(installPath)) {
+    const install = readFileSync(installPath, 'utf8');
+    for (const [engine, spec] of Object.entries(ENGINES)) {
+      const manifestPath = join(ROOT, spec.manifest);
+      if (!existsSync(manifestPath)) continue;
+      let version;
+      try {
+        version = JSON.parse(readFileSync(manifestPath, 'utf8')).version;
+      } catch {
+        continue; // невалидный JSON уже отмечен выше
+      }
+      for (const [phrase] of spec.installPhrases(version, version)) {
+        if (!install.includes(phrase)) {
+          fail('docs/INSTALL.md', `нет фразы о текущем закреплении ${engine}: ожидалось «${phrase}» (версия из ${spec.manifest}); поправьте документ или прогоните runtime-bump.mjs --apply`);
+        }
+      }
+    }
   }
 }
 
