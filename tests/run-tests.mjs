@@ -23,6 +23,7 @@ import { removeTreeSync } from '../tools/fs-safe.mjs';
 import { join, dirname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -6930,6 +6931,55 @@ section('Сдвиг закрепления движков — выбор рел�
   check('переписанный манифест: url в цели не попал', !('url' in next.targets['win32-x64']));
   check('переписанный манифест: _comment сохранён', next._comment === pcManifest._comment);
   check('исходный манифест не тронут', pcManifest.version === '0.16.0');
+}
+
+// ---------------------------------------------------------------------------
+section('Сдвиг закрепления движков — сеть');
+
+{
+  const rb = await import(pathToFileURL(join(ROOT, 'tools', 'runtime-bump.mjs')).href);
+  const analyzerReleases = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'analyzer-releases.json'), 'utf8'));
+
+  // fetchReleases: адрес, заголовки, токен, ошибка HTTP.
+  const calls = [];
+  const fetchOk = async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, status: 200, json: async () => analyzerReleases };
+  };
+  const got = await rb.fetchReleases('itrous/bsl-analyzer', { fetchImpl: fetchOk, token: 'T' });
+  check('релизы запрошены у GitHub API по репозиторию из манифеста', calls[0].url === 'https://api.github.com/repos/itrous/bsl-analyzer/releases?per_page=30', calls[0].url);
+  check('токен уходит в Authorization, формат API объявлен', calls[0].init.headers.Authorization === 'Bearer T' && calls[0].init.headers.Accept === 'application/vnd.github+json');
+  check('ответ отдан как есть', got.length === analyzerReleases.length);
+  const noToken = [];
+  await rb.fetchReleases('a/b', { fetchImpl: async (u, i) => (noToken.push(i), { ok: true, json: async () => [] }), token: '' });
+  check('без токена заголовка Authorization нет', !('Authorization' in noToken[0].headers));
+  let thrown = null;
+  try {
+    await rb.fetchReleases('a/b', { fetchImpl: async () => ({ ok: false, status: 403, json: async () => ({}) }), token: '' });
+  } catch (e) {
+    thrown = e;
+  }
+  check('не-2xx от API — ошибка с кодом HTTP', thrown && /403/.test(thrown.message), thrown?.message);
+
+  // releaseNotesBetween: только пропущенные версии, по возрастанию, без предрелизов, обрезка.
+  const notes = rb.releaseNotesBetween(analyzerReleases, '0.2.73', '0.2.79');
+  check('заметки — за версии строго новее текущей и не новее последней', notes.map((n) => n.version).join(',') === '0.2.77,0.2.79', notes.map((n) => n.version).join(','));
+  check('заметка несёт тег, дату и тело', notes[0].tag === 'v0.2.77' && notes[0].publishedAt === '2026-09-03T16:30:36Z' && notes[0].body.includes('новая диагностика'));
+  const cut = rb.releaseNotesBetween([{ tag_name: 'v9.9.9', draft: false, prerelease: false, body: 'x'.repeat(5000) }], '0.0.0', '9.9.9', { limit: 10 });
+  check('тело заметки обрезано до предела', cut[0].body.length === 10);
+
+  // sha256Of: сумма и размер считаются по потоку, без буферизации всего файла.
+  const bytes = Buffer.from('содержимое архива для теста');
+  const expected = createHash('sha256').update(bytes).digest('hex');
+  const d = await rb.sha256Of('https://example.invalid/x', { fetchImpl: async () => ({ ok: true, status: 200, body: new Blob([bytes]).stream() }) });
+  check('сумма скачиванием совпадает с эталоном', d.sha256 === expected && d.size === bytes.length, JSON.stringify(d));
+  let dlErr = null;
+  try {
+    await rb.sha256Of('https://example.invalid/x', { fetchImpl: async () => ({ ok: false, status: 404 }) });
+  } catch (e) {
+    dlErr = e;
+  }
+  check('неудачное скачивание — ошибка с адресом и кодом', dlErr && /404/.test(dlErr.message) && dlErr.message.includes('example.invalid'), dlErr?.message);
 }
 
 // ---------------------------------------------------------------------------

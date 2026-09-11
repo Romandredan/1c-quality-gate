@@ -115,3 +115,38 @@ export function updatedManifest(manifest, version, targets) {
   }
   return out;
 }
+
+/**
+ * Релизы репозитория. Тридцати хватает, чтобы найти последний и собрать заметки за
+ * пропущенные версии при недельном расписании; если закрепление отстало сильнее, последний
+ * релиз всё равно в первой странице, а заметки будут неполными — это видно по их числу в PR.
+ */
+export async function fetchReleases(repo, { fetchImpl = globalThis.fetch, token = process.env.GITHUB_TOKEN } = {}) {
+  const headers = { Accept: 'application/vnd.github+json', 'User-Agent': '1c-quality-gate runtime-bump' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetchImpl(`https://api.github.com/repos/${repo}/releases?per_page=30`, { headers });
+  if (!res.ok) throw new Error(`GitHub API ответил ${res.status} на список релизов ${repo}`);
+  return res.json();
+}
+
+/** Заметки автора за версии в интервале (current, latest], по возрастанию. Тело обрезано: в PR нужен обзор, а не полный текст. */
+export function releaseNotesBetween(releases, current, latest, { limit = 4000 } = {}) {
+  return (releases || [])
+    .map((r) => ({ r, v: (TAG.exec(r.tag_name || '') || [])[1] }))
+    .filter(({ r, v }) => v && !r.draft && !r.prerelease && compareVersions(v, current) > 0 && compareVersions(v, latest) <= 0)
+    .sort((a, b) => compareVersions(a.v, b.v))
+    .map(({ r, v }) => ({ tag: r.tag_name, version: v, publishedAt: r.published_at || null, body: String(r.body || '').slice(0, limit) }));
+}
+
+/** Сумма и размер файла по адресу — запасной путь, когда у asset нет digest. Поток, не буфер: бинарники по 70 МБ. */
+export async function sha256Of(url, { fetchImpl = globalThis.fetch } = {}) {
+  const res = await fetchImpl(url, { redirect: 'follow' });
+  if (!res.ok || !res.body) throw new Error(`скачивание ${url}: HTTP ${res.status}`);
+  const hash = createHash('sha256');
+  let size = 0;
+  for await (const chunk of Readable.fromWeb(res.body)) {
+    hash.update(chunk);
+    size += chunk.length;
+  }
+  return { sha256: hash.digest('hex'), size };
+}
