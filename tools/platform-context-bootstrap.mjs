@@ -25,6 +25,7 @@
  *   node tools/platform-context-bootstrap.mjs --status   # что известно про сервер
  *   node tools/platform-context-bootstrap.mjs --stop     # погасить свой демон
  *   node tools/platform-context-bootstrap.mjs --platforms # какие версии платформы видны
+ *   node tools/platform-context-bootstrap.mjs --install-only # скачать и распаковать, демон не поднимать (CI)
  */
 
 import {
@@ -681,6 +682,18 @@ async function main(argv) {
   const out = (s) => process.stdout.write(s + '\n');
   const manifest = readManifest();
   const root = dataRoot();
+
+  // Только установка: CI сдвига закрепления проверяет скачивание, сумму и распаковку на
+  // раннере без платформы 1С, где поднимать сервер не из чего.
+  if (args.includes('--install-only')) {
+    const r = await install(manifest, { root, force: args.includes('--force'), log: out });
+    if (!r.ok) {
+      process.stderr.write(`Установка не удалась: ${r.reason}${r.status ? ' (HTTP ' + r.status + ')' : ''}\n`);
+      return 2;
+    }
+    if (!r.downloaded) out(`Уже установлен: ${r.path}`);
+    return 0;
+  }
 
   if (args.includes('--platforms')) {
     const list = discoverPlatforms();

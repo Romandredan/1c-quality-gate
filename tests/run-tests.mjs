@@ -5562,6 +5562,23 @@ section('Самозаведение контура платформенного 
     );
   }
 
+  // --install-only нужен CI сдвига закрепления: на раннере нет платформы 1С, а скачать
+  // архив, сверить сумму и распаковать можно и без неё. Проверяется на готовой установке:
+  // сеть в тестах запрещена, а ветка «уже установлен» проходит тот же путь до скачивания.
+  {
+    const dataDir = join(WORK, 'pc-install-only');
+    const bin = boot.binaryPath(man, dataDir);
+    mkdirSync(dirname(bin), { recursive: true });
+    writeFileSync(bin, 'не бинарник', 'utf8');
+    writeFileSync(join(dirname(bin), '.ready'), JSON.stringify({ version: man.version, sha256: man.targets[boot.targetKey()].sha256 }), 'utf8');
+    const r = spawnSync(process.execPath, [join(ROOT, 'tools', 'platform-context-bootstrap.mjs'), '--install-only'], {
+      encoding: 'utf8',
+      env: { ...process.env, QG_DATA_DIR: dataDir },
+    });
+    check('--install-only на готовой установке: код 0 и путь', r.status === 0 && r.stdout.includes('Уже установлен'), `${r.status}: ${r.stdout}${r.stderr}`.slice(0, 200));
+    check('--install-only не поднимает демон и не ищет платформу', !r.stdout.includes('Готово:') && !r.stderr.includes('Контур не заведён'));
+  }
+
   // --- распаковка ------------------------------------------------------------
   // Тот `tar`, что приходит с Git for Windows, — GNU, и на zip отвечает «This does not look
   // like a tar archive». Системный bsdtar zip читает, поэтому путь берётся явно, а не по PATH:
