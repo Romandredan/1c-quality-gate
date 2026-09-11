@@ -192,3 +192,159 @@ export function mentions(root, oldV, { exclude = [] } = {}) {
   walk(root);
   return found.sort();
 }
+
+const publicTargets = (targets) =>
+  Object.fromEntries(Object.entries(targets).map(([k, t]) => [k, { asset: t.asset, sha256: t.sha256, size: t.size }]));
+
+/**
+ * Один прогон по движку. `apply=false` ничего не пишет, но собирает всё, что нужно PR;
+ * `apply=true` переписывает манифест и INSTALL.md. Упоминания считаются ДО записи, чтобы
+ * список был одинаков в обоих режимах.
+ */
+export async function bump({ engine, root = PLUGIN_ROOT, apply = false, fetchImpl = globalThis.fetch, token = process.env.GITHUB_TOKEN } = {}) {
+  const spec = ENGINES[engine];
+  if (!spec) return { ok: false, reason: 'unknown_engine', engine };
+  const manifestPath = join(root, spec.manifest);
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const base = { ok: true, engine, name: manifest.engine, current: manifest.version };
+
+  const releases = await fetchReleases(manifest.repo, { fetchImpl, token });
+  const latest = pickLatest(releases);
+  if (!latest) return { ok: false, reason: 'no_release', engine, name: manifest.engine, current: manifest.version };
+  if (compareVersions(latest.version, manifest.version) <= 0) {
+    return { ...base, latest: latest.version, upToDate: true, updated: false };
+  }
+
+  const built = buildTargets(manifest, latest.release, latest.version);
+  if (!built.ok) {
+    return { ok: false, reason: 'target_missing', engine, name: manifest.engine, current: manifest.version, latest: latest.version, missing: built.missing };
+  }
+  for (const key of built.unsigned) {
+    const t = built.targets[key];
+    const d = await sha256Of(t.url, { fetchImpl });
+    t.sha256 = d.sha256;
+    t.size = d.size;
+  }
+
+  const next = updatedManifest(manifest, latest.version, built.targets);
+  const installPath = join(root, 'docs', 'INSTALL.md');
+  const install = patchInstall(existsSync(installPath) ? readFileSync(installPath, 'utf8') : '', engine, manifest.version, latest.version);
+  const manifestsRel = Object.values(ENGINES).map((e) => e.manifest);
+  const result = {
+    ...base,
+    latest: latest.version,
+    upToDate: false,
+    updated: false,
+    targets: publicTargets(next.targets),
+    computed: built.unsigned,
+    releaseNotes: releaseNotesBetween(releases, manifest.version, latest.version),
+    installPatched: install.changed,
+    mentions: mentions(root, manifest.version, { exclude: manifestsRel }),
+  };
+  if (apply) {
+    writeFileSync(manifestPath, JSON.stringify(next, null, 2) + '\n', 'utf8');
+    if (install.changed) writeFileSync(installPath, install.text, 'utf8');
+    result.updated = true;
+  }
+  return result;
+}
+
+/** Коды возврата: check — 0 нет обновления, 3 есть, 1 ошибка; apply — 0 либо 1. */
+export function exitCode(result, mode) {
+  if (!result.ok) return 1;
+  if (mode === 'check') return result.upToDate ? 0 : 3;
+  return 0;
+}
+
+/** Тело PR. Всё, что ревьюеру нужно решить, — на одном экране; порядок ревью — RELEASING.md. */
+export function prBody(result, { sentinel = '' } = {}) {
+  const lines = [];
+  lines.push(`Сдвиг закрепления **${result.name}**: ${result.current} → ${result.latest}.`, '');
+  lines.push('Самообновления у пользователя по-прежнему нет: версия доедет с релизом плагина и поставится сама при первом прогоне.', '');
+  lines.push('| Цель | Файл | SHA-256 | Размер |', '|---|---|---|---|');
+  for (const [key, t] of Object.entries(result.targets || {})) {
+    lines.push(`| ${key} | \`${t.asset}\` | \`${t.sha256}\` | ${t.size} |`);
+  }
+  if (result.computed?.length) lines.push('', `Суммы по целям ${result.computed.join(', ')} посчитаны скачиванием: у asset не было поля digest.`);
+  lines.push('', '## Проверка', '');
+  if (result.engine === 'analyzer') {
+    lines.push(sentinel ? `Часовой на фикстуре плагина: \`${sentinel.trim()}\`` : 'Часовой не запускался.');
+    lines.push('', 'Ревьюеру: A/B на корпусе по `docs/false-positives-cfe.md`, сравнить состав диагностик `rules list`; при расхождениях дописать раздел перехода.');
+  } else {
+    lines.push('Архив скачан, сумма сошлась, распакован. Сервер не запускался: на раннере нет установленной платформы 1С. Проверка живого сервера — на машине ревьюера, `node tools/platform-context-bootstrap.mjs --status`.');
+  }
+  lines.push('', '## Заметки автора за пропущенные версии', '');
+  for (const n of result.releaseNotes || []) {
+    lines.push(`### ${n.tag} (${n.publishedAt ? n.publishedAt.slice(0, 10) : 'дата не указана'})`, '', n.body || '_без описания_', '');
+  }
+  if (!(result.releaseNotes || []).length) lines.push('_заметок нет_', '');
+  lines.push('## Упоминания старой версии, требующие решения', '');
+  lines.push(`INSTALL.md переписан скриптом (${result.installPatched} фраз). Остальные файлы со строкой \`${result.current}\` — история либо примеры следа, решает ревьюер:`, '');
+  for (const f of result.mentions || []) lines.push(`- \`${f}\``);
+  if (!(result.mentions || []).length) lines.push('_нет_');
+  lines.push('', '---', '', 'Собрано workflow `runtime-bump`; спецификация — `docs/superpowers/specs/2026-09-12-runtime-bump-design.md`.');
+  return lines.join('\n') + '\n';
+}
+
+export function parseArgs(argv) {
+  const out = { engine: null, mode: 'check', json: false, body: null, sentinel: null, error: null };
+  let modes = 0;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--engine') out.engine = argv[++i] || null;
+    else if (a === '--check') {
+      out.mode = 'check';
+      modes++;
+    } else if (a === '--apply') {
+      out.mode = 'apply';
+      modes++;
+    } else if (a === '--json') out.json = true;
+    else if (a === '--body') out.body = argv[++i] || null;
+    else if (a === '--sentinel') out.sentinel = argv[++i] || null;
+    else {
+      out.error = `неизвестный аргумент ${a}`;
+      return out;
+    }
+  }
+  if (modes > 1) out.error = '--check и --apply взаимоисключающие';
+  else if (out.body) {
+    if (!existsSync(out.body)) out.error = `файл результата не найден: ${out.body}`;
+  } else if (!out.engine) out.error = 'нужен --engine analyzer|platform-context';
+  else if (!ENGINES[out.engine]) out.error = `неизвестный движок ${out.engine}; есть ${Object.keys(ENGINES).join(', ')}`;
+  return out;
+}
+
+async function main(argv) {
+  const out = (s) => process.stdout.write(s + '\n');
+  const args = parseArgs(argv.slice(2));
+  if (args.error) {
+    process.stderr.write(`${args.error}\nИспользование: node tools/runtime-bump.mjs --engine analyzer|platform-context [--check|--apply] [--json]\n`);
+    return 1;
+  }
+  if (args.body) {
+    const result = JSON.parse(readFileSync(args.body, 'utf8'));
+    const sentinel = args.sentinel && existsSync(args.sentinel) ? readFileSync(args.sentinel, 'utf8') : '';
+    process.stdout.write(prBody(result, { sentinel }));
+    return 0;
+  }
+  let result;
+  try {
+    result = await bump({ engine: args.engine, apply: args.mode === 'apply' });
+  } catch (e) {
+    result = { ok: false, reason: 'request_failed', engine: args.engine, error: String(e.message || e) };
+  }
+  if (args.json) out(JSON.stringify(result, null, 2));
+  else if (!result.ok) {
+    out(`${result.name || args.engine}: отказ — ${result.reason}${result.missing ? ' (' + result.missing.join(', ') + ')' : ''}${result.error ? ': ' + result.error : ''}`);
+  } else if (result.upToDate) out(`${result.name}: закреплено ${result.current}, у автора ${result.latest} — обновления нет`);
+  else out(`${result.name}: закреплено ${result.current}, у автора ${result.latest} — ${result.updated ? 'манифест переписан' : 'обновление есть'}`);
+  return exitCode(result, args.mode);
+}
+
+if (process.argv[1]?.endsWith('runtime-bump.mjs')) {
+  // Как у бутстрапов: мгновенный выход обрывает недописанный stdout, когда он труба.
+  main(process.argv).then((code) => {
+    process.exitCode = code;
+    setTimeout(() => process.exit(code), 2000).unref();
+  });
+}
