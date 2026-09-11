@@ -41,7 +41,7 @@ const CATALOG_DECLARED =
   '[qg skipped: layer=code, scope=platform-antipatterns, reason=reader_unavailable]\n';
 
 // Контур кода на L2 — валидатор требует заявить слой 2 (advisor(), холодный читатель),
-// иначе предупреждает (task-22): без записи его пропуск на классе C3 не оставляет иного
+// в строгом режиме — ошибкой с v3.7.0 (task-22): без записи его пропуск на классе C3 не оставляет иного
 // следа. Фикстуры, собранные вручную и не вызывавшие advisor(), заявляют законный пропуск.
 const LOGIC_REVIEW_DECLARED = '[qg skipped: layer=code, scope=logic-review, reason=advisor_unavailable]\n';
 
@@ -2246,6 +2246,12 @@ const evProj = { env: { CLAUDE_PROJECT_DIR: EV_PROJ } };
   const withRecord = text + '\n[qg applied: layer=code, scope=ai-antipatterns, ids=[qg:AI-01], verdict=clean]\n[qg skipped: layer=code, scope=platform-antipatterns, reason=not_applicable]\n';
   const res2 = v.validate(withRecord, { gate: false });
   check('с записями о проходах предупреждения нет', !res2.problems.some((p) => /ai-antipatterns|platform-antipatterns/.test(p.message)), JSON.stringify(res2.problems));
+  // Окно предупреждения v3.6.0 закрыто в v3.7.0: в строгом режиме это ошибка по каждому скоупу.
+  const strict = v.validate(text, { gate: true });
+  const catalogErrors = strict.problems.filter((p) => p.severity === 'error' && /о проходе (ai|platform)-antipatterns/.test(p.message));
+  check('--gate: нет записи о проходах по каталогу — ошибка по обоим скоупам', catalogErrors.length === 2, JSON.stringify(strict.problems));
+  const strict2 = v.validate(withRecord, { gate: true });
+  check('--gate: с записями о проходах замечания этого рода нет', !strict2.problems.some((p) => /о проходе (ai|platform)-antipatterns/.test(p.message)), JSON.stringify(strict2.problems));
 }
 
 // Слой 2 (advisor(), холодный читатель) на L2 не оставляет иного следа, кроме этой записи —
@@ -2270,6 +2276,15 @@ const evProj = { env: { CLAUDE_PROJECT_DIR: EV_PROJ } };
 
   const l2Skipped = v.validate(l2Head + LOGIC_REVIEW_DECLARED + tail, { gate: false });
   check('L2 со skipped logic-review — без предупреждения', !l2Skipped.problems.some(isLogicReviewWarn), JSON.stringify(l2Skipped.problems));
+
+  // Окно закрыто в v3.7.0: в строгом режиме тот же пропуск — ошибка, законные формы проходят.
+  const isLogicReview = (p) => /scope=logic-review/.test(p.message);
+  const l2Strict = v.validate(l2Head + tail, { gate: true });
+  check('--gate: L2 без записи logic-review — ошибка', l2Strict.problems.some((p) => isLogicReview(p) && p.severity === 'error'), JSON.stringify(l2Strict.problems));
+  const l2StrictSkipped = v.validate(l2Head + LOGIC_REVIEW_DECLARED + tail, { gate: true });
+  check('--gate: L2 со skipped logic-review — без замечания этого рода', !l2StrictSkipped.problems.some(isLogicReview), JSON.stringify(l2StrictSkipped.problems));
+  const l1Strict = v.validate(l1Head + tail, { gate: true });
+  check('--gate: L1 без записи logic-review — без замечания этого рода', !l1Strict.problems.some(isLogicReview), JSON.stringify(l1Strict.problems));
 }
 
 // ---------------------------------------------------------------------------
@@ -4359,7 +4374,7 @@ section('Покрытие: прогон по одному файлу не зак
   );
   const relEv = writeBytes(
     'ev-coverage-release.md',
-    head + '[qg applied: layer=xml, scope=structure-validation, ids=[qg:XML-STRUCT], verdict=clean]\n' + tail
+    head + '[qg applied: layer=xml, scope=structure-validation, ids=[qg:XML-STRUCT], verdict=clean]\n' + CATALOG_DECLARED + tail
   );
   const released = run('tools/gate.mjs', ['release', '--evidence', relEv, '--session', 'S'], {
     env: { CLAUDE_PROJECT_DIR: relProj },
@@ -6778,8 +6793,11 @@ section('Валидатор сверяет заявленный профиль �
       'utf8'
     );
   };
-  const isVolumeWarn = (p) => p.severity === 'warn' && /ниже расчётного/.test(p.message);
-  const isArchetypeWarn = (p) => p.severity === 'warn' && /отсутствуют в archetypes=/.test(p.message);
+  // Предикаты по тексту, без важности: отрицательная проверка обязана ловить замечание любой
+  // важности, иначе после смены warn → error (v3.7.0) она проходила бы вхолостую.
+  const isVolumeMismatch = (p) => /ниже расчётного/.test(p.message);
+  const isArchetypeMismatch = (p) => /отсутствуют в archetypes=/.test(p.message);
+  const asError = (pred) => (p) => pred(p) && p.severity === 'error';
 
   // Step 1 брифа: файл с "Новый Запрос" в 60 строках — computeProfile по умолчаниям
   // (c1MaxLines=40) даёт volume=C2, archetypes=[query]. Заявленный C1/[none] обязан
@@ -6798,14 +6816,14 @@ section('Валидатор сверяет заявленный профиль �
       '[qg scope: volume=C1, files=1, loc=+60/-0, archetypes=[none], complexity=[none], driver=volume, ' +
       'resolved=code:L1|arch:skip|xml:n/a|hygiene:full, config=default]\n';
     const { problems } = ev.validate(under, { gate: true, root, session: 'S' });
-    check('заявленный volume ниже расчётного — предупреждение', problems.some(isVolumeWarn), JSON.stringify(problems));
-    check('заявленный archetypes без расчётной метки — предупреждение', problems.some(isArchetypeWarn), JSON.stringify(problems));
+    check('заявленный volume ниже расчётного — ошибка строгого режима', problems.some(asError(isVolumeMismatch)), JSON.stringify(problems));
+    check('заявленный archetypes без расчётной метки — ошибка строгого режима', problems.some(asError(isArchetypeMismatch)), JSON.stringify(problems));
 
     const matching = '## quality evidence\n\n' +
       '[qg scope: volume=C2, files=1, loc=+60/-0, archetypes=[query], complexity=[none], driver=archetype:query, ' +
       'resolved=code:L2|arch:skip|xml:n/a|hygiene:full, config=default]\n';
     const { problems: problems2 } = ev.validate(matching, { gate: true, root, session: 'S' });
-    check('совпадающий профиль — без предупреждений этого рода', !problems2.some(isVolumeWarn) && !problems2.some(isArchetypeWarn), JSON.stringify(problems2));
+    check('совпадающий профиль — без замечаний этого рода', !problems2.some(isVolumeMismatch) && !problems2.some(isArchetypeMismatch), JSON.stringify(problems2));
   }
 
   // Расхождение ВВЕРХ не замечание: заявленный volume выше расчётного проходит молча.
@@ -6820,7 +6838,7 @@ section('Валидатор сверяет заявленный профиль �
       '[qg scope: volume=C3, files=1, loc=+2/-0, archetypes=[none], complexity=[none], driver=volume, ' +
       'resolved=code:L1|arch:skip|xml:n/a|hygiene:full, config=default]\n';
     const { problems } = ev.validate(text, { gate: true, root, session: 'S' });
-    check('заявленный volume выше расчётного — без предупреждения', !problems.some(isVolumeWarn), JSON.stringify(problems));
+    check('заявленный volume выше расчётного — без замечания', !problems.some(isVolumeMismatch), JSON.stringify(problems));
   }
 
   // Лишняя заявленная метка (сверх расчётной) — тоже не замечание: расширение списка легально.
@@ -6835,7 +6853,7 @@ section('Валидатор сверяет заявленный профиль �
       '[qg scope: volume=C1, files=1, loc=+3/-0, archetypes=[query,transaction], complexity=[none], driver=archetype:query, ' +
       'resolved=code:L2|arch:skip|xml:n/a|hygiene:full, config=default]\n';
     const { problems } = ev.validate(text, { gate: true, root, session: 'S' });
-    check('лишняя заявленная метка — без предупреждения', !problems.some(isArchetypeWarn), JSON.stringify(problems));
+    check('лишняя заявленная метка — без замечания', !problems.some(isArchetypeMismatch), JSON.stringify(problems));
   }
 
   // Без взведённого гейта (qg-pending.json отсутствует) сверять профиль не с чем — молчим
@@ -6846,7 +6864,7 @@ section('Валидатор сверяет заявленный профиль �
       '[qg scope: volume=C1, files=1, loc=+60/-0, archetypes=[none], complexity=[none], driver=volume, ' +
       'resolved=code:L1|arch:skip|xml:n/a|hygiene:full, config=default]\n';
     const { problems } = ev.validate(text, { gate: true, root, session: 'S' });
-    check('нет состояния гейта — сверка профиля пропущена молча', !problems.some(isVolumeWarn) && !problems.some(isArchetypeWarn), JSON.stringify(problems));
+    check('нет состояния гейта — сверка профиля пропущена молча', !problems.some(isVolumeMismatch) && !problems.some(isArchetypeMismatch), JSON.stringify(problems));
   }
 }
 

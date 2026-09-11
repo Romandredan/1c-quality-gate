@@ -544,8 +544,8 @@ export function validate(text, { gate = false, root = null, session = null } = {
   // Контур кода запущен хотя бы на L1 — значит, два прохода по каталогу антипаттернов
   // обязаны быть заявлены: applied, skipped или not_verified. До этого требования два самых
   // объёмных справочника контура читались «всегда», а следа не оставляли, и отличить «код
-  // чист» от «проход не делался» было нечем. Пока предупреждение: блокирующим станет
-  // следующим MINOR (docs/RELEASING.md, переходное окно).
+  // чист» от «проход не делался» было нечем. В строгом режиме — ошибка с v3.7.0: окно
+  // предупреждения (v3.6.0) закрыто, строку следа печатает `catalog.mjs attest`.
   const codeDepth = (() => {
     const s = records.find((r) => r.type === 'scope');
     const resolved = String(s?.fields?.resolved || '');
@@ -557,32 +557,31 @@ export function validate(text, { gate = false, root = null, session = null } = {
     for (const s of ['ai-antipatterns', 'platform-antipatterns']) {
       if (closes.has(s) || skippedScopes.has(s)) continue;
       add(
-        'warn',
+        gate ? 'error' : 'warn',
         records.find((r) => r.type === 'scope')?.line || 0,
         `контур code запущен (${codeDepth}), но о проходе ${s} не заявлено: нужна запись ` +
-          `[qg applied: layer=code, scope=${s}, ...] либо [qg skipped: layer=code, scope=${s}, reason=...]`
+          `[qg applied: layer=code, scope=${s}, ...] либо [qg skipped: layer=code, scope=${s}, reason=...] — ` +
+          'её печатает catalog.mjs attest'
       );
     }
 
     // Слой 2 (advisor() и холодный читатель) заявлен глубиной L2, но следа не оставляет
     // ничем, кроме этой записи — его пропуск на классе C3 в живом A/B-прогоне не заметил
-    // никто (task-22). Пока предупреждение: блокирующим станет следующим MINOR
-    // (docs/RELEASING.md, переходное окно).
+    // никто (task-22). В строгом режиме — ошибка с v3.7.0 (окно предупреждения v3.6.0 закрыто).
     if (codeDepth === 'L2' && !closes.has('logic-review') && !skippedScopes.has('logic-review')) {
       add(
-        'warn',
+        gate ? 'error' : 'warn',
         records.find((r) => r.type === 'scope')?.line || 0,
         'контур code запущен на L2, но о слое 2 (ревью логики: advisor() и холодный читатель) не ' +
           'заявлено: нужна запись [qg applied: layer=code, scope=logic-review, ids=[...], verdict=...] ' +
-          'либо [qg skipped: layer=code, scope=logic-review, reason=...]. В следующем MINOR это станет ' +
-          'ошибкой (docs/RELEASING.md, переходное окно)'
+          'либо [qg skipped: layer=code, scope=logic-review, reason=...]'
       );
     }
   }
 
   // Находка 🔴/🟠 из прозы отчёта обязана быть закрыта записью violation в следе — см.
-  // `uncoveredFindings`. Предупреждение в обоих режимах: разбор прозы приближённый, и это
-  // новое требование (docs/RELEASING.md, переходное окно).
+  // `uncoveredFindings`. Предупреждение в обоих режимах и навсегда: разбор прозы приближённый,
+  // а приближение по правилам плагина не блокирует (docs/RELEASING.md).
   for (const f of uncoveredFindings(text, records)) {
     add(
       'warn',
@@ -740,8 +739,10 @@ export function validate(text, { gate = false, root = null, session = null } = {
   // Весь блок обёрнут в try/catch: сбой чтения git или файла не обязан ронять валидатор —
   // тогда сверка просто не состоялась, как и при отсутствующих данных.
   //
-  // Пока предупреждение в обе стороны: следующим MINOR понижение станет ошибкой
-  // (docs/RELEASING.md, переходное окно).
+  // Понижение — ошибка с v3.7.0 (окно предупреждения v3.6.0 закрыто). Устранимо всегда:
+  // `volume` и `archetypes` не зависят от метрик анализатора, и `gate.mjs plan` считает их
+  // той же функцией по тем же файлам сессии. Расхождение значит, что после плана файлы
+  // сессии изменились, — тогда план печатается заново.
   if (scopes.length === 1 && own?.rawFiles?.length) {
     try {
       const computed = computeProfile({
@@ -759,22 +760,23 @@ export function validate(text, { gate = false, root = null, session = null } = {
           VOLUMES.indexOf(declaredVolume) < VOLUMES.indexOf(computed.volume)
         ) {
           add(
-            'warn',
+            'error',
             scopeRec.line,
             `volume="${declaredVolume}" в записи scope ниже расчётного: computeProfile по файлам сессии ` +
-              `даёт ${computed.volume}. Модель вправе поднять глубину, но не понизить — в следующем MINOR ` +
-              'несоответствие станет ошибкой (docs/RELEASING.md)'
+              `даёт ${computed.volume}. Модель вправе поднять глубину, но не понизить — перенеси строку ` +
+              'scope из gate.mjs plan (файлы сессии менялись после плана — напечатай его заново)'
           );
         }
         const declaredArchetypes = Array.isArray(scopeRec.fields.archetypes) ? scopeRec.fields.archetypes : [];
         const missing = computed.archetypes.filter((a) => !declaredArchetypes.includes(a));
         if (missing.length) {
           add(
-            'warn',
+            'error',
             scopeRec.line,
             `архетипы расчётного профиля (computeProfile) — ${missing.join(', ')} — отсутствуют в ` +
               `archetypes=[${declaredArchetypes.join(',') || 'none'}] записи scope. Модель вправе расширить ` +
-              'список, но не сузить — в следующем MINOR несоответствие станет ошибкой (docs/RELEASING.md)'
+              'список, но не сузить — перенеси строку scope из gate.mjs plan (файлы сессии менялись после ' +
+              'плана — напечатай его заново)'
           );
         }
       }
