@@ -7015,6 +7015,106 @@ section('Сдвиг закрепления движков — документа
 }
 
 // ---------------------------------------------------------------------------
+section('Сдвиг закрепления движков — прогон и CLI');
+
+{
+  const rb = await import(pathToFileURL(join(ROOT, 'tools', 'runtime-bump.mjs')).href);
+  const analyzerReleases = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'analyzer-releases.json'), 'utf8'));
+  const pcReleases = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'platform-context-releases.json'), 'utf8'));
+
+  // Временный корень: настоящие манифесты, урезанный INSTALL.md, один файл с упоминанием.
+  const root = join(WORK, 'bump-root');
+  const seed = () => {
+    removeTreeSync(root);
+    for (const f of ['assets/analyzer/runtime-manifest.json', 'assets/platform-context/runtime-manifest.json']) {
+      writeBytes(`bump-root/${f}`, readFileSync(join(ROOT, f), 'utf8'));
+    }
+    writeBytes('bump-root/docs/INSTALL.md', 'проверено на **0.2.73**; пример `"version": "0.2.73"`; след `engine=bsl-context@0.16.0/8.3.27.1688`\n');
+    writeBytes('bump-root/README.md', 'engine=bsl-analyzer@0.2.73\n');
+  };
+  const apiFor = (releases, files = {}) => async (url) => {
+    if (url.includes('/releases')) return { ok: true, status: 200, json: async () => releases };
+    const bytes = files[url];
+    if (!bytes) return { ok: false, status: 404 };
+    return { ok: true, status: 200, body: new Blob([bytes]).stream() };
+  };
+
+  // --check: ничего не пишет, но всё сообщает.
+  seed();
+  const checked = await rb.bump({ engine: 'analyzer', root, apply: false, fetchImpl: apiFor(analyzerReleases), token: '' });
+  check('check: обновление найдено, версии названы', checked.ok && !checked.upToDate && checked.current === '0.2.73' && checked.latest === '0.2.79', JSON.stringify(checked).slice(0, 200));
+  check('check: имя движка из манифеста для ветки и заголовка', checked.name === 'bsl-analyzer');
+  check('check: манифест на диске не тронут', JSON.parse(readFileSync(join(root, 'assets/analyzer/runtime-manifest.json'), 'utf8')).version === '0.2.73');
+  check('check: заметки автора и упоминания приложены', checked.releaseNotes.length === 2 && checked.mentions.includes('README.md'), JSON.stringify(checked.mentions));
+  check('check: updated=false', checked.updated === false);
+  check('код возврата check при обновлении — 3', rb.exitCode(checked, 'check') === 3);
+
+  // --apply: манифест и INSTALL.md переписаны, суммы из digest.
+  const applied = await rb.bump({ engine: 'analyzer', root, apply: true, fetchImpl: apiFor(analyzerReleases), token: '' });
+  const manAfter = JSON.parse(readFileSync(join(root, 'assets/analyzer/runtime-manifest.json'), 'utf8'));
+  check('apply: манифест переписан на новую версию с суммами из digest', applied.updated && manAfter.version === '0.2.79' && manAfter.targets['win32-x64'].sha256.startsWith('f52cf2e0'), JSON.stringify(manAfter.targets['win32-x64']));
+  check('apply: манифест заканчивается переводом строки', readFileSync(join(root, 'assets/analyzer/runtime-manifest.json'), 'utf8').endsWith('}\n'));
+  check('apply: INSTALL.md переписан по двум фразам', applied.installPatched === 2 && readFileSync(join(root, 'docs/INSTALL.md'), 'utf8').includes('проверено на **0.2.79**'));
+  check('код возврата apply — 0', rb.exitCode(applied, 'apply') === 0);
+
+  // Повтор после apply: обновления нет.
+  const again = await rb.bump({ engine: 'analyzer', root, apply: false, fetchImpl: apiFor(analyzerReleases), token: '' });
+  check('после сдвига: upToDate, код 0', again.ok && again.upToDate && rb.exitCode(again, 'check') === 0);
+
+  // Отказ при неполном релизе: манифест не тронут.
+  seed();
+  const partialOnly = analyzerReleases.filter((r) => r.tag_name !== 'v0.2.79');
+  const refused = await rb.bump({ engine: 'analyzer', root, apply: true, fetchImpl: apiFor(partialOnly), token: '' });
+  check('релиз без одной цели — отказ с перечнем целей, манифест не тронут',
+    !refused.ok && refused.reason === 'target_missing' && refused.missing.includes('darwin-arm64') &&
+      JSON.parse(readFileSync(join(root, 'assets/analyzer/runtime-manifest.json'), 'utf8')).version === '0.2.73', JSON.stringify(refused));
+  check('код возврата при отказе — 1 в обоих режимах', rb.exitCode(refused, 'check') === 1 && rb.exitCode(refused, 'apply') === 1);
+
+  // Запасной подсчёт суммы скачиванием для целей без digest.
+  seed();
+  const linuxBytes = Buffer.from('linux-архив');
+  const macBytes = Buffer.from('mac-архив');
+  const pc = await rb.bump({
+    engine: 'platform-context', root, apply: true, token: '',
+    fetchImpl: apiFor(pcReleases, { 'https://example.invalid/linux.tar.gz': linuxBytes, 'https://example.invalid/mac.tar.gz': macBytes }),
+  });
+  const pcMan = JSON.parse(readFileSync(join(root, 'assets/platform-context/runtime-manifest.json'), 'utf8'));
+  check('bsl-context: цели без digest посчитаны скачиванием и отмечены в результате',
+    pc.ok && pc.computed.sort().join(',') === 'darwin-arm64,linux-x64' &&
+      pcMan.targets['linux-x64'].sha256 === createHash('sha256').update(linuxBytes).digest('hex') && pcMan.targets['linux-x64'].size === linuxBytes.length,
+    JSON.stringify(pc.computed));
+  check('bsl-context: цель с digest суммы не скачивала', pcMan.targets['win32-x64'].sha256 === '1'.repeat(64));
+  check('bsl-context: INSTALL.md переписан по штампу', readFileSync(join(root, 'docs/INSTALL.md'), 'utf8').includes('engine=bsl-context@0.18.1/'));
+
+  // Неизвестный движок и пустой список релизов.
+  const unknown = await rb.bump({ engine: 'нет-такого', root, fetchImpl: apiFor([]), token: '' });
+  check('неизвестный движок — отказ', !unknown.ok && unknown.reason === 'unknown_engine');
+  seed();
+  const empty = await rb.bump({ engine: 'analyzer', root, fetchImpl: apiFor([]), token: '' });
+  check('нет обычных релизов — отказ no_release', !empty.ok && empty.reason === 'no_release');
+
+  // Тело PR.
+  const body = rb.prBody(checked, { sentinel: 'Часовой (bsl-analyzer@0.2.79): found' });
+  check('тело PR: таблица версий, цели, заметки, упоминания, часовой', ['0.2.73', '0.2.79', 'win32-x64', 'новая диагностика', 'README.md', 'found', 'false-positives-cfe.md'].every((s) => body.includes(s)), body.slice(0, 300));
+  const pcBody = rb.prBody(pc, {});
+  check('тело PR сервера справки: сказано, что сервер не запускался', pcBody.includes('не запускался'));
+
+  // Разбор аргументов.
+  const pa = rb.parseArgs(['--engine', 'analyzer', '--apply', '--json']);
+  check('аргументы: движок, режим, json', pa.engine === 'analyzer' && pa.mode === 'apply' && pa.json === true);
+  check('аргументы: режим по умолчанию check', rb.parseArgs(['--engine', 'analyzer']).mode === 'check');
+  check('аргументы: --check и --apply вместе — ошибка', rb.parseArgs(['--engine', 'analyzer', '--check', '--apply']).error != null);
+  writeBytes('bump-root/bump.json', JSON.stringify(checked));
+  check('аргументы: без движка — ошибка, кроме режима --body', rb.parseArgs([]).error != null && rb.parseArgs(['--body', join(root, 'bump.json')]).error == null);
+
+  // CLI: неверный вызов даёт код 1 и подсказку, --body печатает тело из файла результата.
+  const bad = run('tools/runtime-bump.mjs', []);
+  check('CLI без движка — код 1 и подсказка', bad.code === 1 && bad.out.includes('--engine'), `${bad.code}: ${bad.out.slice(0, 120)}`);
+  const bodyRun = run('tools/runtime-bump.mjs', ['--body', join(root, 'bump.json')]);
+  check('CLI --body печатает тело PR', bodyRun.code === 0 && bodyRun.out.includes('0.2.79'), bodyRun.out.slice(0, 120));
+}
+
+// ---------------------------------------------------------------------------
 // Изолированные наборы тестов — отдельными процессами: у них собственные счётчики
 // и временные каталоги, а их падение обязано быть видно в общем итоге CI.
 for (const suite of ['tests/gate-core.test.mjs', 'tests/opencode-plugin.test.mjs']) {
