@@ -27,6 +27,7 @@ import { computeProfile, ARCHETYPES, BASE_CHECKLIST } from './profile.mjs';
 import { SCOPES } from './evidence-scopes.mjs';
 import { readCatalog } from './gen-catalog-index.mjs';
 import { expectedExamined } from './catalog.mjs';
+import { validatePatterns, matchesAny } from './path-match.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -879,6 +880,27 @@ function planFileList(args) {
   return { files: Object.keys(state.sessions[sessionId].files || {}), sessionId, error: null };
 }
 
+/**
+ * Признак тестового модуля YAxUnit — экспортная процедура `ИсполняемыеСценарии`.
+ * Только подсказка: исключает проект своей настройкой `tests.paths`, а не эвристика плана.
+ */
+const YAXUNIT_ENTRY = /^[ \t]*(?:Процедура|Procedure)[ \t]+ИсполняемыеСценарии[ \t]*\([^)]*\)[ \t]*(?:Экспорт|Export)/imu;
+
+function yaxunitCandidates(rootDir, bslFiles, testPaths) {
+  const found = [];
+  for (const f of bslFiles) {
+    if (matchesAny(f, testPaths)) continue;
+    try {
+      const abs = /^([a-z]:|\/)/i.test(f) ? f : join(rootDir, f);
+      // BOM у модулей 1С — норма, а `^` по нему не проходит: первая процедура файла терялась бы.
+      if (YAXUNIT_ENTRY.test(readFileSync(abs, 'utf8').replace(/^﻿/, ''))) found.push(f);
+    } catch {
+      /* нечитаемый файл подсказки не даёт; его судьбу решают инструменты плана */
+    }
+  }
+  return found;
+}
+
 /** Метрики сложности для `computeProfile`: реальный прогон анализатора либо явный отказ. */
 function analyzerMetrics(rootDir, files, { skip }) {
   if (skip) return { ok: false, metrics: {}, reason: 'запуск отключён флагом --no-analyzer' };
@@ -930,6 +952,17 @@ function cmdPlan(args) {
   const configState = resolveConfigState(rootDir);
   const config = configState.values;
 
+  // Пути автотестов решают, взводится ли гейт вообще; неверные молча не работали бы — отказ.
+  const testPaths = config.tests?.paths ?? [];
+  const testPathsCheck = validatePatterns(testPaths);
+  if (!testPathsCheck.ok) {
+    process.stderr.write(
+      `Настройка проекта отклонена: tests.paths — ${testPathsCheck.errors.join('; ')}. ` +
+        'Нужен массив путей от корня проекта, например ["src/cfe/Автотесты"] (docs/CONFIG.md, раздел tests).\n'
+    );
+    return 2;
+  }
+
   const { ok: analyzerOk, metrics, reason: analyzerReason } = analyzerMetrics(rootDir, files, { skip: noAnalyzer });
   if (!analyzerOk) diag(`сложность не считалась: ${analyzerReason}\n`);
 
@@ -961,6 +994,24 @@ function cmdPlan(args) {
   write(`${profile.scopeLine}\n\n`);
 
   const bslFiles = files.filter((f) => /\.(bsl|os)$/i.test(f));
+
+  // Исключение видно в плане, а не только в поле config следа: прогон по смешанной правке
+  // иначе выглядит так, будто про тестовые файлы забыли.
+  if (testPaths.length) {
+    write('## Исключено настройкой проекта (tests.paths)\n');
+    for (const t of testPaths) write(`- ${t}\n`);
+    write('Правки по этим путям гейт не взводит и ни одним контуром не проверяет.\n\n');
+  }
+  const yaxunitHint = yaxunitCandidates(rootDir, bslFiles, testPaths);
+  if (yaxunitHint.length) {
+    write('## Похоже на тесты YAxUnit\n');
+    for (const f of yaxunitHint) write(`- ${f}\n`);
+    write(
+      'В модуле есть экспортная ИсполняемыеСценарии. Если это автотесты, добавьте их путь в tests.paths ' +
+        'файла .1c-quality-gate.json — гейт перестанет их взводить. Сейчас они проверяются как рабочий код.\n\n'
+    );
+  }
+
   const tools = buildToolCommands({ files, resolvedCode: resolved.code, archetypeLabels, bslFiles, rootDir });
   write('## Инструменты (в этом порядке)\n');
   for (const t of tools) write(`${t}\n`);
@@ -991,6 +1042,8 @@ function cmdPlan(args) {
       modelPasses: { depth: resolved.code, passes },
       contours: { arch: archLine, xml: xmlLine },
       mustClose,
+      excludedPaths: testPaths,
+      yaxunitHint,
     };
     process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
   }

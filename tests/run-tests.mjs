@@ -6764,7 +6764,7 @@ section('План прогона печатает инструмент');
 
   // Контракт JSON закрытый и явный: пропущенный ключ здесь неотличим от «забыли сериализовать» —
   // тест держит форму объекта равной той, что описана в брифе задачи 12.
-  const expectedKeys = ['profile', 'scopeLine', 'tools', 'references', 'checklist', 'modelPasses', 'contours', 'mustClose'];
+  const expectedKeys = ['profile', 'scopeLine', 'tools', 'references', 'checklist', 'modelPasses', 'contours', 'mustClose', 'excludedPaths', 'yaxunitHint'];
   const missingKeys = expectedKeys.filter((k) => !Object.prototype.hasOwnProperty.call(plan, k));
   check('в --json есть все ключи контракта', missingKeys.length === 0, `не хватает: ${missingKeys.join(', ')}`);
   const { BASE_CHECKLIST } = await import(pathToFileURL(join(ROOT, 'tools', 'profile.mjs')).href);
@@ -6783,6 +6783,53 @@ section('План прогона печатает инструмент');
   const noFiles = run('tools/gate.mjs', ['plan'], { env: { QG_PROJECT_DIR: emptyRoot } });
   check('plan без --files и без взведённого гейта отказывает', noFiles.code !== 0, `код: ${noFiles.code}`);
   check('отказ объясняет причину', /--files|гейт|сесси/i.test(noFiles.out), noFiles.out.slice(0, 300));
+}
+
+section('План прогона — пути автотестов и подсказка YAxUnit');
+
+{
+  const root = join(WORK, 'plan-tests-root');
+  rmSync(root, { recursive: true, force: true });
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: root });
+  const prod = 'src/cfe/Доработки/CommonModules/М/Ext/Module.bsl';
+  const yax = 'src/cfe/Доработки/CommonModules/тест_М/Ext/Module.bsl';
+  mkdirSync(join(root, dirname(prod)), { recursive: true });
+  mkdirSync(join(root, dirname(yax)), { recursive: true });
+  writeFileSync(join(root, prod), BOM + 'Процедура П() Экспорт\n\tА = 1;\nКонецПроцедуры\n', 'utf8');
+  writeFileSync(join(root, yax), BOM + 'Процедура ИсполняемыеСценарии() Экспорт\n\tЮТТесты.ДобавитьТест("Т");\nКонецПроцедуры\n', 'utf8');
+  const cfg = (obj) => writeFileSync(join(root, '.1c-quality-gate.json'), JSON.stringify(obj), 'utf8');
+  const plan = (...files) => run('tools/gate.mjs', ['plan', '--files', ...files, '--no-analyzer', '--json'], { env: { QG_PROJECT_DIR: root } });
+
+  cfg({ tests: { paths: ['src/cfe/Автотесты'] } });
+  const r = plan(prod, yax);
+  check('план с tests.paths завершается успешно', r.code === 0, r.out.slice(0, 300));
+  const p = JSON.parse(r.out);
+  check('план называет действующие пути исключения', JSON.stringify(p.excludedPaths) === JSON.stringify(['src/cfe/Автотесты']), JSON.stringify(p.excludedPaths));
+  check('след несёт config=custom:tests', /config=custom:tests\]/.test(p.scopeLine), p.scopeLine);
+  check('модуль YAxUnit вне путей исключения назван в подсказке, рабочий — нет',
+    JSON.stringify(p.yaxunitHint) === JSON.stringify([yax]), JSON.stringify(p.yaxunitHint));
+  const text = run('tools/gate.mjs', ['plan', '--files', prod, yax, '--no-analyzer'], { env: { QG_PROJECT_DIR: root } });
+  check('текстовый план: раздел исключений и подсказка с советом про tests.paths',
+    /## Исключено настройкой проекта/.test(text.out) && /## Похоже на тесты YAxUnit/.test(text.out) && text.out.includes('tests.paths'),
+    text.out.slice(0, 600));
+
+  cfg({});
+  const bare = JSON.parse(plan(prod).out);
+  check('без настройки: пути пусты, подсказки нет', bare.excludedPaths.length === 0 && bare.yaxunitHint.length === 0);
+  const bareText = run('tools/gate.mjs', ['plan', '--files', prod, '--no-analyzer'], { env: { QG_PROJECT_DIR: root } });
+  check('без настройки раздела исключений в тексте нет', !/## Исключено настройкой проекта/.test(bareText.out));
+
+  // Неверная настройка — отказ до профиля, как у archetypes.custom.
+  cfg({ tests: { paths: ['/abs', 'src/../x'] } });
+  const bad = plan(prod);
+  check('неверные tests.paths: план отказывает с кодом 2', bad.code === 2, `код ${bad.code}`);
+  check('отказ называет ключ и оба пути', bad.out.includes('tests.paths') && bad.out.includes('/abs') && bad.out.includes('src/../x'), bad.out.slice(0, 300));
+  cfg({ tests: { paths: 'src/cfe/Автотесты' } });
+  check('tests.paths не массив: отказ', plan(prod).code === 2);
+}
+
+{
 
   // Fix round 1 (ревью задачи 12). Правка ТОЛЬКО XML роли (архетип rights по pathMarker
   // Roles/.../Ext/Rights.xml) поднимает resolved.code до L2, но не приносит ни одного
