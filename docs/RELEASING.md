@@ -164,6 +164,11 @@ PR в ветке `chore/bump-<движок>` с назначением на вл
 Разовая настройка репозитория, без которой создание PR падает: Settings → Actions →
 General → «Allow GitHub Actions to create and approve pull requests».
 
+CI `validate` на PR сдвига запускается, но ждёт одобрения владельца: PR открыт ботом, и
+GitHub ставит запуск в статус `action_required`. Одобрить — кнопка «Approve and run» на
+вкладке Checks этого PR. До одобрения зелёных проверок у PR нет, а проверки на ubuntu уже
+прошли внутри самого `runtime-bump`.
+
 Что делает ревьюер такого PR:
 
 | Движок | Проверка | Где |
