@@ -2528,6 +2528,19 @@ section('Проектная настройка — создание, разре�
   reset();
   const bare = config.resolve(proj, {});
   check('без файла действуют умолчания', bare.values.volume.c1MaxLines === 40 && bare.sources.volume.c1MaxLines === 'умолчание');
+
+  // --- раздел tests ------------------------------------------------------------
+  // Пути исключения читает взвод гейта. Раздел обязан появляться в создаваемом файле пустым
+  // с описанием: иначе о настройке знает только тот, кто прочитал CONFIG.md.
+  check('tests.paths по умолчанию пуст', Array.isArray(bare.values.tests?.paths) && bare.values.tests.paths.length === 0);
+  const tpl = JSON.parse(config.template());
+  check('раздел tests в создаваемом файле — пустой, с описанием ключа paths',
+    tpl.tests && Object.keys(tpl.tests).join() === '//' && tpl.tests['//'].includes('paths'));
+  write({ tests: { paths: ['src/cfe/Автотесты'] } });
+  const withTests = config.resolve(proj, {});
+  check('tests.paths из файла читается', withTests.values.tests.paths[0] === 'src/cfe/Автотесты' && withTests.unknown.length === 0);
+  check('заданные пути видны в следе: config=custom:tests', config.evidenceValue(withTests) === 'custom:tests', config.evidenceValue(withTests));
+  reset();
   check('умолчание часового — std454', bare.values.sentinel.id === 'std454');
 
   // Шаблон намеренно не проставляет значения: иначе умолчание закрепляется навсегда и
