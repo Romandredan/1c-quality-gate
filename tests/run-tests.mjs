@@ -6917,12 +6917,16 @@ section('Сдвиг закрепления движков — выбор рел�
 
 // Закрепление не самообновление: скрипт лишь готовит новую версию манифеста, а решение и
 // проверка остаются за ревью PR. Здесь проверяется чистая часть: без сети и без записи.
+//
+// Манифесты во всех секциях сдвига — замороженные копии из фикстур, а не assets/. Workflow
+// runtime-bump гоняет этот набор ПОСЛЕ того, как переписал настоящие манифесты: тест,
+// читающий assets/ и ждущий в нём прежнюю версию, валил бы первый же сдвиг на шаге тестов.
 {
   const rb = await import(pathToFileURL(join(ROOT, 'tools', 'runtime-bump.mjs')).href);
   const analyzerReleases = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'analyzer-releases.json'), 'utf8'));
   const pcReleases = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'platform-context-releases.json'), 'utf8'));
-  const analyzerManifest = JSON.parse(readFileSync(join(ROOT, 'assets', 'analyzer', 'runtime-manifest.json'), 'utf8'));
-  const pcManifest = JSON.parse(readFileSync(join(ROOT, 'assets', 'platform-context', 'runtime-manifest.json'), 'utf8'));
+  const analyzerManifest = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'analyzer-manifest.json'), 'utf8'));
+  const pcManifest = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'platform-context-manifest.json'), 'utf8'));
 
   check('сравнение версий: числовое, а не строковое', rb.compareVersions('0.2.79', '0.2.9') > 0 && rb.compareVersions('0.16.0', '0.16.0') === 0);
 
@@ -7014,14 +7018,30 @@ section('Сдвиг закрепления движков — документа
 {
   const rb = await import(pathToFileURL(join(ROOT, 'tools', 'runtime-bump.mjs')).href);
 
-  const install = readFileSync(join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
-  const a = rb.patchInstall(install, 'analyzer', '0.2.73', '0.2.79');
-  check('INSTALL.md: фраза «проверено на» и пример конфига анализатора переписаны', a.changed === 2 && a.text.includes('проверено на **0.2.79**') && a.text.includes('"version": "0.2.79"'), `changed=${a.changed}`);
-  check('INSTALL.md: история переходов и чужие упоминания не тронуты', a.text.includes('engine=bsl-context@0.16.0/'));
-  const p = rb.patchInstall(install, 'platform-context', '0.16.0', '0.18.1');
-  check('INSTALL.md: штамп сервера справки переписан', p.changed === 1 && p.text.includes('engine=bsl-context@0.18.1/'), `changed=${p.changed}`);
+  // Правка по образцу: замороженный текст, версии известны заранее.
+  const sample =
+    'Закреплено и\nпроверено на **0.2.73**; версия и суммы.\n' +
+    '```json\n{ "analyzer": { "version": "0.2.73" } }\n```\n' +
+    'Переход 0.2.66 → 0.2.73 — история.\n' +
+    'в следе каждого прогона: `engine=bsl-context@0.16.0/8.3.27.1688`.\n';
+  const a = rb.patchInstall(sample, 'analyzer', '0.2.73', '0.2.79');
+  check('образец: фраза «проверено на» и пример конфига анализатора переписаны', a.changed === 2 && a.text.includes('проверено на **0.2.79**') && a.text.includes('"version": "0.2.79"'), `changed=${a.changed}`);
+  check('образец: история переходов и чужие упоминания не тронуты', a.text.includes('Переход 0.2.66 → 0.2.73') && a.text.includes('engine=bsl-context@0.16.0/'));
+  const p = rb.patchInstall(sample, 'platform-context', '0.16.0', '0.18.1');
+  check('образец: штамп сервера справки переписан', p.changed === 1 && p.text.includes('engine=bsl-context@0.18.1/'), `changed=${p.changed}`);
   const none = rb.patchInstall('текст без версии', 'analyzer', '0.2.73', '0.2.79');
   check('фраз нет — ноль замен, текст тот же', none.changed === 0 && none.text === 'текст без версии');
+
+  // Настоящий INSTALL.md: версия берётся из манифеста, а не зашита. Проверяется, что на
+  // текущем закреплении скрипт находит в документе ВСЕ свои фразы — иначе сдвиг молча
+  // оставит документ на старой версии, и узнает об этом только validate-package.
+  const install = readFileSync(join(ROOT, 'docs', 'INSTALL.md'), 'utf8');
+  for (const [engine, spec] of Object.entries(rb.ENGINES)) {
+    const current = JSON.parse(readFileSync(join(ROOT, spec.manifest), 'utf8')).version;
+    const expected = spec.installPhrases(current, '99.99.99').length;
+    const real = rb.patchInstall(install, engine, current, '99.99.99');
+    check(`INSTALL.md: для ${engine} на версии ${current} найдены все фразы закрепления`, real.changed === expected, `changed=${real.changed} из ${expected}`);
+  }
 
   // mentions: перечисление для ревьюера, не правка. История, тесты и служебные каталоги вне списка.
   const root = join(WORK, 'bump-mentions');
@@ -7048,12 +7068,12 @@ section('Сдвиг закрепления движков — прогон и CL
   const analyzerReleases = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'analyzer-releases.json'), 'utf8'));
   const pcReleases = JSON.parse(readFileSync(join(FIXTURES, 'runtime-bump', 'platform-context-releases.json'), 'utf8'));
 
-  // Временный корень: настоящие манифесты, урезанный INSTALL.md, один файл с упоминанием.
+  // Временный корень: замороженные манифесты, урезанный INSTALL.md, один файл с упоминанием.
   const root = join(WORK, 'bump-root');
   const seed = () => {
     removeTreeSync(root);
-    for (const f of ['assets/analyzer/runtime-manifest.json', 'assets/platform-context/runtime-manifest.json']) {
-      writeBytes(`bump-root/${f}`, readFileSync(join(ROOT, f), 'utf8'));
+    for (const [engine, fixture] of [['analyzer', 'analyzer-manifest.json'], ['platform-context', 'platform-context-manifest.json']]) {
+      writeBytes(`bump-root/${rb.ENGINES[engine].manifest}`, readFileSync(join(FIXTURES, 'runtime-bump', fixture), 'utf8'));
     }
     writeBytes('bump-root/docs/INSTALL.md', 'проверено на **0.2.73**; пример `"version": "0.2.73"`; след `engine=bsl-context@0.16.0/8.3.27.1688`\n');
     writeBytes('bump-root/README.md', 'engine=bsl-analyzer@0.2.73\n');
