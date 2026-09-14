@@ -7144,6 +7144,7 @@ section('Сдвиг закрепления движков — прогон и CL
   check('тело PR: таблица версий, цели, заметки, упоминания, часовой', ['0.2.73', '0.2.79', 'win32-x64', 'новая диагностика', 'README.md', 'found', 'false-positives-cfe.md'].every((s) => body.includes(s)), body.slice(0, 300));
   const pcBody = rb.prBody(pc, {});
   check('тело PR сервера справки: сказано, что сервер не запускался', pcBody.includes('не запускался'));
+  check('тело PR: напоминание одобрить запуск CI', body.includes('Approve and run') && pcBody.includes('Approve and run'));
 
   // Разбор аргументов.
   const pa = rb.parseArgs(['--engine', 'analyzer', '--apply', '--json']);

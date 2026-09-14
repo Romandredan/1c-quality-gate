@@ -267,6 +267,7 @@ export function prBody(result, { sentinel = '' } = {}) {
   }
   if (result.computed?.length) lines.push('', `Суммы по целям ${result.computed.join(', ')} посчитаны скачиванием: у asset не было поля digest.`);
   lines.push('', '## Проверка', '');
+  lines.push('CI `validate` на этом PR ждёт одобрения владельца: PR открыт ботом. Кнопка «Approve and run» на вкладке Checks. Проверки на ubuntu уже прошли внутри workflow `runtime-bump`.', '');
   if (result.engine === 'analyzer') {
     lines.push(sentinel ? `Часовой на фикстуре плагина: \`${sentinel.trim()}\`` : 'Часовой не запускался.');
     lines.push('', 'Ревьюеру: A/B на корпусе по `docs/false-positives-cfe.md`, сравнить состав диагностик `rules list`; при расхождениях дописать раздел перехода.');
