@@ -73,7 +73,14 @@ export function matchesAny(rel, patterns) {
     if (problemOf(raw)) continue;
     const p = normalizePattern(raw);
     if (GLOB.test(p)) {
-      if (globToRegExp(p).test(path)) return true;
+      // Маска, как и путь без маски, покрывает каталог целиком: совпадение с любым
+      // каталогом-предком файла тоже засчитывается. Иначе `**/тест_*` ловил бы XML модуля
+      // рядом с каталогом, но пропускал бы его Ext/Module.bsl.
+      const re = globToRegExp(p);
+      const segments = path.split('/');
+      for (let n = segments.length; n > 0; n--) {
+        if (re.test(segments.slice(0, n).join('/'))) return true;
+      }
     } else {
       const base = p.toLowerCase();
       if (lower === base || lower.startsWith(base + '/')) return true;
