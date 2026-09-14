@@ -96,12 +96,13 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
   let core = null;
   let stateDir = null;
   let ensureConfig = null;
+  let readConfig = null;
   try {
     // file-URL, а не путь: динамический import() по голому пути на Windows
     // падает с ERR_UNSUPPORTED_ESM_URL_SCHEME, и плагин молча не работал бы вообще.
     core = await import(pathToFileURL(join(packageRoot, 'hooks', 'gate-core.mjs')).href);
     stateDir = await import(pathToFileURL(join(packageRoot, 'tools', 'state-dir.mjs')).href);
-    ({ ensureConfig } = await import(pathToFileURL(join(packageRoot, 'tools', 'config.mjs')).href));
+    ({ ensureConfig, readConfig } = await import(pathToFileURL(join(packageRoot, 'tools', 'config.mjs')).href));
   } catch {
     return {};
   }
@@ -221,6 +222,7 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
           filePath: abs,
           sessionId,
           ensureConfig,
+          readConfig,
           env: stateEnv,
         });
         if (!armed) return;

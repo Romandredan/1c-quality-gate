@@ -168,6 +168,46 @@ check('opencode: номер возврата из лимита', bmO.includes('�
 const bmF = blockMessage({ sessionId: 's1', files, foreign: 3, packageRoot: root, mode: 'opencode', repeated: 0 });
 check('чужие правки: предупреждение не трогать', bmF.includes('другой сессии (3)') && bmF.includes('НЕ трогай'));
 
+// --- armGate: исключение путей tests.paths ---
+// Тестовый файл гейт не взводит вовсе: всё после взвода (Stop-хук, план, снятие) работает
+// от списка файлов сессии, и исключённого файла там быть не должно.
+{
+  const tr = mkdtempSync(join(tmpdir(), 'qg-core-tests-'));
+  const tenv = {};
+  const testFile = join(tr, 'src', 'cfe', 'Автотесты', 'CommonModules', 'тест_М', 'Ext', 'Module.bsl');
+  const prodFile = join(tr, 'src', 'cfe', 'Доработки', 'CommonModules', 'М', 'Ext', 'Module.bsl');
+  const withTests = () => ({ tests: { paths: ['src/cfe/Автотесты'] } });
+  const pending = () => readPendingState(tr, tenv);
+
+  const a = armGate({ root: tr, filePath: testFile, sessionId: 's', env: tenv, readConfig: withTests });
+  check('исключённый путь: armGate возвращает null', a === null);
+  check('исключённый путь: в сессию не попал', !pending() || !pending().sessions.s);
+
+  const b = armGate({ root: tr, filePath: prodFile, sessionId: 's', env: tenv, readConfig: withTests });
+  check('соседний рабочий файл взводится как обычно', b && b.kind === 'bsl' && Object.keys(pending().sessions.s.files).length === 1);
+
+  // Взведён до появления настройки — следующая правка снимает его с сессии.
+  armGate({ root: tr, filePath: testFile, sessionId: 's2', env: tenv });
+  check('без настройки тестовый файл взводится', Boolean(pending().sessions.s2?.files));
+  armGate({ root: tr, filePath: testFile, sessionId: 's2', env: tenv, readConfig: withTests });
+  check('правка после настройки снимает ранее взведённый файл, пустая сессия удалена', !pending().sessions.s2);
+  check('чужая сессия с рабочим файлом не тронута', Object.keys(pending().sessions.s.files).length === 1);
+
+  // Файл вне корня не исключается: пути настройки относительные.
+  const outDir = mkdtempSync(join(tmpdir(), 'qg-core-tests-out-'));
+  const outFile = join(outDir, 'src', 'cfe', 'Автотесты', 'Module.bsl');
+  check('файл вне корня не исключается', armGate({ root: tr, filePath: outFile, sessionId: 's', env: tenv, readConfig: withTests }) !== null);
+
+  // Хук качества не ломает работу: падающее чтение и мусор в настройке — пустой список.
+  const boom = () => { throw new Error('битый JSON'); };
+  check('падающий readConfig: файл взводится', armGate({ root: tr, filePath: testFile, sessionId: 's3', env: tenv, readConfig: boom }) !== null);
+  const junk = () => ({ tests: { paths: 'src/cfe/Автотесты' } });
+  check('paths не массив: файл взводится', armGate({ root: tr, filePath: testFile, sessionId: 's4', env: tenv, readConfig: junk }) !== null);
+
+  rmSync(outDir, { recursive: true, force: true });
+  rmSync(tr, { recursive: true, force: true });
+}
+
 rmSync(outsideDir, { recursive: true, force: true });
 rmSync(root, { recursive: true, force: true });
 rmSync(root2, { recursive: true, force: true });
