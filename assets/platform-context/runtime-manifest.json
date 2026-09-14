@@ -1,7 +1,7 @@
 {
   "_comment": "Закреплённая версия сервера справки платформы и контрольные суммы его архивов. Плагин качает файл с релизов автора (не зеркалит) и проверяет SHA-256 до распаковки. Обновление версии: `node tools/runtime-bump.mjs --engine platform-context --apply`; имена архивов собираются из assetTemplate и dirTemplate, суммы и размеры берутся из GitHub API релиза (поле digest у каждого asset).",
   "engine": "bsl-context",
-  "version": "0.16.0",
+  "version": "0.18.1",
   "repo": "Regsorm/bsl-context",
   "urlTemplate": "https://github.com/{repo}/releases/download/v{version}/{asset}",
   "binary": "bsl-context-rs",
@@ -9,26 +9,26 @@
     "win32-x64": {
       "assetTemplate": "bsl-context-v{version}-x86_64-pc-windows-msvc.zip",
       "dirTemplate": "bsl-context-v{version}-x86_64-pc-windows-msvc",
-      "asset": "bsl-context-v0.16.0-x86_64-pc-windows-msvc.zip",
-      "dir": "bsl-context-v0.16.0-x86_64-pc-windows-msvc",
-      "sha256": "7729e75b808d17c0b5d779538bcb0468f38f7e2d4c2357aefdf5beceaeb61eaa",
-      "size": 5485804
+      "asset": "bsl-context-v0.18.1-x86_64-pc-windows-msvc.zip",
+      "dir": "bsl-context-v0.18.1-x86_64-pc-windows-msvc",
+      "sha256": "2a958b8f6242e5d34d24004e9cc4c9778bd74860f7049d6dd3de97702dfb79b0",
+      "size": 5493685
     },
     "linux-x64": {
       "assetTemplate": "bsl-context-v{version}-x86_64-unknown-linux-gnu.tar.gz",
       "dirTemplate": "bsl-context-v{version}-x86_64-unknown-linux-gnu",
-      "asset": "bsl-context-v0.16.0-x86_64-unknown-linux-gnu.tar.gz",
-      "dir": "bsl-context-v0.16.0-x86_64-unknown-linux-gnu",
-      "sha256": "bbc59088e1a98bf4915f686ce7782e9c1baaf3ae2722d591d8df5cffaa544d05",
-      "size": 5588654
+      "asset": "bsl-context-v0.18.1-x86_64-unknown-linux-gnu.tar.gz",
+      "dir": "bsl-context-v0.18.1-x86_64-unknown-linux-gnu",
+      "sha256": "c92dbd1d29a24cec8846e33ca25ef7a7df0fcfa1268016c29b0f59a65376b8d0",
+      "size": 5595007
     },
     "darwin-arm64": {
       "assetTemplate": "bsl-context-v{version}-aarch64-apple-darwin.tar.gz",
       "dirTemplate": "bsl-context-v{version}-aarch64-apple-darwin",
-      "asset": "bsl-context-v0.16.0-aarch64-apple-darwin.tar.gz",
-      "dir": "bsl-context-v0.16.0-aarch64-apple-darwin",
-      "sha256": "4e0c730d66a374134a2ff4682e398700d26e2faa299a5ec51fb7e1fb7f07f895",
-      "size": 4885367
+      "asset": "bsl-context-v0.18.1-aarch64-apple-darwin.tar.gz",
+      "dir": "bsl-context-v0.18.1-aarch64-apple-darwin",
+      "sha256": "123108e0998de21c843c98c2f584425e7556760cd55884afa7735a330959ce90",
+      "size": 4889017
     }
   }
 }
