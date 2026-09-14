@@ -16,8 +16,9 @@ import { armGate, gateHint } from './gate-core.mjs';
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 let ensureConfig = null;
+let readConfig = null;
 try {
-  ({ ensureConfig } = await import('../tools/config.mjs'));
+  ({ ensureConfig, readConfig } = await import('../tools/config.mjs'));
 } catch {
   /* настройка не обязана мешать взводу гейта */
 }
@@ -32,7 +33,7 @@ function main() {
   const root = projectRoot(payload);
   const sessionId = String(payload?.session_id || 'unknown-session');
 
-  const armed = armGate({ root, filePath, sessionId, ensureConfig });
+  const armed = armGate({ root, filePath, sessionId, ensureConfig, readConfig });
   if (!armed) return;
 
   // Вывод обязан быть JSON с hookSpecificOutput: простой текст из PostToolUse до модели

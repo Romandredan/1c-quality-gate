@@ -18,6 +18,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, relative, isAbsolute, sep } from 'node:path';
 import { stateDirSegments } from '../tools/state-dir.mjs';
 import { removeFileSync } from '../tools/fs-safe.mjs';
+import { matchesAny } from '../tools/path-match.mjs';
 
 export const PENDING = 'qg-pending.json';
 export const DONE = 'qg-done.json';
@@ -125,23 +126,64 @@ export function readPendingState(root, env = process.env) {
 }
 
 /**
+ * Пути автотестов из настройки. Любая ошибка — пустой список: хук качества не имеет права
+ * ломать работу, а неверную настройку показывает `gate.mjs plan` отказом.
+ */
+function testPathsOf(readConfig, root) {
+  if (!readConfig) return [];
+  try {
+    const paths = readConfig(root)?.tests?.paths;
+    return Array.isArray(paths) ? paths : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Снимает с сессии файл, взведённый до того, как его путь попал в `tests.paths`.
+ * Опустевшая сессия удаляется: Stop-хук не должен держать работу из-за пустого набора.
+ */
+function unarm({ pendingPath, sessionId, rel }) {
+  if (!existsSync(pendingPath)) return;
+  try {
+    const state = JSON.parse(readFileSync(pendingPath, 'utf8'));
+    const session = state?.sessions?.[sessionId];
+    if (!session?.files?.[rel]) return;
+    delete session.files[rel];
+    if (!Object.keys(session.files).length) delete state.sessions[sessionId];
+    writeFileSync(pendingPath, JSON.stringify(state, null, 2), 'utf8');
+  } catch {
+    /* повреждённое состояние перепишет следующий взвод рабочего файла */
+  }
+}
+
+/**
  * Взводит гейт для файла в сессии. Возвращает { kind, rel, created } либо null,
- * если файл не относится к 1С.
+ * если файл не относится к 1С или лежит по пути автотестов из `tests.paths`.
  *
- * Гейт взводится ВСЕГДА, когда затронут файл 1С, — здесь видна одна правка, и оценить её
+ * Гейт взводится ВСЕГДА, когда затронут файл 1С вне путей автотестов, — здесь видна одна правка, и оценить её
  * масштаб нельзя. Градация работает не здесь, а на снятии: прогон класса C0/C1 занимает
  * секунды и снимает маркер так же законно, как полный.
  *
  * ensureConfig — функция из tools/config.mjs, передаётся снаружи, чтобы ядро не тянуло
- * конфигурацию в окружениях, где она недоступна.
+ * конфигурацию в окружениях, где она недоступна. readConfig — оттуда же, по той же причине:
+ * из неё берутся пути автотестов `tests.paths`, правки по которым гейт не взводит.
  */
-export function armGate({ root, filePath, sessionId, ensureConfig = null, env = process.env }) {
+export function armGate({ root, filePath, sessionId, ensureConfig = null, readConfig = null, env = process.env }) {
   const kind = classifyFile(filePath);
   if (!kind) return null;
 
   const stateDir = join(root, ...stateDirSegments(env));
   const pendingPath = join(stateDir, PENDING);
   const donePath = join(stateDir, DONE);
+  const rel = toProjectRelative(root, filePath);
+
+  // Пути автотестов (`tests.paths`) гейт не взводит вовсе. Решение принимается здесь, в
+  // единственной точке взвода: всё, что дальше, работает от списка файлов сессии.
+  if (matchesAny(rel, testPathsOf(readConfig, root))) {
+    unarm({ pendingPath, sessionId, rel });
+    return null;
+  }
 
   mkdirSync(stateDir, { recursive: true });
 
@@ -162,7 +204,6 @@ export function armGate({ root, filePath, sessionId, ensureConfig = null, env = 
 
   const now = new Date().toISOString();
   const session = state.sessions[sessionId] || { armedAt: now, files: {} };
-  const rel = toProjectRelative(root, filePath);
   // Файл вне корня хранится под абсолютным ключом (см. toProjectRelative). Взвод обязан
   // сказать об этом наружу: часть контуров по чужому файлу не работает, и узнать это
   // модель должна сейчас, а не при отклонении следа в конце прогона.
