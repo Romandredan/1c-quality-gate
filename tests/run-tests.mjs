@@ -7181,6 +7181,37 @@ section('Workflow сдвига закрепления');
 }
 
 // ---------------------------------------------------------------------------
+section('Исключение тестовых модулей — сопоставление путей');
+
+// Пути `tests.paths` решают, взводится ли гейт вообще. Ошибка сопоставления в сторону
+// «исключено» прячет рабочий код от всех контуров разом, поэтому граница проверяется с обеих
+// сторон: что покрыто и что соседнее — нет.
+{
+  const pm = await import(pathToFileURL(join(ROOT, 'tools', 'path-match.mjs')).href);
+  const hit = (rel, patterns) => pm.matchesAny(rel, patterns);
+
+  check('каталог без маски покрывает всё под ним', hit('src/cfe/Автотесты/CommonModules/тест_М/Ext/Module.bsl', ['src/cfe/Автотесты']));
+  check('каталог без маски покрывает сам путь', hit('src/cfe/Автотесты', ['src/cfe/Автотесты']));
+  check('соседний каталог с тем же началом имени не покрыт', !hit('src/cfe/АвтотестыСтарые/Module.bsl', ['src/cfe/Автотесты']));
+  check('регистр не важен, кириллица тоже', hit('SRC/CFE/автотесты/x.bsl', ['src/cfe/Автотесты']));
+  check('обратный слэш, ./ и хвостовой / в пути настройки', hit('src/cfe/Автотесты/x.bsl', ['.\\src\\cfe\\Автотесты\\']));
+  check('* — часть одного сегмента', hit('src/cfe/Тесты1/x.bsl', ['src/cfe/Тесты*/**']) && !hit('src/cfe/a/Тесты1/x.bsl', ['src/cfe/Тесты*/**']));
+  check('** — любое число сегментов', hit('src/cf/CommonModules/тест_Модуль/Ext/Module.bsl', ['**/тест_*/**']));
+  check('** не цепляет файл с другим именем', !hit('src/cf/CommonModules/Продажи/Ext/Module.bsl', ['**/тест_*/**']));
+  check('? — ровно один символ', hit('src/cfe/T1/x.bsl', ['src/cfe/T?/**']) && !hit('src/cfe/T12/x.bsl', ['src/cfe/T?/**']));
+  check('точка в имени — буква, а не любой символ', !hit('src/cfeXtests/x.bsl', ['src/cfe.tests']));
+  check('пустой список не покрывает ничего', !hit('src/cfe/Автотесты/x.bsl', []));
+  check('абсолютный путь файла не покрывается относительной настройкой', !hit('C:/elsewhere/src/cfe/Автотесты/x.bsl', ['src/cfe/Автотесты']));
+
+  const ok = pm.validatePatterns(['src/cfe/Автотесты', '**/тест_*/**']);
+  check('верный список принят', ok.ok && ok.errors.length === 0, JSON.stringify(ok.errors));
+  const bad = pm.validatePatterns(['', '/abs', 'C:/abs', 'src/../x', 42]);
+  check('недопустимые пути названы все, с причиной', !bad.ok && bad.errors.length === 5, JSON.stringify(bad.errors));
+  check('не массив — отказ', !pm.validatePatterns('src/cfe/Автотесты').ok);
+  check('недопустимый путь на сопоставлении просто не участвует', !hit('x/y.bsl', ['/abs', '..', '']));
+}
+
+// ---------------------------------------------------------------------------
 // Изолированные наборы тестов — отдельными процессами: у них собственные счётчики
 // и временные каталоги, а их падение обязано быть видно в общем итоге CI.
 for (const suite of ['tests/gate-core.test.mjs', 'tests/opencode-plugin.test.mjs']) {
