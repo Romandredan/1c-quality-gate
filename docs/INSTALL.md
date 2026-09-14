@@ -103,7 +103,7 @@ node "$QG/tools/analyzer-bootstrap.mjs" --verify # пересчитать сум
 переключитесь на движок `bsl-ls`.
 
 Проект называет себя экспериментальным (версия 0.2.x, релизы почти ежедневные). Закреплено и
-проверено на **0.2.73**; версия и суммы лежат в `assets/analyzer/runtime-manifest.json`.
+проверено на **0.2.79**; версия и суммы лежат в `assets/analyzer/runtime-manifest.json`.
 
 ### Вариант B: BSL Language Server (запасной)
 
@@ -125,7 +125,7 @@ node "$QG/tools/analyzer-bootstrap.mjs" --verify # пересчитать сум
 {
   "analyzer": {
     "engine": "bsl-analyzer",
-    "version": "0.2.73",
+    "version": "0.2.79",
     "required": false
   }
 }
