@@ -5,7 +5,16 @@
 # Адаптировано для плагина 1c-quality-gate; изменения (c) 2026 romandredan, MIT.
 """Validates Configuration.xml: root structure, InternalInfo, properties, ChildObjects, languages."""
 import sys, os, argparse, re
-from lxml import etree
+from defusedxml.common import DefusedXmlException
+from defusedxml.lxml import parse as _defused_parse
+
+
+def _qname(tag):
+    """Split a Clark-notation tag '{namespace}local' into (namespace, localname)."""
+    if tag.startswith('{'):
+        namespace, _, local = tag[1:].partition('}')
+        return namespace, local
+    return '', tag
 
 NS = {
     'md':  'http://v8.1c.ru/8.3/MDClasses',
@@ -206,9 +215,8 @@ def main():
     # --- 1. Parse XML ---
     xml_doc = None
     try:
-        xml_parser = etree.XMLParser(remove_blank_text=False)
-        xml_doc = etree.parse(resolved_path, xml_parser)
-    except etree.XMLSyntaxError as e:
+        xml_doc = _defused_parse(resolved_path)
+    except (SyntaxError, DefusedXmlException) as e:
         r.lines.insert(0, '=== Validation: Configuration (parse failed) ===')
         r.out('')
         r.error(f'1. XML parse failed: {e}')
@@ -219,8 +227,7 @@ def main():
 
     # --- Check 1: Root structure ---
     check1_ok = True
-    root_local = etree.QName(root.tag).localname
-    root_ns = etree.QName(root.tag).namespace or ''
+        root_ns, root_local = _qname(root.tag)
 
     if root_local != 'MetaDataObject':
         r.error(f"1. Root element is '{root_local}', expected 'MetaDataObject'")
@@ -242,7 +249,7 @@ def main():
     for child in root:
         if not isinstance(child.tag, str):
             continue
-        if etree.QName(child.tag).localname == 'Configuration' and etree.QName(child.tag).namespace == EXPECTED_NS:
+        if _qname(child.tag) == (EXPECTED_NS, 'Configuration'):
             cfg_node = child
             break
 
@@ -413,7 +420,7 @@ def main():
         for child in child_obj_node:
             if not isinstance(child.tag, str):
                 continue
-            type_name = etree.QName(child.tag).localname
+            type_name = _qname(child.tag)[1]
             obj_name_val = child.text or ''
 
             # Valid type?
@@ -467,7 +474,7 @@ def main():
         for child in child_obj_node:
             if not isinstance(child.tag, str):
                 continue
-            if etree.QName(child.tag).localname == 'Language' and (child.text or '') == lang_name:
+            if _qname(child.tag)[1] == 'Language' and (child.text or '') == lang_name:
                 found = True
                 break
 
@@ -491,7 +498,7 @@ def main():
         for child in child_obj_node:
             if not isinstance(child.tag, str):
                 continue
-            if etree.QName(child.tag).localname == 'Language':
+            if _qname(child.tag)[1] == 'Language':
                 lang_names.append(child.text or '')
 
         if len(lang_names) > 0:
@@ -519,7 +526,7 @@ def main():
         for child in child_obj_node:
             if not isinstance(child.tag, str):
                 continue
-            type_name = etree.QName(child.tag).localname
+            type_name = _qname(child.tag)[1]
             if type_name == 'Language':
                 continue
             if type_name in CHILD_TYPE_DIR_MAP:
@@ -564,7 +571,7 @@ def main():
     hp_path = os.path.join(config_dir, 'Ext', 'HomePageWorkArea.xml')
     if os.path.isfile(hp_path):
         try:
-            hp_tree = etree.parse(hp_path)
+            hp_tree = _defused_parse(hp_path)
             HP_NS = 'http://v8.1c.ru/8.3/xcf/extrnprops'
             for f in hp_tree.getroot().iter(f'{{{HP_NS}}}Form'):
                 ref = (f.text or '').strip()
