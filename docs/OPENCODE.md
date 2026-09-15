@@ -60,6 +60,7 @@ Claude Code и OpenCode он побайтово один, а своя копия
 | Подсказка о взводе | `additionalContext` хука | дописывается в результат инструмента |
 | Контроль завершения | Stop-хук отказывает в завершении (exit 2) — **жёсткий гейт** | `session.idle`: плагин отправляет агенту сообщение и возвращает его к работе — **мягкий гейт** |
 | Состояние | `.claude/.state/` | `.opencode/.state/` (через `QG_STATE_DIR`) |
+| Архив принятых отчётов | `.claude/.state/qg-reports/` | `.opencode/.state/qg-reports/` |
 | Корень проекта | `CLAUDE_PROJECT_DIR` | `QG_PROJECT_DIR` из хука `shell.env` |
 | Путь к инструментам | разрешается перебором в навыке | `QG_ROOT` из хука `shell.env` |
 | Снятие гейта | `node "$QG/tools/gate.mjs" release …` | то же самое, без изменений |

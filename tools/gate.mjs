@@ -89,11 +89,15 @@ function archiveStamp(d) {
  * Отчёт, написанный прямо в архив, не копируется: вторая копия того же прогона — шум.
  * Возвращает путь копии от корня проекта либо текст ошибки.
  */
+function isInside(parent, child) {
+  const r = relative(parent, child);
+  return !!r && !r.startsWith('..') && !isAbsolute(r);
+}
+
 function archiveEvidence(evidenceFile, reportsDir, rootDir, now) {
   const src = resolvePath(evidenceFile);
-  const inside = relative(reportsDir, src);
   let target = src;
-  if (!inside || inside.startsWith('..') || isAbsolute(inside)) {
+  if (!isInside(reportsDir, src)) {
     mkdirSync(reportsDir, { recursive: true });
     const ext = extname(src);
     const stem = `${archiveStamp(now)}-${basename(src, ext)}`;
@@ -391,12 +395,17 @@ function cmdRelease(args) {
   // удобство, — но назван в выводе, а в журнале остаётся пустое поле, а не ссылка в никуда.
   let evidenceArchive = null;
   let archiveError = null;
+  // Черновик в каталогах проекта: копия в архиве будет, но оригинал останется рядом с кодом.
+  // Без этой строки «отчёты не попадают в проект» держалось бы на одной фразе навыка.
+  let strayReport = null;
   if (evidenceFile) {
     try {
       evidenceArchive = archiveEvidence(evidenceFile, reports, root(), new Date());
     } catch (e) {
       archiveError = String(e?.message || e);
     }
+    const src = resolvePath(evidenceFile);
+    if (isInside(root(), src) && !isInside(dir, src)) strayReport = relative(root(), src).split(sep).join('/');
   }
 
   let doneState = { version: 2, sessions: {} };
@@ -452,6 +461,9 @@ function cmdRelease(args) {
       : `Гейт сессии ${sessionId} снят как ${cls} без прогона. Причина: ${reason}\nФайлов в охвате: ${count}.${versionSuffix()}\n`) +
       (evidenceArchive ? `Копия отчёта: ${evidenceArchive}\n` : '') +
       (archiveError ? `ПРЕДУПРЕЖДЕНИЕ: копия отчёта в ${REPORTS} не сохранена (${archiveError}) — ссылайся на исходный файл.\n` : '') +
+      (strayReport && evidenceArchive
+        ? `ПРЕДУПРЕЖДЕНИЕ: отчёт лежит в каталогах проекта (${strayReport}) — копия в архиве есть, исходный файл можно удалить; черновик пиши во временный каталог сессии.\n`
+        : '') +
       (rest ?`Остаются взведёнными гейты других сессий: ${rest}. Их не трогаем.\n` : '')
   );
   return 0;

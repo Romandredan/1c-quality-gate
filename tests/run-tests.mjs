@@ -2414,6 +2414,19 @@ section('Механика гейта');
   check('журнал снятий хранит путь копии от корня проекта',
     doneRec?.evidenceArchive === `.claude/.state/qg-reports/${copy}`, JSON.stringify(doneRec?.evidenceArchive));
   check('вывод снятия называет копию', relOk.out.includes(`.claude/.state/qg-reports/${copy}`), relOk.out.trim().slice(0, 300));
+  check('отчёт вне проекта — без предупреждения о месте', !relOk.out.includes('лежит в каталогах проекта'), relOk.out.trim().slice(0, 300));
+
+  // Черновик в каталогах проекта: копия в архиве есть, но оригинал остаётся рядом с кодом.
+  // Молча это не проходит — иначе «отчёты не попадают в проект» держалось бы на одной фразе навыка.
+  arm('S1');
+  run('tools/hygiene-check.mjs', [file], { env });
+  mkdirSync(join(proj, 'docs'), { recursive: true });
+  const inDocs = join(proj, 'docs', 'отчёт-гейта.md');
+  writeFileSync(inDocs, readFileSync(ev('valid.md'), 'utf8'), 'utf8');
+  const relDocs = run('tools/gate.mjs', ['release', '--evidence', inDocs, '--session', 'S1'], { env });
+  check('отчёт в каталогах проекта — снятие проходит с предупреждением о месте',
+    relDocs.code === 0 && relDocs.out.includes('лежит в каталогах проекта') && relDocs.out.includes('docs/отчёт-гейта.md'),
+    relDocs.out.trim().slice(0, 400));
 
   // Отчёт, написанный прямо в архив, второй копией не обрастает.
   arm('S1');
@@ -2424,8 +2437,9 @@ section('Механика гейта');
   const relIn = run('tools/gate.mjs', ['release', '--evidence', inPlace, '--session', 'S1'], { env });
   const doneIn = JSON.parse(readFileSync(join(proj, '.claude', '.state', 'qg-done.json'), 'utf8')).sessions.S1;
   check('отчёт из архива не копируется повторно',
-    relIn.code === 0 && archived().length === 2 && doneIn?.evidenceArchive === '.claude/.state/qg-reports/сразу-в-архив.md',
+    relIn.code === 0 && archived().length === 3 && doneIn?.evidenceArchive === '.claude/.state/qg-reports/сразу-в-архив.md',
     `${relIn.code} ${archived().join(',')} ${JSON.stringify(doneIn?.evidenceArchive)}`);
+  check('отчёт в архиве — без предупреждения о месте', !relIn.out.includes('лежит в каталогах проекта'), relIn.out.trim().slice(0, 300));
 }
 
 // ---------------------------------------------------------------------------
