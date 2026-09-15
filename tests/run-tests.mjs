@@ -4061,14 +4061,21 @@ section('Реестр признаков — полнота: источники 
   // собранные шаблонной строкой, здесь не видны — их держат тесты самих инструментов.
   const SCOPE_IN_SOURCE = /\[qg (?:applied|skipped): layer=([a-z]+), scope=([a-z][\w-]*)/g;
   const badScopes = [];
+  const seenScopes = new Set();
   for (const p of toolFiles) {
     for (const m of readFileSync(p, 'utf8').matchAll(SCOPE_IN_SOURCE)) {
       const [, layer, scope] = m;
+      seenScopes.add(scope);
       if (!scopesMod.isKnownScope(scope)) badScopes.push(`${p.slice(ROOT.length + 1)}: scope=${scope} вне словаря`);
       else if (scopesMod.SCOPES[scope].layer !== layer)
         badScopes.push(`${p.slice(ROOT.length + 1)}: scope=${scope} печатается со слоем ${layer}, в словаре ${scopesMod.SCOPES[scope].layer}`);
     }
   }
+  // Шаблон держит порядок полей `layer=…, scope=…`; переставь их в инструменте — и файл
+  // молча выпал бы из проверки. Известные имена из разных контуров обязаны находиться.
+  check('сканирование имён проверок видит инструменты всех контуров',
+    ['file-encoding', 'registration-check', 'form-binding', 'static-analysis', 'transaction-nesting'].every((s) => seenScopes.has(s)),
+    [...seenScopes].join(', '));
   check('каждое имя проверки из инструментов есть в словаре и со своим слоем', badScopes.length === 0, [...new Set(badScopes)].join('; '));
 
   // Список обработчиков с неявной транзакцией в инструменте и в справочнике обязан совпадать.
@@ -6892,35 +6899,49 @@ section('Строка следа из плана принимается вали
 // каждой секции DEFAULTS, так что новый раздел настройки без поддержки у валидатора падает
 // здесь, а не у пользователя. Секция задаётся своими же умолчаниями: поведение прогона от
 // этого не меняется, а источник значения становится «файл» — и секция попадает в след.
+// Отчёт полный и минимальный — строка плана, вывод hygiene-check по тому же файлу и
+// заявления, которые на классе C1 без архетипов пишет модель, — и принят он обязан быть
+// без единой ошибки. Никакого отбора замечаний: фильтр по тексту сообщения сам был бы той
+// связью «по договорённости», из-за которой случился инцидент.
 {
   const { DEFAULTS } = await import(pathToFileURL(join(ROOT, 'tools', 'config.mjs')).href);
-  const { validate, extractRecords } = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+  const { validate } = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
   const root = join(WORK, 'plan-validator-root');
   rmSync(root, { recursive: true, force: true });
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: root });
   const file = 'src/cf/CommonModules/М/Ext/Module.bsl';
   mkdirSync(join(root, dirname(file)), { recursive: true });
-  writeFileSync(join(root, file), BOM + 'Процедура П() Экспорт\n\tЗапрос = Новый Запрос;\nКонецПроцедуры\n', 'utf8');
+  writeFileSync(join(root, file), BOM + 'Процедура П() Экспорт\n\tА = 1;\nКонецПроцедуры\n', 'utf8');
+  // Запись гигиены — вывод инструмента, а не выписанная строка: он же отмечается в журнале,
+  // по которому валидатор сверяет заявленный прогон.
+  const hygiene = run('tools/hygiene-check.mjs', [join(root, file)], { env: { CLAUDE_PROJECT_DIR: root } })
+    .out.split(/\r?\n/).filter((l) => l.startsWith('[qg ')).join('\n');
+  const declared =
+    '[qg sentinel: target=v8std, id=std454, status=found]\n' +
+    CATALOG_DECLARED +
+    '[qg not_verified: dimension=compilation, reason=no_platform]\n';
 
   const ownDefaults = (section) =>
     Object.fromEntries(Object.entries(DEFAULTS[section]).filter(([, v]) => v !== null));
-  // Возвращает замечания валидатора к самой записи scope, пустой список — строка принята.
-  // Требования полноты («нужна запись …») валидатор тоже привязывает к строке scope, но они
-  // о других записях отчёта, которых в отчёте из одной строки законно нет. Всё остальное на
-  // этой строке — отказ принять вывод плана, как бы ни звучала будущая проверка поля.
+  // Возвращает ошибки валидатора по всему отчёту; пустой список — след принят.
   const scopeProblems = (settings) => {
     writeFileSync(join(root, '.1c-quality-gate.json'), JSON.stringify(settings), 'utf8');
     const r = run('tools/gate.mjs', ['plan', '--files', file, '--no-analyzer', '--json'], { env: { QG_PROJECT_DIR: root } });
     if (r.code !== 0) return { scopeLine: null, problems: [`plan: код ${r.code}: ${r.out.slice(0, 200)}`] };
     const { scopeLine } = JSON.parse(r.out);
-    const text = `## quality evidence\n\n${scopeLine}\n`;
-    const line = extractRecords(text).find((rec) => rec.type === 'scope')?.line;
+    const text = `## quality evidence\n\n${scopeLine}\n${hygiene}\n${declared}`;
     const problems = validate(text, { gate: true, root })
-      .problems.filter((p) => p.severity === 'error' && p.line === line && !p.message.includes('нужна запись'))
+      .problems.filter((p) => p.severity === 'error')
       .map((p) => p.message);
     return { scopeLine, problems };
   };
+
+  // Без этой проверки сквозной тест мог бы пройти на пустом месте: отчёт, который не
+  // принимается и без настройки, провалил бы каждую секцию по одной и той же чужой причине.
+  const baseline = scopeProblems({});
+  check('минимальный отчёт по плану без настройки принимается', baseline.problems.length === 0 && /config=default\]$/.test(baseline.scopeLine),
+    `${baseline.scopeLine} ${baseline.problems.join(' | ')}`);
 
   const rejected = [];
   for (const section of Object.keys(DEFAULTS)) {
