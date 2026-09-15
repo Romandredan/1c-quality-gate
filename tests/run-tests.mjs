@@ -2250,21 +2250,39 @@ const evProj = { env: { CLAUDE_PROJECT_DIR: EV_PROJ } };
 
   // Список меток архетипов в словаре валидатора и в `tools/profile.mjs` (источник истины
   // с Task 14 — таблица «Ось 2» из навыка туда и переехала) обязаны сходиться: разъедься
-  // они — модель получает от `gate.mjs plan` метку, которую валидатор отвергает. Полная
-  // проверка обеих сторон — ниже, в секции «Профиль изменения считает инструмент»; здесь
-  // достаточно варианта для `validatorSrc`, который используется дальше по DIMENSIONS.
-  const validatorSrc = readFileSync(join(ROOT, 'tools', 'evidence-validator.mjs'), 'utf8');
+  // они — модель получает от `gate.mjs plan` метку, которую валидатор отвергает. Проверка
+  // обеих сторон — ниже, в секции «Профиль изменения считает инструмент».
 
-  // Закрытый список измерений и инструменты, которые их печатают, обязаны сходиться. Иначе
-  // валидатор ругается на собственный вывод плагина, и предупреждению перестают верить.
-  const printed = new Set();
-  for (const tool of ['tools/analyzer-run.mjs', 'tools/query-lint.mjs', 'tools/hygiene-check.mjs', 'tools/gate.mjs']) {
-    const src = readFileSync(join(ROOT, tool), 'utf8');
-    for (const m of src.matchAll(/not_verified:\s*dimension=([\w-]+)/g)) printed.add(m[1]);
+  // Закрытый список измерений и всё, что их печатает или велит писать, обязаны сходиться.
+  // Иначе валидатор отвергает собственный вывод плагина, и гейт не снимается ничем, кроме
+  // ложного C0. Сканируется весь состав пакета, а не перечень файлов: перечень уже отстал —
+  // знал инструменты, которые измерений не печатают, и не знал platform-context-run.mjs и
+  // xml/form-validate.py, которые печатают. Спецификации в docs/superpowers — история
+  // решений, а не инструкции, и не сканируются.
+  const { DIMENSIONS } = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+  const dimensionSources = [];
+  const walkPackage = (dir) => {
+    for (const e of readdirSync(dir)) {
+      const p = join(dir, e);
+      if (statSync(p).isDirectory()) {
+        if (p !== join(ROOT, 'docs', 'superpowers')) walkPackage(p);
+      } else if (/\.(mjs|js|py|md)$/.test(e)) dimensionSources.push(p);
+    }
+  };
+  for (const d of ['tools', 'hooks', 'opencode', 'skills', 'shared', 'agents', 'commands', 'docs']) {
+    if (existsSync(join(ROOT, d))) walkPackage(join(ROOT, d));
   }
-  const known = (validatorSrc.match(/const DIMENSIONS = \[([^\]]+)\]/) || [, ''])[1];
-  const unknown = [...printed].filter((d) => !known.includes(`'${d}'`));
-  check('валидатор знает все измерения, которые печатают инструменты', unknown.length === 0, unknown.join(', '));
+  dimensionSources.push(join(ROOT, 'README.md'));
+  const printed = new Map();
+  for (const p of dimensionSources) {
+    for (const m of readFileSync(p, 'utf8').matchAll(/not_verified:\s*dimension=([a-z][\w-]*)/g)) {
+      if (!printed.has(m[1])) printed.set(m[1], p.slice(ROOT.length + 1));
+    }
+  }
+  check('сканирование измерений видит инструменты, которые их печатают',
+    ['platform-api', 'artifact-freshness', 'static-analysis'].every((d) => printed.has(d)), [...printed.keys()].join(', '));
+  const unknown = [...printed].filter(([d]) => !DIMENSIONS.includes(d)).map(([d, where]) => `${d} (${where})`);
+  check('валидатор знает все измерения, которые печатает или называет пакет', unknown.length === 0, unknown.join(', '));
 }
 
 {
@@ -4036,6 +4054,22 @@ section('Реестр признаков — полнота: источники 
     }
   }
   check('каждый qg:* из инструментов есть в реестре', unknown.length === 0, [...new Set(unknown)].join('; '));
+
+  // То же для имён проверок: запись applied/skipped, которую печатает инструмент, валидатор
+  // сверяет со словарём SCOPES. Имя вне словаря — плагин отвергает собственный вывод, и гейт
+  // не снимается ничем, кроме ложного C0 (так в 3.8.0 разошлись секции настройки). Имена,
+  // собранные шаблонной строкой, здесь не видны — их держат тесты самих инструментов.
+  const SCOPE_IN_SOURCE = /\[qg (?:applied|skipped): layer=([a-z]+), scope=([a-z][\w-]*)/g;
+  const badScopes = [];
+  for (const p of toolFiles) {
+    for (const m of readFileSync(p, 'utf8').matchAll(SCOPE_IN_SOURCE)) {
+      const [, layer, scope] = m;
+      if (!scopesMod.isKnownScope(scope)) badScopes.push(`${p.slice(ROOT.length + 1)}: scope=${scope} вне словаря`);
+      else if (scopesMod.SCOPES[scope].layer !== layer)
+        badScopes.push(`${p.slice(ROOT.length + 1)}: scope=${scope} печатается со слоем ${layer}, в словаре ${scopesMod.SCOPES[scope].layer}`);
+    }
+  }
+  check('каждое имя проверки из инструментов есть в словаре и со своим слоем', badScopes.length === 0, [...new Set(badScopes)].join('; '));
 
   // Список обработчиков с неявной транзакцией в инструменте и в справочнике обязан совпадать.
   // Ровно это и разъехалось при дроблении навыка: сжатая формулировка потеряла ПередУдалением
@@ -6847,6 +6881,66 @@ section('План прогона — пути автотестов и подск
   check('отказ называет ключ и оба пути', bad.out.includes('tests.paths') && bad.out.includes('/abs') && bad.out.includes('src/../x'), bad.out.slice(0, 300));
   cfg({ tests: { paths: 'src/cfe/Автотесты' } });
   check('tests.paths не массив: отказ', plan(prod).code === 2);
+}
+
+section('Строка следа из плана принимается валидатором');
+
+// Сквозная проверка границы «инструмент печатает → валидатор принимает». В 3.8.0 обе стороны
+// проверялись порознь: evidenceValue печатал custom:tests, а собственный список секций
+// валидатора его не знал, и гейт у проекта с tests.paths не снимался ничем, кроме ложного C0.
+// Здесь строка scope берётся из `gate.mjs plan --json` и отдаётся валидатору как есть — для
+// каждой секции DEFAULTS, так что новый раздел настройки без поддержки у валидатора падает
+// здесь, а не у пользователя. Секция задаётся своими же умолчаниями: поведение прогона от
+// этого не меняется, а источник значения становится «файл» — и секция попадает в след.
+{
+  const { DEFAULTS } = await import(pathToFileURL(join(ROOT, 'tools', 'config.mjs')).href);
+  const { validate, extractRecords } = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+  const root = join(WORK, 'plan-validator-root');
+  rmSync(root, { recursive: true, force: true });
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: root });
+  const file = 'src/cf/CommonModules/М/Ext/Module.bsl';
+  mkdirSync(join(root, dirname(file)), { recursive: true });
+  writeFileSync(join(root, file), BOM + 'Процедура П() Экспорт\n\tЗапрос = Новый Запрос;\nКонецПроцедуры\n', 'utf8');
+
+  const ownDefaults = (section) =>
+    Object.fromEntries(Object.entries(DEFAULTS[section]).filter(([, v]) => v !== null));
+  // Возвращает замечания валидатора к самой записи scope, пустой список — строка принята.
+  // Требования полноты («нужна запись …») валидатор тоже привязывает к строке scope, но они
+  // о других записях отчёта, которых в отчёте из одной строки законно нет. Всё остальное на
+  // этой строке — отказ принять вывод плана, как бы ни звучала будущая проверка поля.
+  const scopeProblems = (settings) => {
+    writeFileSync(join(root, '.1c-quality-gate.json'), JSON.stringify(settings), 'utf8');
+    const r = run('tools/gate.mjs', ['plan', '--files', file, '--no-analyzer', '--json'], { env: { QG_PROJECT_DIR: root } });
+    if (r.code !== 0) return { scopeLine: null, problems: [`plan: код ${r.code}: ${r.out.slice(0, 200)}`] };
+    const { scopeLine } = JSON.parse(r.out);
+    const text = `## quality evidence\n\n${scopeLine}\n`;
+    const line = extractRecords(text).find((rec) => rec.type === 'scope')?.line;
+    const problems = validate(text, { gate: true, root })
+      .problems.filter((p) => p.severity === 'error' && p.line === line && !p.message.includes('нужна запись'))
+      .map((p) => p.message);
+    return { scopeLine, problems };
+  };
+
+  const rejected = [];
+  for (const section of Object.keys(DEFAULTS)) {
+    const { scopeLine, problems } = scopeProblems({ [section]: ownDefaults(section) });
+    // Без этой сверки тест пуст: не прочитай план настройку, в след ушло бы config=default.
+    if (!scopeLine || !scopeLine.endsWith(`config=custom:${section}]`)) rejected.push(`${section}: ${scopeLine || problems[0]}`);
+    else if (problems.length) rejected.push(`${section}: ${problems.join(' | ')}`);
+  }
+  check('след плана принимается валидатором при каждой секции настройки', rejected.length === 0, rejected.join('; '));
+
+  const all = scopeProblems(Object.fromEntries(Object.keys(DEFAULTS).map((s) => [s, ownDefaults(s)])));
+  check('след плана со всеми секциями сразу принимается валидатором',
+    all.problems.length === 0 && all.scopeLine.endsWith(`config=custom:${Object.keys(DEFAULTS).join('+')}]`),
+    `${all.scopeLine} ${all.problems.join(' | ')}`);
+
+  // Ровно настройка проекта, на которой случился инцидент 3.8.0.
+  const incident = scopeProblems({ analyzer: { required: true }, tests: { paths: ['src/cfe/Автотесты'] } });
+  check('след проекта с analyzer и tests.paths принимается: config=custom:analyzer+tests',
+    incident.problems.length === 0 && /config=custom:analyzer\+tests\]$/.test(incident.scopeLine),
+    `${incident.scopeLine} ${incident.problems.join(' | ')}`);
 }
 
 {
