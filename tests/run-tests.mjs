@@ -2391,9 +2391,41 @@ section('Механика гейта');
   // и покрывать её состав: прогон по постороннему файлу больше не закрывает заявление.
   writeFileSync(file, BOM + 'Процедура Пример()\r\nКонецПроцедуры\r\n', 'utf8');
   run('tools/hygiene-check.mjs', [file], { env });
+
+  // Архив отчётов. Место черновика выбирает модель, и на деле отчёты оседали то во временном
+  // каталоге сессии, который потом чистится, то в документации проекта. Поэтому принятый отчёт
+  // раскладывает утилита — в каталог состояния, который вне git.
+  const archive = join(proj, '.claude', '.state', 'qg-reports');
+  const archived = () => (existsSync(archive) ? readdirSync(archive) : []);
+  const relBad = run('tools/gate.mjs', ['release', '--evidence', ev('no-sentinel.md'), '--session', 'S1'], { env });
+  check('отклонённый след в архив не попадает', relBad.code === 2 && archived().length === 0,
+    `${relBad.code} ${archived().join(',')}`);
+
   const relOk = run('tools/gate.mjs', ['release', '--evidence', ev('valid.md'), '--session', 'S1'], { env });
   check('снятие по валидному следу проходит', relOk.code === 0, relOk.out.trim().slice(0, 120));
   check('после снятия Stop пропускает', stop('S1') === 0);
+
+  const [copy] = archived();
+  check('принятый отчёт скопирован в архив под датой и своим именем',
+    archived().length === 1 && /^\d{4}-\d{2}-\d{2}-\d{6}-valid\.md$/.test(copy || ''), archived().join(','));
+  check('копия побайтово равна отчёту',
+    copy && readFileSync(join(archive, copy), 'utf8') === readFileSync(ev('valid.md'), 'utf8'));
+  const doneRec = JSON.parse(readFileSync(join(proj, '.claude', '.state', 'qg-done.json'), 'utf8')).sessions.S1;
+  check('журнал снятий хранит путь копии от корня проекта',
+    doneRec?.evidenceArchive === `.claude/.state/qg-reports/${copy}`, JSON.stringify(doneRec?.evidenceArchive));
+  check('вывод снятия называет копию', relOk.out.includes(`.claude/.state/qg-reports/${copy}`), relOk.out.trim().slice(0, 300));
+
+  // Отчёт, написанный прямо в архив, второй копией не обрастает.
+  arm('S1');
+  run('tools/hygiene-check.mjs', [file], { env });
+  const inPlace = join(archive, 'сразу-в-архив.md');
+  mkdirSync(archive, { recursive: true });
+  writeFileSync(inPlace, readFileSync(ev('valid.md'), 'utf8'), 'utf8');
+  const relIn = run('tools/gate.mjs', ['release', '--evidence', inPlace, '--session', 'S1'], { env });
+  const doneIn = JSON.parse(readFileSync(join(proj, '.claude', '.state', 'qg-done.json'), 'utf8')).sessions.S1;
+  check('отчёт из архива не копируется повторно',
+    relIn.code === 0 && archived().length === 2 && doneIn?.evidenceArchive === '.claude/.state/qg-reports/сразу-в-архив.md',
+    `${relIn.code} ${archived().join(',')} ${JSON.stringify(doneIn?.evidenceArchive)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -2450,6 +2482,9 @@ section('Свежесть артефактов при снятии гейта');
   check('предупреждение о сборке записано в журнал снятий',
     (done.sessions.A1.warnings || []).some((w) => String(w.message).includes('старше исходника')),
     JSON.stringify(done.sessions.A1.warnings));
+  check('снятие без отчёта архива не заводит',
+    !existsSync(join(proj, '.claude', '.state', 'qg-reports')) && done.sessions.A1.evidenceArchive === null,
+    JSON.stringify(done.sessions.A1.evidenceArchive));
 
   // Контр-сигнал: свежая сборка — молчание. Предупреждение на каждом снятии превращает
   // проверку в шум, который перестают читать.
