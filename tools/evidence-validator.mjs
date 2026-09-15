@@ -19,7 +19,7 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { resolve as resolveConfig, evidenceValue } from './config.mjs';
+import { resolve as resolveConfig, evidenceValue, DEFAULTS as CONFIG_DEFAULTS } from './config.mjs';
 import { SCOPES, TOOL_BACKED, RENAMED, isKnownScope, isKnownQgId } from './evidence-scopes.mjs';
 import { readJournal, coveredFiles, normalizePath } from './run-journal.mjs';
 import { projectRoot } from './project-root.mjs';
@@ -113,15 +113,10 @@ const KEBAB = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 // Настройка, применённая к прогону: `default` либо `custom:<секция>[+<секция>]`. Печатает её
 // `tools/config.mjs show`, откуда она и переносится в след. Список секций закрытый: выдуманное
 // имя означает, что строку сочинили, а не скопировали из вывода инструмента.
-const CONFIG_SECTIONS = [
-  'analyzer',
-  'platformContext',
-  'volume',
-  'complexity',
-  'archetypes',
-  'sentinel',
-  'artifacts',
-];
+// Перечень берётся из умолчаний `config.mjs` — того же источника, по которому строку печатает
+// `evidenceValue`. Своя копия списка разъехалась с ним в 3.8.0: раздел `tests` появился в
+// настройке, а валидатор отвергал любой след проекта, где он задан, и гейт не снимался ничем.
+const CONFIG_SECTIONS = Object.keys(CONFIG_DEFAULTS);
 const CONFIG_PATTERN = new RegExp(`^(default|custom:(${CONFIG_SECTIONS.join('|')})(\\+(${CONFIG_SECTIONS.join('|')}))*)$`);
 
 /**
