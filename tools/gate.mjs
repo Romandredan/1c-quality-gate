@@ -14,8 +14,8 @@
  *   node gate.mjs release --class C0 --reason "<...>"  # снять как не требующий проверки
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, copyFileSync } from 'node:fs';
+import { join, dirname, basename, extname, relative, isAbsolute, sep, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { validate } from './evidence-validator.mjs';
@@ -33,6 +33,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 const PENDING = 'qg-pending.json';
 const DONE = 'qg-done.json';
+const REPORTS = 'qg-reports';
 
 /**
  * Корень проекта — общий разрешитель.
@@ -68,7 +69,39 @@ function rootLine() {
 
 function paths() {
   const dir = join(root(), ...stateDirSegments());
-  return { dir, pending: join(dir, PENDING), done: join(dir, DONE) };
+  return { dir, pending: join(dir, PENDING), done: join(dir, DONE), reports: join(dir, REPORTS) };
+}
+
+/** Метка времени для имени копии: местное время, чтобы архив читался по дате без пересчёта. */
+function archiveStamp(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/**
+ * Копия принятого отчёта в архив каталога состояния.
+ *
+ * Место черновика выбирает модель, и на деле отчёты оседали то во временном каталоге сессии,
+ * который потом чистится (ссылка в журнале снятий вела в пустоту), то в документации проекта.
+ * Раскладывает утилита — тогда место одно при любом выборе модели. Каталог состояния вне git,
+ * поэтому архив в репозиторий не попадает.
+ *
+ * Отчёт, написанный прямо в архив, не копируется: вторая копия того же прогона — шум.
+ * Возвращает путь копии от корня проекта либо текст ошибки.
+ */
+function archiveEvidence(evidenceFile, reportsDir, rootDir, now) {
+  const src = resolvePath(evidenceFile);
+  const inside = relative(reportsDir, src);
+  let target = src;
+  if (!inside || inside.startsWith('..') || isAbsolute(inside)) {
+    mkdirSync(reportsDir, { recursive: true });
+    const ext = extname(src);
+    const stem = `${archiveStamp(now)}-${basename(src, ext)}`;
+    target = join(reportsDir, stem + ext);
+    for (let n = 2; existsSync(target); n++) target = join(reportsDir, `${stem}-${n}${ext}`);
+    copyFileSync(src, target);
+  }
+  return relative(rootDir, target).split(sep).join('/');
 }
 
 function readPending() {
@@ -259,7 +292,7 @@ function cmdRelease(args) {
   }
   const sessionState = state.sessions[sessionId];
 
-  const { dir, pending, done } = paths();
+  const { dir, pending, done, reports } = paths();
   const evidenceFile = typeof args.evidence === 'string' ? args.evidence : null;
   const cls = typeof args.class === 'string' ? args.class : null;
   const reason = typeof args.reason === 'string' ? args.reason : null;
@@ -353,6 +386,19 @@ function cmdRelease(args) {
     return 2;
   }
 
+  // Копия отчёта — только после того, как снятие состоялось: отклонённый или сорвавшийся
+  // прогон в архив не попадает. Сбой записи снятия не отменяет — прогон принят, копия лишь
+  // удобство, — но назван в выводе, а в журнале остаётся пустое поле, а не ссылка в никуда.
+  let evidenceArchive = null;
+  let archiveError = null;
+  if (evidenceFile) {
+    try {
+      evidenceArchive = archiveEvidence(evidenceFile, reports, root(), new Date());
+    } catch (e) {
+      archiveError = String(e?.message || e);
+    }
+  }
+
   let doneState = { version: 2, sessions: {} };
   if (existsSync(done)) {
     try {
@@ -368,6 +414,7 @@ function cmdRelease(args) {
     files: sessionState.files,
     mode: evidenceFile ? 'evidence' : 'declared',
     evidenceFile: evidenceFile || null,
+    evidenceArchive,
     class: cls || null,
     reason: reason || null,
     warnings: [
@@ -403,7 +450,9 @@ function cmdRelease(args) {
     (evidenceFile
       ? `Гейт сессии ${sessionId} снят по следу прогона (${evidenceFile}). Файлов в охвате: ${count}.${versionSuffix()}\n`
       : `Гейт сессии ${sessionId} снят как ${cls} без прогона. Причина: ${reason}\nФайлов в охвате: ${count}.${versionSuffix()}\n`) +
-      (rest ? `Остаются взведёнными гейты других сессий: ${rest}. Их не трогаем.\n` : '')
+      (evidenceArchive ? `Копия отчёта: ${evidenceArchive}\n` : '') +
+      (archiveError ? `ПРЕДУПРЕЖДЕНИЕ: копия отчёта в ${REPORTS} не сохранена (${archiveError}) — ссылайся на исходный файл.\n` : '') +
+      (rest ?`Остаются взведёнными гейты других сессий: ${rest}. Их не трогаем.\n` : '')
   );
   return 0;
 }
