@@ -2151,6 +2151,26 @@ const evProj = { env: { CLAUDE_PROJECT_DIR: EV_PROJ } };
   const stale = writeBytes('ev-stale-config.md', scoped(', config=custom:volume') + body);
   const rs = run('tools/evidence-validator.mjs', [stale, '--gate'], customProj);
   check('усечённый перечень секций отвергнут', rs.code === 2 && rs.out.includes('расходится'), rs.out.trim().slice(0, 160));
+
+  // Раздел tests.paths (3.8.0) печатается в следе как custom:tests, а собственный список секций
+  // валидатора его не знал: след такого проекта отвергался и по формату, и без tests — как
+  // расходящийся с настройкой. Гейт не снимался ничем, кроме ложного --class C0.
+  const TESTS_PROJ = join(WORK, 'ev-tests-proj');
+  mkdirSync(TESTS_PROJ, { recursive: true });
+  writeFileSync(join(TESTS_PROJ, '.1c-quality-gate.json'), JSON.stringify({ tests: { paths: ['src/cfe/Автотесты'] } }), 'utf8');
+  seedJournal(TESTS_PROJ);
+  const withTests = writeBytes('ev-tests-config.md', scoped(', config=custom:tests') + body);
+  const rt = run('tools/evidence-validator.mjs', [withTests, '--gate'], { env: { CLAUDE_PROJECT_DIR: TESTS_PROJ } });
+  check('след проекта с tests.paths принимается: config=custom:tests', rt.code === 0, rt.out.trim().slice(0, 160));
+
+  // Каждая секция, которую может напечатать config.mjs, проходит проверку формата. Иначе новый
+  // раздел настройки снова запрёт гейт у всех проектов, где он задан.
+  const { DEFAULTS } = await import(pathToFileURL(join(ROOT, 'tools', 'config.mjs')).href);
+  const unknownFormat = Object.keys(DEFAULTS).filter((section) => {
+    const probe = writeBytes(`ev-section-${section}.md`, scoped(`, config=custom:${section}`) + body);
+    return run('tools/evidence-validator.mjs', [probe]).out.includes('ожидается default либо custom');
+  });
+  check('валидатор знает все секции настройки', unknownFormat.length === 0, unknownFormat.join(', '));
 }
 
 // Исполнение запроса. Текст запроса — строковый литерал: его не разбирает ни анализатор, ни
