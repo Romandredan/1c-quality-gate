@@ -7106,6 +7106,41 @@ section('gate.mjs run — инструментальная фаза одним �
   check('инструменты после упавшего исполнены', /^rename-check\s+/m.test(broken.out));
   check('за упавший инструмент строка следа не сочинена', !/\[qg [a-z_]+: layer=xml/.test(broken.out));
 
+  // Анализатор — самый долгий инструмент плана, а run запускал его дважды: раз с --json ради
+  // метрик профиля и раз текстом ради находок и следа. Поддельный сценарий считает свои запуски
+  // и отдаёт метрики через --metrics-out: run обязан обойтись одним вызовом и при этом посчитать
+  // ось сложности по его метрикам.
+  {
+    const counter = join(WORK, 'analyzer-calls.txt');
+    rmSync(counter, { force: true });
+    const stub = join(WORK, 'analyzer-stub.mjs');
+    writeFileSync(stub, [
+      "import { appendFileSync, writeFileSync } from 'node:fs';",
+      'const a = process.argv.slice(2);',
+      "appendFileSync(process.env.STUB_COUNTER, a.join(' ') + '\\n');",
+      "const i = a.indexOf('--metrics-out');",
+      "const files = a.filter((x, k) => a[k - 1] === '--changed');",
+      "if (i >= 0) writeFileSync(a[i + 1], JSON.stringify({ metrics: Object.fromEntries(files.map((f) => [f, { functions: 1, complexity: 99, cognitive_complexity: 99 }])) }));",
+      "if (a.includes('--json')) console.log(JSON.stringify({ metrics: {} }));",
+      "else console.log('Движок: заглушка | находок: 0\\n\\n## quality evidence\\n\\n[qg applied: layer=code, scope=static-analysis, ids=[bslls:all], verdict=clean]');",
+    ].join('\n'), 'utf8');
+    const stubEnv = { ...env, QG_ANALYZER_RUN: stub, STUB_COUNTER: counter };
+    const one = run('tools/gate.mjs', ['run', '--files', bsl, '--only', 'hygiene-check,analyzer-run'], { env: stubEnv });
+    const calls = existsSync(counter) ? readFileSync(counter, 'utf8').trim().split('\n') : [];
+    check('run запускает анализатор один раз, а не дважды', one.code === 0 && calls.length === 1, `код ${one.code}, запусков ${calls.length}: ${calls.join(' | ')}`);
+    check('единственный запуск — текстовый, с файлом метрик', calls.length === 1 && calls[0].includes('--metrics-out') && !calls[0].includes('--json'), calls.join(' | '));
+    check('ось сложности посчитана по метрикам этого запуска', /complexity=\[(?!not_computed)[^\]]+\]/.test(one.out) && !/сложность не считалась/.test(one.out), one.out.slice(0, 500));
+    check('вывод и след анализатора попали в сводку и черновик', /^analyzer-run\s+чисто/m.test(one.out) && one.out.includes('scope=static-analysis'), one.out.slice(0, 700));
+
+    // Анализатор вне --only: метрики по-прежнему нужны профилю, инструмент не исполняется —
+    // запуск один, прежний, с --json.
+    rmSync(counter, { force: true });
+    const skipTool = run('tools/gate.mjs', ['run', '--files', bsl, '--only', 'hygiene-check'], { env: stubEnv });
+    const calls2 = existsSync(counter) ? readFileSync(counter, 'utf8').trim().split('\n') : [];
+    check('анализатор вне --only: один запуск ради метрик, инструмент не исполняется',
+      skipTool.code === 0 && calls2.length === 1 && calls2[0].includes('--json') && !/^analyzer-run\s/m.test(skipTool.out), `${calls2.join(' | ')}`);
+  }
+
   // handoff печатает тот же текст передачи, что хук при блокировке: команда /gate ведёт тем же
   // путём, а перечень описания работы не заводит вторую копию в файле команды.
   {

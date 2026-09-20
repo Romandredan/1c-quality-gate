@@ -641,6 +641,7 @@ function parseArgs(argv) {
     if (a === '--changed') out.changed.push(argv[++i]);
     else if (a === '--engine') out.engine = argv[++i];
     else if (a === '--json') out.json = true;
+    else if (a === '--metrics-out') out.metricsOut = argv[++i];
     else if (a === '--sentinel') out.sentinel = true;
     else if (a === '--evidence') out.evidenceOnly = true;
     else if (a === '--all') out.all = true;
@@ -881,6 +882,17 @@ async function main(argv) {
     unanalyzed: unanalyzed.length,
     root,
   });
+
+  // Метрики сложности нужны `gate.mjs run` для профиля, а вывод для человека и строки следа —
+  // для отчёта. Раньше это были два прогона одного и того же движка по тем же файлам: один с
+  // `--json` ради метрик, второй текстовый. Файл метрик отдаёт первое, не отнимая второго.
+  if (args.metricsOut) {
+    try {
+      writeFileSync(args.metricsOut, JSON.stringify({ metrics: Object.fromEntries(metrics) }), 'utf8');
+    } catch (e) {
+      process.stderr.write(`Метрики не записаны в ${args.metricsOut}: ${e.message}\n`);
+    }
+  }
 
   if (args.json) {
     out(JSON.stringify({ engine, version, sentinel: sentinelResult, resolution, findings, metrics: Object.fromEntries(metrics), unparsed: Object.fromEntries(unparsed), unanalyzed, evidence, orphans }, null, 2));

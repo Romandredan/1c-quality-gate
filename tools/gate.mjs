@@ -14,9 +14,10 @@
  *   node gate.mjs release --class C0 --reason "<...>"  # снять как не требующий проверки
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, copyFileSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, copyFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { join, dirname, basename, extname, relative, isAbsolute, sep, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { validate, severeFindings } from './evidence-validator.mjs';
 import { resolveProjectRoot } from './project-root.mjs';
@@ -1020,7 +1021,7 @@ function yaxunitCandidates(rootDir, bslFiles, testPaths) {
 function analyzerMetrics(rootDir, files, { skip }) {
   if (skip) return { ok: false, metrics: {}, reason: 'запуск отключён флагом --no-analyzer' };
 
-  const script = join(HERE, 'analyzer-run.mjs');
+  const script = analyzerScript();
   const r = spawnSync(
     process.execPath,
     [script, '--json', ...files.flatMap((f) => ['--changed', f])],
@@ -1127,7 +1128,38 @@ function cmdPlan(args) {
  * Состав и профиль прогона — общая часть `plan` и `run`. Ошибка настройки или состава
  * возвращается текстом: печатает её вызывающий, в свой поток.
  */
-function planContext(args) {
+/** Сценарий анализатора. Переменная — шов для тестов, как `QG_PYTHON` у валидаторов XML. */
+function analyzerScript() {
+  return process.env.QG_ANALYZER_RUN || join(HERE, 'analyzer-run.mjs');
+}
+
+/**
+ * Прогон анализатора для `run`: один вызов даёт и метрики профиля, и вывод с находками и
+ * строками следа. Раньше `run` запускал движок дважды — с `--json` ради метрик и текстом как
+ * инструмент плана, — а это самый долгий инструмент из всех. Результат запуска возвращается
+ * вместе с метриками: цикл инструментов берёт его готовым и второй раз движок не зовёт.
+ */
+function analyzerOnce(rootDir, changed) {
+  const tmp = join(mkdtempSync(join(tmpdir(), 'qg-metrics-')), 'metrics.json');
+  const t0 = Date.now();
+  const r = spawnSync(process.execPath, [analyzerScript(), ...changed.flatMap((f) => ['--changed', f]), '--metrics-out', tmp], {
+    cwd: rootDir, encoding: 'utf8', timeout: RUN_TIMEOUT_MS['analyzer-run'], maxBuffer: 256 * 1024 * 1024,
+  });
+  const run = { r, ms: Date.now() - t0 };
+  if (r.error) return { ok: false, metrics: {}, reason: `не удалось запустить: ${r.error.message}`, run };
+  if (r.signal) return { ok: false, metrics: {}, reason: `прерван по таймауту (сигнал ${r.signal})`, run };
+  try {
+    return { ok: true, metrics: JSON.parse(readFileSync(tmp, 'utf8')).metrics || {}, reason: null, run };
+  } catch {
+    // Файла метрик нет: движок не дошёл до разбора (не установлен, упал). Ось сложности тогда
+    // не считается, а сам вывод запуска всё равно уходит в сводку — со своей строкой следа.
+    return { ok: false, metrics: {}, reason: `анализатор метрик не отдал (код ${r.status})`, run };
+  } finally {
+    rmSync(dirname(tmp), { recursive: true, force: true });
+  }
+}
+
+function planContext(args, { analyzer: provide = null } = {}) {
   const { files, sessionId, error } = planFileList(args);
   if (error) return { error };
   if (!files.length) return { error: 'Список файлов пуст — план печатать не для чего.\n' + rootLine() };
@@ -1147,7 +1179,10 @@ function planContext(args) {
     };
   }
 
-  const analyzer = analyzerMetrics(rootDir, files, { skip: args['no-analyzer'] === true });
+  const analyzer =
+    args['no-analyzer'] === true || !provide
+      ? analyzerMetrics(rootDir, files, { skip: args['no-analyzer'] === true })
+      : provide(rootDir, files);
 
   let profile;
   try {
@@ -1215,7 +1250,19 @@ function toolOutcome(r, evidence) {
  * и валидатор следа это увидит. Сбой прогон не останавливает; код возврата тогда 1.
  */
 function cmdRun(args) {
-  const ctx = planContext(args);
+  const wanted = typeof args.only === 'string' ? args.only.split(',').map((s) => s.trim()).filter(Boolean) : null;
+  // Анализатор исполняется как инструмент плана — тогда его единственный запуск отдаёт и метрики.
+  // Вне `--only` инструмент не исполняется, и метрики берутся прежним отдельным вызовом.
+  let analyzerRun = null;
+  const ctx = planContext(args, {
+    analyzer: (rootDir, files) => {
+      const changed = filesFor('tools/analyzer-run.mjs', files, toolAppliesMap());
+      if ((wanted && !wanted.includes('analyzer-run')) || changed.length === 0) return analyzerMetrics(rootDir, files, { skip: false });
+      const once = analyzerOnce(rootDir, changed);
+      analyzerRun = once.run;
+      return once;
+    },
+  });
   if (ctx.error) {
     process.stderr.write(ctx.error);
     return 2;
@@ -1224,9 +1271,8 @@ function cmdRun(args) {
   const { resolved, archetypes: archetypeLabels, volume } = profile;
 
   let specs = buildToolSpecs({ files, resolvedCode: resolved.code, archetypeLabels, bslFiles, rootDir });
-  if (typeof args.only === 'string') {
+  if (wanted) {
     const known = new Set([...TOOL_ORDER.map(toolName), ...specs.map((s) => s.name)]);
-    const wanted = args.only.split(',').map((s) => s.trim()).filter(Boolean);
     const unknown = wanted.filter((w) => !known.has(w));
     if (unknown.length) {
       process.stderr.write(`--only: неизвестный инструмент ${unknown.join(', ')}. Доступны: ${[...known].sort().join(', ')}\n`);
@@ -1267,7 +1313,11 @@ function cmdRun(args) {
     const t0 = Date.now();
     const tag = `${String(n).padStart(2, '0')}-${spec.name}`;
     let r;
-    if (spec.kind === 'diff') {
+    let reusedMs = null;
+    if (spec.name === 'analyzer-run' && analyzerRun) {
+      ({ r } = analyzerRun);
+      reusedMs = analyzerRun.ms;
+    } else if (spec.kind === 'diff') {
       r = spawnSync('git', ['diff', 'HEAD', '--', ...spec.diffFiles], { cwd: rootDir, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
       if (!r.error && r.status === 0) {
         diffPath = join(runDir, 'change.diff');
@@ -1280,7 +1330,7 @@ function cmdRun(args) {
         timeout: RUN_TIMEOUT_MS[spec.name] || 180000, env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
       });
     }
-    const secs = ((Date.now() - t0) / 1000).toFixed(1).replace('.', ',');
+    const secs = (((reusedMs ?? Date.now() - t0)) / 1000).toFixed(1).replace('.', ',');
     const output = `${r.stdout || ''}${r.stderr ? `\n--- stderr ---\n${r.stderr}` : ''}`;
     const title = spec.kind === 'diff' ? 'git-diff' : spec.kind === 'index' ? 'catalog-index' : spec.name;
 
