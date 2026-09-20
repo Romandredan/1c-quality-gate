@@ -561,14 +561,14 @@ export function validate(text, { gate = false, root = null, session = null } = {
       );
     }
 
-    // Слой 2 (advisor() и холодный читатель) заявлен глубиной L2, но следа не оставляет
+    // Слой 2 (субагент cold-reader и advisor()) заявлен глубиной L2, но следа не оставляет
     // ничем, кроме этой записи — его пропуск на классе C3 в живом A/B-прогоне не заметил
     // никто (task-22). В строгом режиме — ошибка с v3.7.0 (окно предупреждения v3.6.0 закрыто).
     if (codeDepth === 'L2' && !closes.has('logic-review') && !skippedScopes.has('logic-review')) {
       add(
         gate ? 'error' : 'warn',
         records.find((r) => r.type === 'scope')?.line || 0,
-        'контур code запущен на L2, но о слое 2 (ревью логики: advisor() и холодный читатель) не ' +
+        'контур code запущен на L2, но о слое 2 (ревью логики: субагент cold-reader и advisor()) не ' +
           'заявлено: нужна запись [qg applied: layer=code, scope=logic-review, ids=[...], verdict=...] ' +
           'либо [qg skipped: layer=code, scope=logic-review, reason=...]'
       );
