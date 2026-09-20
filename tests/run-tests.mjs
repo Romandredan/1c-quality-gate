@@ -7141,6 +7141,25 @@ section('gate.mjs run — инструментальная фаза одним �
       skipTool.code === 0 && calls2.length === 1 && calls2[0].includes('--json') && !/^analyzer-run\s/m.test(skipTool.out), `${calls2.join(' | ')}`);
   }
 
+  // Команда поиска пути из навыка. Прежний блок был сценарием bash и в среде, где оболочка —
+  // только PowerShell, не исполнялся вовсе. Команда берётся из самого навыка, а не из копии в
+  // тесте: проверяется то, что прочтёт модель. Ограничения на текст держат PowerShell: внутри
+  // двойных кавычек он раскрывает `$` и обратные кавычки, а вложенные двойные рвут строку.
+  {
+    const skill = readFileSync(join(ROOT, 'skills', 'quality-gate', 'SKILL.md'), 'utf8');
+    const script = skill.match(/^node -e "([^"\n]+)" \[-- --files/m)?.[1] || '';
+    check('в навыке есть команда поиска пути на node -e', script.length > 100, script.slice(0, 80));
+    check('команда переносима в PowerShell: нет $, обратных и двойных кавычек', !/[$`"]/.test(script), script.match(/[$`"]/)?.[0] || '');
+    check('в навыке не осталось сценария bash для поиска пути', !/\$\{QG_ROOT:-\}|sort -V \| tail|test -d "\$QG/.test(skill));
+    const viaEnv = spawnSync(process.execPath, ['-e', script, '--', '--files', bsl, '--no-analyzer', '--only', 'hygiene-check'],
+      { cwd: rr, encoding: 'utf8', env: { ...process.env, ...env, QG_ROOT: ROOT, CLAUDE_PLUGIN_ROOT: '' } });
+    check('команда находит плагин по QG_ROOT и исполняет run с аргументами после --',
+      viaEnv.status === 0 && /^QG=/m.test(viaEnv.stdout) && /^hygiene-check\s+чисто/m.test(viaEnv.stdout), `${viaEnv.status}: ${(viaEnv.stdout + viaEnv.stderr).slice(0, 300)}`);
+    const nowhere = spawnSync(process.execPath, ['-e', script], { cwd: rr, encoding: 'utf8',
+      env: { ...process.env, QG_ROOT: '', CLAUDE_PLUGIN_ROOT: '', HOME: join(WORK, 'no-home'), USERPROFILE: join(WORK, 'no-home') } });
+    check('плагин не найден — явный отказ, а не молчание', nowhere.status === 1 && /plugin not found/.test(nowhere.stderr), `${nowhere.status}: ${nowhere.stderr.slice(0, 200)}`);
+  }
+
   // handoff печатает тот же текст передачи, что хук при блокировке: команда /gate ведёт тем же
   // путём, а перечень описания работы не заводит вторую копию в файле команды.
   {

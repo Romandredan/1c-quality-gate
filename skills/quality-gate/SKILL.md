@@ -51,28 +51,21 @@ license: MIT
 
 ### Путь к инструментам плагина (`$QG`)
 
-Все команды ниже используют `$QG` — каталог плагина. Под OpenCode он готов в `QG_ROOT`; в
-Claude Code `CLAUDE_PLUGIN_ROOT` оболочке не видна — путь схлопнулся бы в `/tools/...`.
+Все команды ниже используют `$QG` — каталог плагина. **Хук его уже назвал** (сообщение
+блокировки, подсказка взвода) — подставляй буквально: `node "$QG/tools/gate.mjs" run`. Не назван —
+одна команда для bash и PowerShell: находит плагин и исполняет `run`, аргументы — после `--`.
 
-Разреши путь **первой командой прогона**, дальше подставляй значение буквально. Кандидат —
-только после `test -d "$QG/tools"`: переменная сама по себе не гарантирует актуальный плагин.
-
-```bash
-QG="${QG_ROOT:-}"
-[ ! -d "$QG/tools" ] && QG="${CLAUDE_PLUGIN_ROOT:-}"
-[ ! -d "$QG/tools" ] && QG="$(node -e "const p=require(require('node:os').homedir()+'/.claude/plugins/installed_plugins.json').plugins;const k=Object.keys(p).find(n=>n.startsWith('1c-quality-gate@'));if(k&&p[k][0])process.stdout.write(p[k][0].installPath)" 2>/dev/null)"
-[ ! -d "$QG/tools" ] && QG="$(ls -d ~/.claude/plugins/cache/*/1c-quality-gate/*/ 2>/dev/null | sort -V | tail -1)" && QG="${QG%/}"
-test -d "$QG/tools" || { echo "Плагин не найден ни в одном харнессе" >&2; exit 1; }
-node "$QG/tools/gate.mjs" run
+```
+node -e "const f=require('fs'),p=require('path'),ok=d=>d&&f.existsSync(p.join(d,'tools','gate.mjs'));let q=[process.env.QG_ROOT,process.env.CLAUDE_PLUGIN_ROOT].find(ok);try{const j=JSON.parse(f.readFileSync(p.join(require('os').homedir(),'.claude','plugins','installed_plugins.json'),'utf8')).plugins,k=Object.keys(j).find(n=>n.startsWith('1c-quality-gate@'));if(!q&&ok(j[k][0].installPath))q=j[k][0].installPath}catch{}if(!q){console.error('1c-quality-gate: plugin not found');process.exit(1)}process.exit(require('child_process').spawnSync(process.execPath,[p.join(q,'tools','gate.mjs'),'run',...process.argv.slice(1)],{stdio:'inherit'}).status??1)" [-- --files <f> ...]
 ```
 
-`sort -V` обязателен: без него берётся устаревшая версия плагина
-(`references/run-environment.md`).
+Источники: `QG_ROOT`, `CLAUDE_PLUGIN_ROOT`, `installed_plugins.json` — кэш не перебирается
+(`references/run-environment.md`). Вывод называет `QG=<путь>` — дальше подставляй буквально.
 
 ### Профиль и инструменты — той же командой
 
-Последняя строка блока — `gate.mjs run [--files <f> ...] [--only <инструмент,...>]
-[--no-analyzer]`: поиск пути и прогон занимают один ход. Без `--files` — состав из взведённой
+`gate.mjs run [--files <f> ...] [--only <инструмент,...>] [--no-analyzer]`: поиск пути и
+прогон занимают один ход. Без `--files` — состав из взведённой
 сессии (`gate.mjs status`). Печатает `QG=<путь>` для следующих команд, профиль, строку
 `scope` (с `config=...`), сводку инструментов, вывод тех, у кого находки и сбои, черновик
 следа и что осталось модели. Полный вывод, сравнение версий и индекс каталога — в каталоге
