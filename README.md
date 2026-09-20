@@ -183,7 +183,7 @@ BSL (2):
 
 ```json
 {
-  "plugin": ["1c-quality-gate@git+https://github.com/Romandredan/1c-quality-gate.git#v3.9.1"]
+  "plugin": ["1c-quality-gate@git+https://github.com/Romandredan/1c-quality-gate.git#v3.10.0"]
 }
 ```
 
