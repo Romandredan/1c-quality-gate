@@ -28,6 +28,7 @@ import { SCOPES } from './evidence-scopes.mjs';
 import { readCatalog } from './gen-catalog-index.mjs';
 import { expectedExamined } from './catalog.mjs';
 import { validatePatterns, matchesAny } from './path-match.mjs';
+import { handoffLines } from '../hooks/gate-core.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -1312,6 +1313,29 @@ function cmdRun(args) {
   return failed ? 1 : 0;
 }
 
+/**
+ * Передача проверки субагенту — тот же текст, что печатает хук при блокировке. Нужна команде
+ * `/gate`: перечень описания работы живёт в одном месте (`handoffLines`), и вторая его копия в
+ * файле команды разошлась бы с хуком при первой правке.
+ */
+function cmdHandoff(args) {
+  const state = readPending();
+  if (!state || state.corrupt || Object.keys(state.sessions || {}).length === 0) {
+    process.stderr.write('Гейт не взведён: передавать субагенту нечего.\n' + rootLine());
+    return 2;
+  }
+  const explicit = typeof args.session === 'string' ? args.session : null;
+  const sessionId = pickSession(state, explicit);
+  if (!sessionId) {
+    process.stderr.write(explicit ? `Сессия "${explicit}" в состоянии гейта не найдена.\n` : ambiguousSessionMessage(state));
+    return 2;
+  }
+  // Каталог состояния OpenCode задаёт его плагин через окружение оболочки — по нему и режим.
+  const mode = args.mode === 'opencode' || (args.mode !== 'claude' && process.env.QG_STATE_DIR) ? 'opencode' : 'claude';
+  process.stdout.write(handoffLines({ sessionId, packageRoot: dirname(HERE), mode }).join('\n') + '\n');
+  return 0;
+}
+
 function main(argv) {
   const [cmd, ...rest] = argv.slice(2);
   const args = parseArgs(rest);
@@ -1323,6 +1347,8 @@ function main(argv) {
       return cmdPlan(args);
     case 'run':
       return cmdRun(args);
+    case 'handoff':
+      return cmdHandoff(args);
     case 'verify':
       return cmdVerify(args);
     case 'release':
@@ -1333,6 +1359,7 @@ function main(argv) {
           '  node gate.mjs status\n' +
           '  node gate.mjs plan [--files <f> ...] [--json] [--no-analyzer]\n' +
           '  node gate.mjs run [--files <f> ...] [--only <инструмент,...>] [--no-analyzer] [--verbose]\n' +
+          '  node gate.mjs handoff [--session <id>] [--mode claude|opencode]\n' +
           '  node gate.mjs verify --layer <code|arch|xml|hygiene> <файл> [...]\n' +
           '  node gate.mjs release --evidence <файл>\n' +
           '  node gate.mjs release --class C0 --reason "<почему>"\n'

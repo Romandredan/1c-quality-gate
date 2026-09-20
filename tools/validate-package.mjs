@@ -37,6 +37,8 @@ const SKILL_SIZE_LIMIT = 32_768;
 
 /** Модели субагентов. Опечатка здесь не диагностируется средой — субагент просто не поднимется. */
 const AGENT_MODELS = new Set(['haiku', 'sonnet', 'opus', 'fable', 'inherit']);
+/** Субагенты, которым разрешён Write — только ради отчёта; остальные обязаны его запретить. */
+const REPORT_WRITERS = new Set(['gate-runner']);
 
 /** Все файлы репозитория, кроме служебных. Запасной обход, когда git недоступен. */
 function walk(dir, acc = []) {
@@ -309,7 +311,11 @@ for (const f of files.filter((p) => /(^|\/)agents\/[^/]+\.md$/.test(rel(p)))) {
     fail(rel(f), 'во frontmatter нет поля tools или disallowedTools');
   } else if (!hasTools) {
     const list = new Set(denied[1].split(',').map((s) => s.trim()));
-    if (!list.has('Edit') || !list.has('Write')) {
+    // Единственный, кому Write нужен: исполнитель гейта пишет отчёт со следом. Отчёт — файл во
+    // временном каталоге, а не правка проекта; Edit ему закрыт так же, как остальным. Исключение
+    // именное, а не «любому, кто попросит»: новый пишущий агент должен появиться здесь явно.
+    const writesReport = REPORT_WRITERS.has(rel(f).split('/').pop().replace(/\.md$/, ''));
+    if (!list.has('Edit') || (!list.has('Write') && !writesReport)) {
       fail(rel(f), 'субагент без закрытого списка tools обязан запретить Edit и Write в disallowedTools');
     }
   }

@@ -173,6 +173,10 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
           if (cfg.agent[name] === undefined) cfg.agent[name] = def;
         }
 
+        // Исполнитель гейта запускает субагентов контуров, то есть работает на втором уровне
+        // вложенности, а умолчание OpenCode — один. Свою, более глубокую настройку не понижаем.
+        cfg.subagent_depth = Math.max(Number(cfg.subagent_depth) || 1, 2);
+
         cfg.mcp = cfg.mcp || {};
         if (cfg.mcp.v8std === undefined) cfg.mcp.v8std = { ...V8STD_MCP };
       } catch {

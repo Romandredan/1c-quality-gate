@@ -2856,8 +2856,8 @@ const mustContain = [
   ['skills/quality-gate/SKILL.md', 'gate.mjs" run', 'оркестратор начинает с прогона инструментов одной командой'],
   ['skills/quality-gate/SKILL.md', 'Субагентам называй каталог', 'оркестратор передаёт субагентам каталог прогона'],
   ['agents/bsl-verifier.md', 'Назван каталог прогона — инструменты не запускай', 'верификатор не гоняет инструменты повторно внутри гейта'],
-  ['commands/gate.md', 'gate.mjs" run', 'команда /gate ведёт через run'],
-  ['opencode/commands/gate.md', 'gate.mjs" run', 'команда OpenCode ведёт через run'],
+  ['commands/gate.md', 'gate.mjs" handoff', 'команда /gate передаёт проверку субагенту через handoff'],
+  ['opencode/commands/gate.md', 'gate.mjs" handoff', 'команда OpenCode передаёт проверку субагенту через handoff'],
   ['skills/quality-gate/SKILL.md', '--no-analyzer', 'план называет флаг, пропускающий ось сложности'],
   ['skills/quality-gate/SKILL.md', 'поднять', 'профиль плана можно поднять'],
   ['skills/quality-gate/SKILL.md', 'понизить', 'профиль плана нельзя понизить без основания'],
@@ -3021,6 +3021,28 @@ check('верификатор не грузит каталог антипатт�
     check(`${name}: закрытого списка tools нет — MCP наследуется`, fm !== '' && !/^tools:/m.test(fm));
     const denied = new Set((fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] || '').split(',').map((s) => s.trim()));
     check(`${name}: запись и запуск субагентов запрещены`, ['Edit', 'Write', 'Agent'].every((t) => denied.has(t)));
+  }
+  // Исполнитель гейта — особый случай того же правила: индекс ему положен, но запрещать ему
+  // запуск субагентов и Write нельзя — он запускает субагентов контуров и пишет отчёт. Правка
+  // проекта закрыта ему так же, как всем.
+  {
+    const text = readFileSync(join(ROOT, 'agents', 'gate-runner.md'), 'utf8').replace(/\r\n/g, '\n');
+    const fm = text.match(/^---\n([\s\S]*?)\n---/)?.[1] || '';
+    const denied = new Set((fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] || '').split(',').map((s) => s.trim()));
+    check('gate-runner: блок «сначала индекс» стоит дословно', block !== '' && text.includes(block));
+    check('gate-runner: закрытого списка tools нет — MCP и запуск субагентов наследуются', !/^tools:/m.test(fm) && !denied.has('Agent'));
+    check('gate-runner: правка файлов проекта закрыта', denied.has('Edit') && denied.has('NotebookEdit'));
+    check('gate-runner: модель не ниже модели сессии', /^model:\s*(inherit|opus|fable)\s*$/m.test(fm));
+    for (const [needle, label] of [
+      ['run --session <id>', 'прогон начинается с gate.mjs run по сессии'],
+      ['Гейт не снимай', 'гейт снимает основная сессия'],
+      ['не передано: пункт N', 'пропущенный пункт описания называется по номеру'],
+      ['угадывать сессию нельзя', 'без идентификатора сессии прогон не начинается'],
+      ['утверждение автора, а не факт', 'описание работы сверяется с кодом'],
+      ['описание работы не уходит ни в каком виде', 'холодному читателю замысел не передаётся'],
+      ['во временный каталог, не в проект', 'отчёт не попадает в проект'],
+      ['в ответ его не копируй', 'отчёт не дублируется в ответе основной сессии'],
+    ]) check(`gate-runner: ${label}`, text.includes(needle));
   }
   const stale = readdirSync(join(ROOT, 'agents')).filter((f) => readFileSync(join(ROOT, 'agents', f), 'utf8').includes('rlm-tools-bsl'));
   check('агенты не ссылаются на снятый индекс rlm-tools-bsl', stale.length === 0, stale.join(', '));
@@ -7027,6 +7049,24 @@ section('gate.mjs run — инструментальная фаза одним �
   check('упавший инструмент назван сбоем', /^meta-validate\s+.*СБОЙ/m.test(broken.out), broken.out.slice(0, 700));
   check('инструменты после упавшего исполнены', /^rename-check\s+/m.test(broken.out));
   check('за упавший инструмент строка следа не сочинена', !/\[qg [a-z_]+: layer=xml/.test(broken.out));
+
+  // handoff печатает тот же текст передачи, что хук при блокировке: команда /gate ведёт тем же
+  // путём, а перечень описания работы не заводит вторую копию в файле команды.
+  {
+    const noGate = run('tools/gate.mjs', ['handoff'], { env });
+    check('handoff без взведённого гейта отказывает', noGate.code === 2 && /не взведён/.test(noGate.out), noGate.out.slice(0, 200));
+    mkdirSync(join(rr, '.claude', '.state'), { recursive: true });
+    writeFileSync(join(rr, '.claude', '.state', 'qg-pending.json'), JSON.stringify({
+      version: 2,
+      sessions: { HS: { armedAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', files: { [bsl]: { kind: 'bsl', edits: 1 } } } },
+    }), 'utf8');
+    const ho = run('tools/gate.mjs', ['handoff'], { env: { ...env, QG_STATE_DIR: '' } });
+    check('handoff печатает передачу субагенту с сессией и перечнем',
+      ho.code === 0 && /gate-runner/.test(ho.out) && ho.out.includes('Сессия гейта: HS') && ho.out.includes('6. Сомнения'), ho.out.slice(0, 300));
+    const hoOc = run('tools/gate.mjs', ['handoff', '--mode', 'opencode'], { env });
+    check('handoff для OpenCode называет инструмент task', hoOc.code === 0 && /инструментом task/.test(hoOc.out), hoOc.out.slice(0, 300));
+    rmSync(join(rr, '.claude', '.state', 'qg-pending.json'), { force: true });
+  }
 
   const unknown = run('tools/gate.mjs', ['run', '--files', bsl, '--no-analyzer', '--only', 'нет-такого'], { env });
   check('неизвестное имя в --only — отказ с перечнем', unknown.code === 2 && /hygiene-check/.test(unknown.out), unknown.out.slice(0, 300));
