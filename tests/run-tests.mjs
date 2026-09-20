@@ -2978,6 +2978,8 @@ const mustContain = [
   ['skills/bsl-code-review/references/cold-reader.md', 'Почему отдельный субагент', 'обоснование выноса читателя в субагента'],
   ['skills/quality-gate/SKILL.md', 'cold-reader', 'оркестратор знает холодного читателя'],
   ['shared/index-first.md', 'Почему дважды и почему жёстко', 'обоснование правила индекса рядом с блоком'],
+  // Без потолка повторов агент на зависшем индексе сделал тринадцать безответных вызовов.
+  ['shared/index-first.md', 'Повтори вызов один', 'у обращения к неотвечающему индексу есть потолок повторов'],
   ['skills/bsl-code-review/SKILL.md', 'catalog.mjs" attest', 'контур кода аттестует результат читателя'],
   ['skills/quality-gate/SKILL.md', 'antipattern-reader', 'оркестратор знает субагента-читателя'],
   ['skills/quality-gate/SKILL.md', 'tools/catalog.mjs', 'оркестратор называет инструмент аттестации'],
