@@ -137,10 +137,13 @@ const TOOL_NAMES = {
   bash: 'bash',
   write: 'write',
   edit: 'edit',
+  // Запуск субагентов: у Claude Code инструмент зовётся Agent (прежде Task), у OpenCode — task.
+  agent: 'task',
+  task: 'task',
 };
 
 /** Карта выдаётся целиком: неупомянутый инструмент в OpenCode остаётся разрешённым. */
-const TOOL_KEYS = ['skill', 'read', 'grep', 'glob', 'bash', 'write', 'edit'];
+const TOOL_KEYS = ['skill', 'read', 'grep', 'glob', 'bash', 'write', 'edit', 'task'];
 
 /**
  * Субагенты пакета в форме `config.agent`: тело файла становится `prompt`.
@@ -180,6 +183,9 @@ export function agentsFrom(dir) {
       // Право на правку — отдельный контур: карта инструментов и разрешение проверяются
       // независимо, и субагент-читатель обязан быть закрыт в обоих.
       if (!tools.edit && !tools.write) def.permission = { edit: 'deny' };
+      // Запуск субагентов у субагента в OpenCode выключен по умолчанию: одной карты мало, нужно
+      // и разрешение. Открывается только тому, кто не запретил себе Agent, — исполнителю гейта.
+      if (tools.task) def.permission = { ...(def.permission || {}), task: { '*': 'allow' } };
       return [name, def];
     });
 }

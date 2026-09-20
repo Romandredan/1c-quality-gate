@@ -165,6 +165,34 @@ const bmO = blockMessage({ sessionId: 's1', files, packageRoot: root, mode: 'ope
 check('opencode: заголовок без блокировки', bmO.includes('РАБОТА НЕ ЗАВЕРШЕНА') && !bmO.includes('ЗАВЕРШЕНИЕ ЗАБЛОКИРОВАНО'));
 check('opencode: release с --session', bmO.includes('release --session s1'));
 check('opencode: номер возврата из лимита', bmO.includes('№2 из 3'));
+// Передача проверки субагенту. Замер живых прогонов: гейт — это десятки ходов основной модели,
+// и каждый заново оплачивает контекст длинной сессии. Сообщение блокировки поэтому велит не
+// гнать гейт самому, а запустить субагента и отдать ему описание работы по закрытому перечню:
+// он не видит сессии ни строчкой, и пропущенный пункт перечня ему взять неоткуда.
+for (const [mode, bm] of [['claude', bmC], ['opencode', bmO]]) {
+  check(`${mode}: проверку исполняет субагент gate-runner`, /gate-runner/.test(bm));
+  check(`${mode}: основной модели запрещено гнать гейт самой`, /НЕ прогоняй гейт сам/.test(bm));
+  check(`${mode}: служебные данные подставлены — сессия и каталог плагина`,
+    bm.includes('Сессия гейта: s1') && /Каталог плагина: .+/.test(bm));
+  for (const [needle, label] of [
+    ['1. Задача', 'задача дословно'],
+    ['2. Что изменено и почему именно так', 'решения и отвергнутые альтернативы'],
+    ['3. Инварианты', 'инварианты'],
+    ['4. Что сознательно не сделано', 'что за рамками'],
+    ['5. Что проверено вживую', 'проверенное и непроверенное'],
+    ['6. Сомнения', 'сомнения автора'],
+    ['7. Пути к спецификации', 'пути к спецификации и плану'],
+  ]) check(`${mode}: перечень описания — ${label}`, bm.includes(needle));
+  check(`${mode}: сомнения нельзя оставить пустыми`, /назови хотя бы слабейшее место/.test(bm));
+  check(`${mode}: самооценка запрещена`, /Не оценивай свою работу/.test(bm));
+  check(`${mode}: есть запасной путь, когда субагент недоступен`, /Субагент недоступен/.test(bm));
+  check(`${mode}: снятие гейта — по отчёту субагента`, /release --session s1 --evidence/.test(bm));
+}
+check('claude: тип субагента с именем плагина', /`[a-z0-9-]+:gate-runner`/.test(bmC));
+check('opencode: тип субагента без префикса, инструмент task', /`gate-runner`/.test(bmO) && /task/.test(bmO));
+const hintRunner = gateHint({ kind: 'bsl', rel: 'a.bsl', sessionId: 'sess-1', packageRoot: root, mode: 'claude' });
+check('подсказка взвода предупреждает об описании работы заранее', /gate-runner/.test(hintRunner) && /описани/i.test(hintRunner));
+
 const bmF = blockMessage({ sessionId: 's1', files, foreign: 3, packageRoot: root, mode: 'opencode', repeated: 0 });
 check('чужие правки: предупреждение не трогать', bmF.includes('другой сессии (3)') && bmF.includes('НЕ трогай'));
 

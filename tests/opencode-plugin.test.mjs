@@ -180,6 +180,20 @@ check('ошибка клиента гасится', survived);
 
   // Перевод frontmatter: у харнессов разные схемы. Ключи Claude Code не переносятся —
   // model: haiku в OpenCode не разрешается, color: cyan не проходит проверку формата.
+  // Исполнитель гейта запускает субагентов контуров сам, то есть работает на втором уровне
+  // вложенности. В OpenCode у субагента по умолчанию нет инструмента task, а глубина ограничена
+  // единицей (`subagent_depth`): проверено живой пробой на 1.18.28 — без обоих условий вложенный
+  // запуск отказывает, а выставленное из хука config значение срабатывает.
+  const runner = cfg.agent?.['gate-runner'];
+  check('исполнителю гейта открыт запуск субагентов', runner?.tools?.task === true && runner?.permission?.task?.['*'] === 'allow');
+  check('читающим субагентам запуск субагентов закрыт', cfg.agent?.['bsl-scout']?.tools?.task === false && cfg.agent?.['antipattern-reader']?.tools?.task === false);
+  check('глубина вложенности субагентов поднята до двух', cfg.subagent_depth === 2);
+  {
+    const deeper = { subagent_depth: 5 };
+    await plugin.config(deeper);
+    check('своя, более глубокая настройка пользователя не понижается', deeper.subagent_depth === 5);
+  }
+
   const scout = cfg.agent?.['bsl-scout'];
   check('перевод: список инструментов стал картой булевых',
     scout?.tools?.skill === true && scout?.tools?.read === true && scout?.tools?.bash === false);
