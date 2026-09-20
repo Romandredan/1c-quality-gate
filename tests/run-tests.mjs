@@ -6986,6 +6986,62 @@ section('План прогона печатает инструмент');
   check('отказ объясняет причину', /--files|гейт|сесси/i.test(noFiles.out), noFiles.out.slice(0, 300));
 }
 
+section('Критичная находка не снимается молча');
+
+// Гейт удостоверяет, что проверка прогнана, а не что код чист, — и раньше снимался по любому
+// принятому следу. Когда прогон ушёл в субагента, решение «чинить или нет» основная модель стала
+// принимать по короткому ответу, и сессия могла завершиться с известным 🔴-дефектом, о котором
+// пользователь не узнал. Снятие при 🔴 теперь требует записанного решения: кто решил и что.
+// Разбор прозы приближённый, поэтому отказ обходится одним флагом с причиной, а не запирает гейт.
+{
+  const proj = join(WORK, 'proj-critical');
+  rmSync(proj, { recursive: true, force: true });
+  mkdirSync(join(proj, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+  const env = { CLAUDE_PROJECT_DIR: proj };
+  const file = join(proj, 'src', 'cf', 'CommonModules', 'М', 'Ext', 'Module.bsl');
+  const hook = (script, payload) => {
+    try {
+      execFileSync(process.execPath, [join(ROOT, 'hooks', script)], { input: JSON.stringify(payload), encoding: 'utf8', stdio: 'pipe', env: { ...process.env, ...env } });
+      return 0;
+    } catch (e) {
+      return e.status ?? 1;
+    }
+  };
+  const arm = () => {
+    hook('gate-arm.mjs', { session_id: 'K1', cwd: proj, tool_input: { file_path: file } });
+    writeFileSync(file, BOM + 'Процедура Пример()\r\nКонецПроцедуры\r\n', 'utf8');
+    run('tools/hygiene-check.mjs', [file], { env });
+  };
+  const report = (name, prose) => {
+    const p = join(WORK, name);
+    writeFileSync(p, `# Отчёт гейта\n\n${prose}\n${readFileSync(ev('valid.md'), 'utf8')}`, 'utf8');
+    return p;
+  };
+  const critical = report('critical.md', '## Находки\n\n### 🔴 Обрабатывается только первая строка выборки\n\nФайл: Module.bsl:21. Правило: qg:LOGIC-CASE-LOSS\n');
+  const major = report('major.md', '## Находки\n\n### 🟠 Запрос в цикле\n\nФайл: Module.bsl:40. Правило: qg:BSL-DB-READ-IN-LOOP\n');
+
+  arm();
+  const refused = run('tools/gate.mjs', ['release', '--evidence', critical, '--session', 'K1'], { env });
+  check('снятие при 🔴 без решения отказывает', refused.code === 2, `код ${refused.code}: ${refused.out.slice(0, 200)}`);
+  check('отказ называет находку и оба выхода', refused.out.includes('Обрабатывается только первая строка выборки') && refused.out.includes('--critical-decision') && /исправ/i.test(refused.out), refused.out.slice(0, 500));
+  check('гейт после отказа остаётся взведённым', hook('gate-check.mjs', { session_id: 'K1', cwd: proj }) === 2);
+
+  const tooShort = run('tools/gate.mjs', ['release', '--evidence', critical, '--session', 'K1', '--critical-decision', 'ок'], { env });
+  check('решение одной отпиской не принимается', tooShort.code === 2 && /кто принял решение/i.test(tooShort.out), tooShort.out.slice(0, 300));
+
+  const decision = 'Пользователь: находку видел, исправление отложено до задачи по резервам';
+  const accepted = run('tools/gate.mjs', ['release', '--evidence', critical, '--session', 'K1', '--critical-decision', decision], { env });
+  check('снятие при 🔴 с записанным решением проходит', accepted.code === 0, accepted.out.slice(0, 300));
+  check('вывод снятия повторяет решение и находку', accepted.out.includes(decision) && accepted.out.includes('🔴'), accepted.out.slice(0, 400));
+  const doneRec = JSON.parse(readFileSync(join(proj, '.claude', '.state', 'qg-done.json'), 'utf8')).sessions.K1;
+  check('решение и находки сохранены в журнале снятий',
+    doneRec?.criticalDecision === decision && doneRec?.criticalFindings?.[0]?.includes('первая строка выборки'), JSON.stringify(doneRec));
+
+  arm();
+  const majorOnly = run('tools/gate.mjs', ['release', '--evidence', major, '--session', 'K1'], { env });
+  check('🟠 без 🔴 решения не требует', majorOnly.code === 0, majorOnly.out.slice(0, 300));
+}
+
 section('gate.mjs run — инструментальная фаза одним вызовом');
 
 // Замер по живым сессиям: на прогон приходилось около пятнадцати ходов оболочки на инструменты

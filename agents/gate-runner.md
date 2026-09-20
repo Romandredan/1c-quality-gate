@@ -129,4 +129,5 @@ disallowedTools: Edit, NotebookEdit
 Отчёт: <путь>
 Валидатор следа: принят | отклонён — <текст отказа>
 Снятие гейта: node "<Каталог плагина>/tools/gate.mjs" release --session <id> --evidence <путь>
+              при 🔴 — только после исправления либо с --critical-decision "<решение пользователя>"
 ```

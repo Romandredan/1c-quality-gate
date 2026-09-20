@@ -664,6 +664,7 @@ node "$QG/tools/config.mjs" show
 node "$QG/tools/gate.mjs" status                                   # охват, сессии, отметки проверенного
 node "$QG/tools/gate.mjs" verify --layer code <файл> [...]         # отметить слой проверенным
 node "$QG/tools/gate.mjs" release --evidence <файл отчёта>         # снять гейт по следу
+node "$QG/tools/gate.mjs" release --evidence <файл отчёта> --critical-decision "<кто решил и что>"   # то же при находке 🔴: без записанного решения гейт не снимается
 node "$QG/tools/gate.mjs" release --class C0 --reason "<почему>"   # снять без прогона (только C0 и C1)
 node "$QG/tools/gate.mjs" run [--files <f> ...] [--only <имя,...>]  # профиль, scope и инструменты плана одним вызовом; черновик следа
 node "$QG/tools/gate.mjs" handoff [--session <id>]                   # текст передачи проверки субагенту gate-runner — тот же, что печатает хук
