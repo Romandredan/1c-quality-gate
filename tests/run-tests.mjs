@@ -6999,6 +6999,11 @@ section('gate.mjs run — инструментальная фаза одним �
   const runDir = join(rr, '.claude', '.state', 'qg-run-manual');
   check('полный вывод инструмента сохранён в файлах состояния',
     existsSync(runDir) && readdirSync(runDir).some((f) => /hygiene-check\.log$/.test(f)), existsSync(runDir) ? readdirSync(runDir).join(', ') : 'каталога нет');
+  // Субагенту нужен вывод всех инструментов сразу: файл на инструмент — это ход на файл, и на
+  // парном замере верификатор с ними вышел дороже, чем когда запускал инструменты сам.
+  const allOut = existsSync(join(runDir, 'tools-output.log')) ? readFileSync(join(runDir, 'tools-output.log'), 'utf8') : '';
+  check('весь вывод инструментов собран одним файлом',
+    /===== hygiene-check =====/.test(allOut) && /===== rename-check =====/.test(allOut) && allOut.includes('scope=stale-local-calls'));
   check('сравнение версий сохранено до делегирования читателю',
     existsSync(join(runDir, 'change.diff')) && readFileSync(join(runDir, 'change.diff'), 'utf8').includes('Б = 3'));
   check('индекс каталога сохранён файлом, а не напечатан', existsSync(join(runDir, 'catalog-index.txt')) && !/qg:AI-01/.test(r.out));

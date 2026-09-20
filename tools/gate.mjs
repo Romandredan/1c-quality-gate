@@ -1210,6 +1210,7 @@ function cmdRun(args) {
   w('\n## Инструменты\n');
 
   const evidenceAll = [];
+  const allOutput = [];
   const shown = [];
   let failed = 0;
   let diffPath = null;
@@ -1258,6 +1259,10 @@ function cmdRun(args) {
     }
 
     writeFileSync(join(runDir, `${tag}.log`), output, 'utf8');
+    // Тот же вывод — одним файлом: субагенту, которому нужен вывод всех инструментов, это один
+    // ход чтения вместо хода на файл. На парном замере верификатор читал логи по одному и вышел
+    // дороже, чем когда запускал инструменты сам.
+    allOutput.push(`===== ${title}${spec.bin === 'python' ? ` ${spec.args[1]}` : ''} =====`, output.trim(), '');
     const evidence = (r.stdout || '').split(/\r?\n/).filter((l) => EVIDENCE_LINE.test(l)).map((l) => l.trim());
     const outcome = toolOutcome(r, evidence);
     if (outcome.failed) failed++;
@@ -1278,6 +1283,7 @@ function cmdRun(args) {
     }
   }
 
+  writeFileSync(join(runDir, 'tools-output.log'), allOutput.join(String.fromCharCode(10)), 'utf8');
   const draft = [profile.scopeLine, ...evidenceAll];
   writeFileSync(join(runDir, 'evidence.md'), `## quality evidence\n\n${draft.join('\n')}\n`, 'utf8');
   w('\n## Черновик следа\n');
@@ -1285,7 +1291,7 @@ function cmdRun(args) {
   for (const l of draft) w(`${l}\n`);
 
   w(`\n## Файлы прогона: ${relRun}/\n`);
-  w('Полный вывод каждого инструмента — <NN>-<инструмент>.log, черновик следа — evidence.md.\n');
+  w('Весь вывод одним файлом — tools-output.log, по инструментам — <NN>-<инструмент>.log, черновик следа — evidence.md.\n');
 
   w('\n## Дальше\n');
   if (failed) w(`- СБОЕВ: ${failed}. Строки следа за упавший инструмент нет и быть не должно: перезапусти его отдельно либо закрой записью skipped с причиной.\n`);
