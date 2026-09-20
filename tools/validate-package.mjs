@@ -36,7 +36,7 @@ const SKIP_DIRS = new Set(['.git', 'node_modules', '.remember', '.state', '.qg-a
 const SKILL_SIZE_LIMIT = 32_768;
 
 /** Модели субагентов. Опечатка здесь не диагностируется средой — субагент просто не поднимется. */
-const AGENT_MODELS = new Set(['haiku', 'sonnet', 'opus', 'inherit']);
+const AGENT_MODELS = new Set(['haiku', 'sonnet', 'opus', 'fable', 'inherit']);
 
 /** Все файлы репозитория, кроме служебных. Запасной обход, когда git недоступен. */
 function walk(dir, acc = []) {
@@ -295,8 +295,23 @@ for (const f of files.filter((p) => /(^|\/)agents\/[^/]+\.md$/.test(rel(p)))) {
     continue;
   }
   const fm = m[1];
-  for (const key of ['name', 'description', 'tools']) {
+  for (const key of ['name', 'description']) {
     if (!new RegExp(`^${key}:\\s*\\S`, 'm').test(fm)) fail(rel(f), `во frontmatter нет поля ${key}`);
+  }
+
+  // Состав инструментов задаётся одним из двух способов. Закрытый список `tools` в Claude
+  // Code не наследует MCP вовсе: субагент, которому нужен индекс кода, с ним до индекса не
+  // доходит и молча работает перебором. Такой агент задаётся списком запретов, и тогда
+  // «только читающий» обязан быть записан явно — без запрета Edit и Write он получает запись.
+  const hasTools = /^tools:\s*\S/m.test(fm);
+  const denied = fm.match(/^disallowedTools:\s*(.+)$/m);
+  if (!hasTools && !denied) {
+    fail(rel(f), 'во frontmatter нет поля tools или disallowedTools');
+  } else if (!hasTools) {
+    const list = new Set(denied[1].split(',').map((s) => s.trim()));
+    if (!list.has('Edit') || !list.has('Write')) {
+      fail(rel(f), 'субагент без закрытого списка tools обязан запретить Edit и Write в disallowedTools');
+    }
   }
 
   const fileName = rel(f).split('/').pop().replace(/\.md$/, '');

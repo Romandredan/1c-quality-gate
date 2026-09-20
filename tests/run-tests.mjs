@@ -1674,6 +1674,11 @@ section('Валидатор пакета — состав компонентов
 {
   const pkg = join(WORK, 'pkg-broken');
   writeBytes('pkg-broken/agents/разведчик.md', '---\nname: другое-имя\ndescription: тест\nmodel: gpt\n---\n\nтело\n');
+  // Список запретов вместо закрытого списка: закрытый `tools` в Claude Code отрезает MCP
+  // целиком, поэтому читающий код субагент задаётся тем, чего ему нельзя. «Только читающий»
+  // при этом обязан быть записан явно — без запрета Edit и Write агент получает запись.
+  writeBytes('pkg-broken/agents/читатель.md', '---\nname: читатель\ndescription: тест\ndisallowedTools: Edit, Write, Agent\nmodel: fable\n---\n\nтело\n');
+  writeBytes('pkg-broken/agents/писатель.md', '---\nname: писатель\ndescription: тест\ndisallowedTools: Bash\n---\n\nтело\n');
   writeBytes('pkg-broken/commands/проба.md', '---\nargumentHint: подсказка\n---\n\nтело\n');
   writeBytes('pkg-broken/skills/big-skill/SKILL.md', `---\nname: big-skill\ndescription: тест\n---\n\n${'т'.repeat(40000)}\n`);
   writeBytes('pkg-broken/skills/big-skill/references/anchors.md', 'раздел «Нет такого» навыка `big-skill`\n');
@@ -1691,7 +1696,11 @@ section('Валидатор пакета — состав компонентов
     !r.out.includes('engine=bsl-context@0.18.1/'), r.out.trim().slice(0, 300));
   check('имя агента сверяется с именем файла', r.out.includes('не совпадает с именем файла'), r.out.trim().slice(0, 200));
   check('модель агента вне набора — ошибка', r.out.includes('model "gpt"'), r.out.trim().slice(0, 200));
-  check('у агента требуется tools', /нет поля tools/.test(r.out), r.out.trim().slice(0, 200));
+  check('у агента требуется tools или disallowedTools',
+    /разведчик\.md.*нет поля tools или disallowedTools/.test(r.out), r.out.trim().slice(0, 200));
+  check('агент со списком запретов и моделью fable проходит', !/читатель\.md/.test(r.out), r.out.trim().slice(0, 300));
+  check('список запретов без Edit и Write — ошибка',
+    /писатель\.md.*обязан запретить Edit и Write/.test(r.out), r.out.trim().slice(0, 300));
   check('camelCase-поле команды названо с исправлением',
     r.out.includes('"argumentHint" не читается') && r.out.includes('argument-hint'), r.out.trim().slice(0, 200));
   check('навык сверх предела размера — ошибка', /при пределе \d+/.test(r.out), r.out.trim().slice(0, 200));
