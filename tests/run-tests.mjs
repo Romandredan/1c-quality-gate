@@ -7106,6 +7106,60 @@ section('gate.mjs run — инструментальная фаза одним �
   check('инструменты после упавшего исполнены', /^rename-check\s+/m.test(broken.out));
   check('за упавший инструмент строка следа не сочинена', !/\[qg [a-z_]+: layer=xml/.test(broken.out));
 
+  // Анализатор — самый долгий инструмент плана, а run запускал его дважды: раз с --json ради
+  // метрик профиля и раз текстом ради находок и следа. Поддельный сценарий считает свои запуски
+  // и отдаёт метрики через --metrics-out: run обязан обойтись одним вызовом и при этом посчитать
+  // ось сложности по его метрикам.
+  {
+    const counter = join(WORK, 'analyzer-calls.txt');
+    rmSync(counter, { force: true });
+    const stub = join(WORK, 'analyzer-stub.mjs');
+    writeFileSync(stub, [
+      "import { appendFileSync, writeFileSync } from 'node:fs';",
+      'const a = process.argv.slice(2);',
+      "appendFileSync(process.env.STUB_COUNTER, a.join(' ') + '\\n');",
+      "const i = a.indexOf('--metrics-out');",
+      "const files = a.filter((x, k) => a[k - 1] === '--changed');",
+      "if (i >= 0) writeFileSync(a[i + 1], JSON.stringify({ metrics: Object.fromEntries(files.map((f) => [f, { functions: 1, complexity: 99, cognitive_complexity: 99 }])) }));",
+      "if (a.includes('--json')) console.log(JSON.stringify({ metrics: {} }));",
+      "else console.log('Движок: заглушка | находок: 0\\n\\n## quality evidence\\n\\n[qg applied: layer=code, scope=static-analysis, ids=[bslls:all], verdict=clean]');",
+    ].join('\n'), 'utf8');
+    const stubEnv = { ...env, QG_ANALYZER_RUN: stub, STUB_COUNTER: counter };
+    const one = run('tools/gate.mjs', ['run', '--files', bsl, '--only', 'hygiene-check,analyzer-run'], { env: stubEnv });
+    const calls = existsSync(counter) ? readFileSync(counter, 'utf8').trim().split('\n') : [];
+    check('run запускает анализатор один раз, а не дважды', one.code === 0 && calls.length === 1, `код ${one.code}, запусков ${calls.length}: ${calls.join(' | ')}`);
+    check('единственный запуск — текстовый, с файлом метрик', calls.length === 1 && calls[0].includes('--metrics-out') && !calls[0].includes('--json'), calls.join(' | '));
+    check('ось сложности посчитана по метрикам этого запуска', /complexity=\[(?!not_computed)[^\]]+\]/.test(one.out) && !/сложность не считалась/.test(one.out), one.out.slice(0, 500));
+    check('вывод и след анализатора попали в сводку и черновик', /^analyzer-run\s+чисто/m.test(one.out) && one.out.includes('scope=static-analysis'), one.out.slice(0, 700));
+
+    // Анализатор вне --only: метрики по-прежнему нужны профилю, инструмент не исполняется —
+    // запуск один, прежний, с --json.
+    rmSync(counter, { force: true });
+    const skipTool = run('tools/gate.mjs', ['run', '--files', bsl, '--only', 'hygiene-check'], { env: stubEnv });
+    const calls2 = existsSync(counter) ? readFileSync(counter, 'utf8').trim().split('\n') : [];
+    check('анализатор вне --only: один запуск ради метрик, инструмент не исполняется',
+      skipTool.code === 0 && calls2.length === 1 && calls2[0].includes('--json') && !/^analyzer-run\s/m.test(skipTool.out), `${calls2.join(' | ')}`);
+  }
+
+  // Команда поиска пути из навыка. Прежний блок был сценарием bash и в среде, где оболочка —
+  // только PowerShell, не исполнялся вовсе. Команда берётся из самого навыка, а не из копии в
+  // тесте: проверяется то, что прочтёт модель. Ограничения на текст держат PowerShell: внутри
+  // двойных кавычек он раскрывает `$` и обратные кавычки, а вложенные двойные рвут строку.
+  {
+    const skill = readFileSync(join(ROOT, 'skills', 'quality-gate', 'SKILL.md'), 'utf8');
+    const script = skill.match(/^node -e "([^"\n]+)" \[-- --files/m)?.[1] || '';
+    check('в навыке есть команда поиска пути на node -e', script.length > 100, script.slice(0, 80));
+    check('команда переносима в PowerShell: нет $, обратных и двойных кавычек', !/[$`"]/.test(script), script.match(/[$`"]/)?.[0] || '');
+    check('в навыке не осталось сценария bash для поиска пути', !/\$\{QG_ROOT:-\}|sort -V \| tail|test -d "\$QG/.test(skill));
+    const viaEnv = spawnSync(process.execPath, ['-e', script, '--', '--files', bsl, '--no-analyzer', '--only', 'hygiene-check'],
+      { cwd: rr, encoding: 'utf8', env: { ...process.env, ...env, QG_ROOT: ROOT, CLAUDE_PLUGIN_ROOT: '' } });
+    check('команда находит плагин по QG_ROOT и исполняет run с аргументами после --',
+      viaEnv.status === 0 && /^QG=/m.test(viaEnv.stdout) && /^hygiene-check\s+чисто/m.test(viaEnv.stdout), `${viaEnv.status}: ${(viaEnv.stdout + viaEnv.stderr).slice(0, 300)}`);
+    const nowhere = spawnSync(process.execPath, ['-e', script], { cwd: rr, encoding: 'utf8',
+      env: { ...process.env, QG_ROOT: '', CLAUDE_PLUGIN_ROOT: '', HOME: join(WORK, 'no-home'), USERPROFILE: join(WORK, 'no-home') } });
+    check('плагин не найден — явный отказ, а не молчание', nowhere.status === 1 && /plugin not found/.test(nowhere.stderr), `${nowhere.status}: ${nowhere.stderr.slice(0, 200)}`);
+  }
+
   // handoff печатает тот же текст передачи, что хук при блокировке: команда /gate ведёт тем же
   // путём, а перечень описания работы не заводит вторую копию в файле команды.
   {
