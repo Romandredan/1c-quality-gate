@@ -2990,6 +2990,43 @@ for (const [file, needle, label] of mustContain) {
 // должен быть облегчён до дешёвой модели — оба условия ловят регрессию молча, без падения на
 // живом прогоне.
 check('верификатор не грузит каталог антипаттернов', !readFileSync(join(ROOT, 'agents', 'bsl-verifier.md'), 'utf8').includes('catalog/'));
+// Субагент, выходящий за переданные ему файлы, обязан идти в индекс кода раньше перебора.
+// Блок правила живёт в одном месте (`shared/index-first.md`) и переносится в агентов дословно:
+// агент читает только свой файл, а разошедшаяся копия правила действует молча по-старому.
+// Закрытый список `tools` в Claude Code отрезает MCP целиком — с ним правило невыполнимо,
+// поэтому такие агенты заданы списком запретов, и запуск субагентов им тоже закрыт.
+{
+  const src = readFileSync(join(ROOT, 'shared', 'index-first.md'), 'utf8').replace(/\r\n/g, '\n');
+  const block = src.match(/<!-- index-first:begin -->\n([\s\S]*?)\n<!-- index-first:end -->/)?.[1] || '';
+  check('блок «сначала индекс» в источнике найден', block.includes('проверь его наличие дважды'));
+  for (const name of ['bsl-scout', 'bsl-verifier', 'cold-reader']) {
+    const p = join(ROOT, 'agents', `${name}.md`);
+    const text = existsSync(p) ? readFileSync(p, 'utf8').replace(/\r\n/g, '\n') : '';
+    const fm = text.match(/^---\n([\s\S]*?)\n---/)?.[1] || '';
+    check(`${name}: блок «сначала индекс» стоит дословно`, block !== '' && text.includes(block));
+    check(`${name}: закрытого списка tools нет — MCP наследуется`, fm !== '' && !/^tools:/m.test(fm));
+    const denied = new Set((fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] || '').split(',').map((s) => s.trim()));
+    check(`${name}: запись и запуск субагентов запрещены`, ['Edit', 'Write', 'Agent'].every((t) => denied.has(t)));
+  }
+  const stale = readdirSync(join(ROOT, 'agents')).filter((f) => readFileSync(join(ROOT, 'agents', f), 'utf8').includes('rlm-tools-bsl'));
+  check('агенты не ссылаются на снятый индекс rlm-tools-bsl', stale.length === 0, stale.join(', '));
+}
+// Холодный читатель — отдельный субагент: как роль внутри навыка он запускался через
+// универсального агента, который получал все инструменты и сам подгружал навык контура.
+// Модель зафиксирована нижней границей: `inherit` на дешёвой сессии дал бы дешёвого читателя.
+{
+  const cold = existsSync(join(ROOT, 'agents', 'cold-reader.md')) ? readFileSync(join(ROOT, 'agents', 'cold-reader.md'), 'utf8') : '';
+  check('холодный читатель: модель не ниже opus', /^model:\s*(opus|fable)\s*$/m.test(cold));
+  check('холодный читатель: навыки контуров ему закрыты', /^disallowedTools:.*\bSkill\b/m.test(cold));
+  for (const [needle, label] of [
+    ['как написан, а не как задуман', 'первый вопрос'],
+    ['На каких входных данных он ломается', 'второй вопрос'],
+    ['Какое ожидаемое поведение из него не следует', 'третий вопрос'],
+    ['Нет цитаты — нет находки', 'находка без цитаты не принимается'],
+    ['О замысле не спрашивай и не угадывай его', 'замысел не запрашивается'],
+    ['вход не холодный', 'протёкший замысел называется в ответе'],
+  ]) check(`холодный читатель: ${label}`, cold.includes(needle));
+}
 check('читатель работает не на haiku', /^model:\s*(sonnet|opus|inherit)/m.test(readFileSync(join(ROOT, 'agents', 'antipattern-reader.md'), 'utf8')));
 
 // ---------------------------------------------------------------------------
