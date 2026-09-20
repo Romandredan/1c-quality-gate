@@ -335,15 +335,32 @@ const SEVERITY_LABEL =
 const NOT_FINDINGS = /отклон|не\s*провер|непровер|предложени/i;
 const FINDING_ID = /qg:[A-Z][A-Z0-9-]*[A-Z0-9]|#?std\d{3,4}|bslls:[A-Za-z][\w-]*|acc:\d{3,4}|v8cs:[\w-]+/g;
 
+const normId = (id) => id.replace(/^#/, '');
+
+/**
+ * Находки 🔴/🟠 из прозы отчёта: заголовок, важность, строка, идентификаторы из тела. Один разбор
+ * на двоих — сверку прозы со следом (`uncoveredFindings`) и отказ `gate.mjs release` снимать гейт
+ * при 🔴 без записанного решения. Приближение то же и заявлено там же, где используется.
+ */
+export function severeFindings(text) {
+  return collectSevere(text).map((f) => ({
+    title: f.title, sev: f.sev, line: f.line,
+    ids: [...new Set(([f.title, ...f.body].join('\n').match(FINDING_ID) || []).map(normId))],
+  }));
+}
+
 /** Находки 🔴/🟠 из прозы отчёта, ни один идентификатор которых не стоит в verdict=violation. */
 export function uncoveredFindings(text, records) {
-  const norm = (id) => id.replace(/^#/, '');
   const violated = new Set();
   for (const r of records) {
     const m = r.type === 'applied' ? String(r.fields.verdict || '').match(/^violation:(.+)$/) : null;
-    if (m) violated.add(norm(m[1].trim()));
+    if (m) violated.add(normId(m[1].trim()));
   }
+  return severeFindings(text).filter((f) => !f.ids.some((id) => violated.has(id)));
+}
 
+/** Разбор прозы отчёта до секции следа: заголовки с важностью 🔴/🟠 и их тела. */
+function collectSevere(text) {
   const at = text.indexOf(SECTION);
   const lines = (at === -1 ? text : text.slice(0, at)).split(/\r?\n/);
   const findings = [];
@@ -387,12 +404,7 @@ export function uncoveredFindings(text, records) {
     stack.push(entry);
   });
 
-  const out = [];
-  for (const f of findings) {
-    const ids = [...new Set(([f.title, ...f.body].join('\n').match(FINDING_ID) || []).map(norm))];
-    if (!ids.some((id) => violated.has(id))) out.push({ title: f.title, sev: f.sev, line: f.line, ids });
-  }
-  return out;
+  return findings;
 }
 
 export function validate(text, { gate = false, root = null, session = null } = {}) {

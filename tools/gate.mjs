@@ -18,7 +18,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSy
 import { join, dirname, basename, extname, relative, isAbsolute, sep, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { validate } from './evidence-validator.mjs';
+import { validate, severeFindings } from './evidence-validator.mjs';
 import { resolveProjectRoot } from './project-root.mjs';
 import { readConfig, resolve as resolveConfigState, versionSuffix, pluginVersion } from './config.mjs';
 import { removeFileSync } from './fs-safe.mjs';
@@ -307,6 +307,8 @@ function cmdRelease(args) {
   // (непокрытый файл, несверенное покрытие), а не придирки к оформлению. Выброшенные, они
   // оставляли бы гейт снятым без следа именно там, где след и нужен.
   let warnings = [];
+  let criticalFindings = [];
+  const criticalDecision = typeof args['critical-decision'] === 'string' ? args['critical-decision'] : null;
 
   if (evidenceFile) {
     if (!existsSync(evidenceFile)) {
@@ -326,6 +328,36 @@ function cmdRelease(args) {
       return 2;
     }
     warnings = problems.filter((p) => p.severity === 'warn');
+
+    // Гейт удостоверяет, что проверка прогнана, а не что код чист, — но известный 🔴-дефект не
+    // должен уходить молча. С тех пор как прогон исполняет субагент, решение «чинить или нет»
+    // основная модель принимает по его короткому ответу, и без этого отказа сессия завершалась
+    // бы с критичной находкой, о которой пользователь не узнал. Выходов два: исправить (правка
+    // взведёт гейт заново) либо записать решение — оно остаётся в журнале снятий. Разбор прозы
+    // приближённый, поэтому отказ обходится одним флагом с причиной и гейт не запирает.
+    criticalFindings = severeFindings(evidenceText).filter((f) => f.sev === '🔴');
+    if (criticalFindings.length) {
+      const list = criticalFindings.map((f) => `  🔴 ${evidenceFile}:${f.line} — ${f.title}${f.ids.length ? ` [${f.ids.join(', ')}]` : ''}\n`).join('');
+      if (criticalDecision === null) {
+        process.stderr.write(
+          `В отчёте критичные находки (${criticalFindings.length}) — гейт НЕ снят:\n\n${list}\n` +
+            'Выходов два:\n' +
+            '  1. Исправь находку. Правка взведёт гейт заново, проверка повторится.\n' +
+            '  2. Покажи находку пользователю и сними гейт с его решением:\n' +
+            `       node gate.mjs release --session ${sessionId} --evidence <отчёт> --critical-decision "<кто принял решение и какое>"\n` +
+            '     Пользователя рядом нет — так и запиши: кто решил, почему не исправлено, где находка показана.\n' +
+            'Решение сохраняется в журнале снятий: пропуск фиксируется, а не замалчивается.\n'
+        );
+        return 2;
+      }
+      if (criticalDecision.trim().length < 20) {
+        process.stderr.write(
+          'Решение по критичной находке слишком короткое — гейт НЕ снят. Назови, кто принял решение и какое: ' +
+            '«Пользователь: находку видел, исправление отложено до задачи …».\n'
+        );
+        return 2;
+      }
+    }
   } else if (cls && reason) {
     if (!['C0', 'C1'].includes(cls)) {
       process.stderr.write(
@@ -427,6 +459,8 @@ function cmdRelease(args) {
     evidenceArchive,
     class: cls || null,
     reason: reason || null,
+    criticalDecision: criticalFindings.length ? criticalDecision : null,
+    criticalFindings: criticalFindings.map((x) => x.title),
     warnings: [
       ...warnings.map((w) => ({ line: w.line || null, message: w.message })),
       ...stale.map((s) => ({
@@ -445,6 +479,12 @@ function cmdRelease(args) {
       process.stdout.write(`  ПРЕДУПРЕЖДЕНИЕ ${evidenceFile}:${w.line || '?'} — ${w.message}\n`);
     }
     process.stdout.write('\n');
+  }
+  if (criticalFindings.length) {
+    const nl = String.fromCharCode(10);
+    process.stdout.write(`Гейт снят при критичных находках (${criticalFindings.length}) — решение записано в журнал снятий:${nl}`);
+    for (const x of criticalFindings) process.stdout.write(`  🔴 ${x.title}${nl}`);
+    process.stdout.write(`  Решение: ${criticalDecision}${nl}${nl}`);
   }
   if (stale.length) {
     process.stdout.write('Артефакты старше своих исходников — последние правки НЕ попали в сборку:\n');
@@ -1361,7 +1401,7 @@ function main(argv) {
           '  node gate.mjs run [--files <f> ...] [--only <инструмент,...>] [--no-analyzer] [--verbose]\n' +
           '  node gate.mjs handoff [--session <id>] [--mode claude|opencode]\n' +
           '  node gate.mjs verify --layer <code|arch|xml|hygiene> <файл> [...]\n' +
-          '  node gate.mjs release --evidence <файл>\n' +
+          '  node gate.mjs release --evidence <файл> [--critical-decision "<кто решил и что>"]\n' +
           '  node gate.mjs release --class C0 --reason "<почему>"\n'
       );
       return 2;
