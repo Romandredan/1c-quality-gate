@@ -2853,7 +2853,11 @@ const mustContain = [
   ['tools/profile.mjs', 'volume.c1MaxLines', 'порог объёма назван ключом настройки'],
   ['tools/profile.mjs', 'complexity.maxNesting', 'порог сложности назван ключом настройки'],
   ['skills/quality-gate/SKILL.md', 'config=', 'отметка о настройке переносится в след'],
-  ['skills/quality-gate/SKILL.md', 'gate.mjs" plan', 'оркестратор начинает с плана'],
+  ['skills/quality-gate/SKILL.md', 'gate.mjs" run', 'оркестратор начинает с прогона инструментов одной командой'],
+  ['skills/quality-gate/SKILL.md', 'Субагентам называй каталог', 'оркестратор передаёт субагентам каталог прогона'],
+  ['agents/bsl-verifier.md', 'Назван каталог прогона — инструменты не запускай', 'верификатор не гоняет инструменты повторно внутри гейта'],
+  ['commands/gate.md', 'gate.mjs" run', 'команда /gate ведёт через run'],
+  ['opencode/commands/gate.md', 'gate.mjs" run', 'команда OpenCode ведёт через run'],
   ['skills/quality-gate/SKILL.md', '--no-analyzer', 'план называет флаг, пропускающий ось сложности'],
   ['skills/quality-gate/SKILL.md', 'поднять', 'профиль плана можно поднять'],
   ['skills/quality-gate/SKILL.md', 'понизить', 'профиль плана нельзя понизить без основания'],
@@ -3053,7 +3057,11 @@ section('Бюджет навыков и достижимость справоч�
     // считает и печатает `gate.mjs plan`, данные лежат в `tools/profile.mjs`/`tools/gate.mjs`,
     // обоснование — в `references/profile-axes.md`. В навыке остались инварианты и цикл
     // «план → инструменты → контуры → отчёт → снятие», каждый шаг — команда, а не таблица.
-    'quality-gate': 14 * 1024,
+    //
+    // 14,5 вместо 14 КБ: шаги 1–2 описывают `gate.mjs run` — что он печатает, куда кладёт полный
+    // вывод, что делать со сбоем и с повтором. Это исполняемое, в справочник не выносится;
+    // взамен из навыка ушли абзацы о порядке ручного запуска инструментов.
+    'quality-gate': 14.5 * 1024,
     // 26 вместо 25 КБ: у слоя 1а появился второй движок (сверка со справочником платформы),
     // и его блок — команда, признак «выключен по умолчанию» и два правила чтения вывода —
     // в справочник не выносится: без него движок просто не будет запущен. Обосновывающее
@@ -6956,6 +6964,74 @@ section('План прогона печатает инструмент');
   check('отказ объясняет причину', /--files|гейт|сесси/i.test(noFiles.out), noFiles.out.slice(0, 300));
 }
 
+section('gate.mjs run — инструментальная фаза одним вызовом');
+
+// Замер по живым сессиям: на прогон приходилось около пятнадцати ходов оболочки на инструменты
+// гейта (три запуска анализатора, поиск пути к плагину перед каждой командой), и каждый ход
+// перечитывал контекст сессии. `run` исполняет тот же план одной командой: строки следа
+// по-прежнему печатают инструменты, полный вывод уходит в файлы состояния, а не в контекст.
+{
+  const rr = join(WORK, 'run-root');
+  rmSync(rr, { recursive: true, force: true });
+  mkdirSync(join(rr, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+  mkdirSync(join(rr, 'src', 'cf', 'Catalogs'), { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: rr });
+  writeFileSync(join(rr, '.1c-quality-gate.json'), '{}', 'utf8');
+  const bsl = 'src/cf/CommonModules/М/Ext/Module.bsl';
+  writeFileSync(join(rr, bsl), '﻿Процедура П() Экспорт\n\tА = 1;\nКонецПроцедуры\n', 'utf8');
+  execFileSync('git', ['add', '-A'], { cwd: rr });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], { cwd: rr });
+  writeFileSync(join(rr, bsl), '﻿Процедура П() Экспорт\n\tА = 2;\n\tБ = 3;\nКонецПроцедуры\n', 'utf8');
+
+  const env = { QG_PROJECT_DIR: rr };
+  const only = 'hygiene-check,query-lint,bsl-lint,rename-check,catalog';
+  const r = run('tools/gate.mjs', ['run', '--files', bsl, '--no-analyzer', '--only', only], { env });
+  check('run завершается успешно', r.code === 0, r.out.slice(0, 400));
+  check('run печатает путь к плагину для следующих команд', /^QG=.+/m.test(r.out), r.out.slice(0, 300));
+  check('run печатает строку scope', /^\[qg scope: /m.test(r.out));
+  check('сводка называет каждый исполненный инструмент',
+    ['hygiene-check', 'query-lint', 'bsl-lint', 'rename-check'].every((t) => new RegExp(`^${t}\\s+`, 'm').test(r.out)), r.out.slice(0, 600));
+  check('исключённый через --only инструмент не запускался', !/^analyzer-run\s/m.test(r.out) && !/^platform-context-run\s/m.test(r.out));
+  check('черновик следа несёт строки инструментов',
+    /## Черновик следа[\s\S]*\[qg applied: layer=hygiene, scope=file-encoding[\s\S]*\[qg applied: layer=code, scope=stale-local-calls/.test(r.out), r.out.slice(-900));
+  check('чистый инструмент не заливает вывод в контекст', !/## quality evidence/.test(r.out));
+
+  const runDir = join(rr, '.claude', '.state', 'qg-run-manual');
+  check('полный вывод инструмента сохранён в файлах состояния',
+    existsSync(runDir) && readdirSync(runDir).some((f) => /hygiene-check\.log$/.test(f)), existsSync(runDir) ? readdirSync(runDir).join(', ') : 'каталога нет');
+  // Субагенту нужен вывод всех инструментов сразу: файл на инструмент — это ход на файл, и на
+  // парном замере верификатор с ними вышел дороже, чем когда запускал инструменты сам.
+  const allOut = existsSync(join(runDir, 'tools-output.log')) ? readFileSync(join(runDir, 'tools-output.log'), 'utf8') : '';
+  check('весь вывод инструментов собран одним файлом',
+    /===== hygiene-check =====/.test(allOut) && /===== rename-check =====/.test(allOut) && allOut.includes('scope=stale-local-calls'));
+  check('сравнение версий сохранено до делегирования читателю',
+    existsSync(join(runDir, 'change.diff')) && readFileSync(join(runDir, 'change.diff'), 'utf8').includes('Б = 3'));
+  check('индекс каталога сохранён файлом, а не напечатан', existsSync(join(runDir, 'catalog-index.txt')) && !/qg:AI-01/.test(r.out));
+  check('черновик следа сохранён файлом', existsSync(join(runDir, 'evidence.md')) && /\[qg scope: /.test(readFileSync(join(runDir, 'evidence.md'), 'utf8')));
+  check('команда attest напечатана с готовым путём к сравнению версий', /catalog\.mjs" attest .*--diff ".*change\.diff"/.test(r.out), r.out.slice(-700));
+  check('модельные проходы и «Закрыть в следе» названы', /## Дальше[\s\S]*antipattern-reader[\s\S]*Закрыть в следе/.test(r.out), r.out.slice(-700));
+
+  // В черновике только то, что напечатали инструменты, плюс строка scope: run ничего не сочиняет.
+  const draft = readFileSync(join(runDir, 'evidence.md'), 'utf8').split('\n').filter((l) => l.startsWith('[qg '));
+  const printed = readdirSync(runDir).filter((f) => f.endsWith('.log')).map((f) => readFileSync(join(runDir, f), 'utf8')).join('\n');
+  check('в черновике нет сочинённых записей — только scope и строки инструментов',
+    draft.length > 1 && draft.every((l) => /^\[qg scope: /.test(l) || printed.includes(l)));
+
+  // Сбой инструмента посередине прогон не останавливает: остальные исполняются, строка следа
+  // за упавшего не сочиняется, код возврата — 1.
+  const xml = 'src/cf/Catalogs/Товары.xml';
+  writeFileSync(join(rr, xml), '<?xml version="1.0" encoding="UTF-8"?>\n<MetaDataObject/>\n', 'utf8');
+  const broken = run('tools/gate.mjs', ['run', '--files', bsl, xml, '--no-analyzer', '--only', 'hygiene-check,meta-validate,rename-check'],
+    { env: { ...env, QG_PYTHON: 'python-которого-нет' } });
+  check('сбой инструмента даёт код 1', broken.code === 1, `код ${broken.code}: ${broken.out.slice(0, 300)}`);
+  check('упавший инструмент назван сбоем', /^meta-validate\s+.*СБОЙ/m.test(broken.out), broken.out.slice(0, 700));
+  check('инструменты после упавшего исполнены', /^rename-check\s+/m.test(broken.out));
+  check('за упавший инструмент строка следа не сочинена', !/\[qg [a-z_]+: layer=xml/.test(broken.out));
+
+  const unknown = run('tools/gate.mjs', ['run', '--files', bsl, '--no-analyzer', '--only', 'нет-такого'], { env });
+  check('неизвестное имя в --only — отказ с перечнем', unknown.code === 2 && /hygiene-check/.test(unknown.out), unknown.out.slice(0, 300));
+}
+
 section('План прогона — пути автотестов и подсказка YAxUnit');
 
 {
@@ -7052,6 +7128,29 @@ section('Строка следа из плана принимается вали
   const baseline = scopeProblems({});
   check('минимальный отчёт по плану без настройки принимается', baseline.problems.length === 0 && /config=default\]$/.test(baseline.scopeLine),
     `${baseline.scopeLine} ${baseline.problems.join(' | ')}`);
+
+  // Та же граница для `gate.mjs run`: его черновик — это строки, напечатанные инструментами,
+  // и отдать его валидатору можно только как есть. Если черновик не принимается без правки,
+  // модель снова начнёт переписывать строки следа руками — ровно то, от чего run избавляет.
+  {
+    // Свой стенд: инструменты отмечаются в журнале прогонов, и на общем стенде эти отметки
+    // потребовали бы своих записей от соседних отчётов.
+    const runRoot = join(WORK, 'run-validator-root');
+    rmSync(runRoot, { recursive: true, force: true });
+    execFileSync('git', ['init', '-q', runRoot]);
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: runRoot });
+    mkdirSync(join(runRoot, dirname(file)), { recursive: true });
+    writeFileSync(join(runRoot, file), BOM + 'Процедура П() Экспорт\n\tА = 1;\nКонецПроцедуры\n', 'utf8');
+    writeFileSync(join(runRoot, '.1c-quality-gate.json'), '{}', 'utf8');
+    const rr = run('tools/gate.mjs', ['run', '--files', file, '--no-analyzer', '--only', 'hygiene-check,query-lint,bsl-lint,rename-check'],
+      { env: { QG_PROJECT_DIR: runRoot, CLAUDE_PROJECT_DIR: runRoot } });
+    const draftFile = join(runRoot, '.claude', '.state', 'qg-run-manual', 'evidence.md');
+    const draft = existsSync(draftFile) ? readFileSync(draftFile, 'utf8') : '';
+    const problems = validate(`${draft}\n${declared}`, { gate: true, root: runRoot })
+      .problems.filter((p) => p.severity === 'error').map((p) => p.message);
+    check('черновик следа из run принимается валидатором без правки', rr.code === 0 && draft !== '' && problems.length === 0,
+      `код ${rr.code}; ${problems.join(' | ')}`);
+  }
 
   const rejected = [];
   for (const section of Object.keys(DEFAULTS)) {
