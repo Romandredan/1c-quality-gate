@@ -14,7 +14,7 @@
  *   node gate.mjs release --class C0 --reason "<...>"  # снять как не требующий проверки
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, copyFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, copyFileSync, rmSync } from 'node:fs';
 import { join, dirname, basename, extname, relative, isAbsolute, sep, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -695,11 +695,11 @@ function xmlRootValidators(xmlFiles, rootDir) {
   for (const f of xmlFiles) {
     const cfe = f.match(/^(src\/cfe\/[^/]+)\//i);
     if (cfe) {
-      out.set(`cfe:${cfe[1]}`, `python "$QG/tools/xml/cfe-validate.py" -Path "${cfe[1]}"`);
+      out.set(`cfe:${cfe[1]}`, { script: 'tools/xml/cfe-validate.py', target: cfe[1] });
       continue;
     }
     const ext = externalRoot(f, rootDir);
-    if (ext) out.set(`epf:${ext.descriptor}`, `python "$QG/tools/xml/epf-validate.py" -Path "${ext.descriptor}"`);
+    if (ext) out.set(`epf:${ext.descriptor}`, { script: 'tools/xml/epf-validate.py', target: ext.descriptor });
   }
   return [...out.values()];
 }
@@ -718,75 +718,74 @@ function catalogScopesApply(resolvedCode, bslFiles) {
   return resolvedCode !== 'skip' && bslFiles.length > 0;
 }
 
-/** Строит команды инструментов в порядке `TOOL_ORDER`, каждая — с буквальным `$QG`. */
-function buildToolCommands({ files, resolvedCode, archetypeLabels, bslFiles, rootDir }) {
+/** Имя инструмента для сводки и `--only`: имя файла без каталога и расширения. */
+function toolName(script) {
+  return basename(script).replace(/\.[^.]+$/, '');
+}
+
+/**
+ * Инструменты плана в порядке `TOOL_ORDER` — структурой, а не строкой. Источник один на двоих:
+ * `plan` печатает поле `display`, `run` исполняет `bin`/`script`/`args`. Две отдельные сборки
+ * разошлись бы при первой правке, и `run` исполнял бы не то, что обещает план.
+ *
+ * `kind`: `tool` — обычный запуск; `diff` — сохранить сравнение версий; `index` — вывод уходит
+ * в файл, а не в контекст; `manual` — команда, которую `run` исполнить не может (аттестации
+ * нужен результат читателя), он печатает её с готовыми путями.
+ */
+function buildToolSpecs({ files, resolvedCode, archetypeLabels, bslFiles, rootDir }) {
   const appliesMap = toolAppliesMap();
   const xmlFiles = files.filter((f) => /\.xml$/i.test(f));
   const hasXmlChange = xmlFiles.length > 0;
-  const lines = [];
+  const specs = [];
+  const node = (script, args, display) =>
+    specs.push({ kind: 'tool', name: toolName(script), bin: 'node', script, args, files: args.filter((a) => !a.startsWith('--')).length, display });
+  const python = (script, target) =>
+    specs.push({
+      kind: 'tool', name: toolName(script), bin: 'python', script, args: ['-Path', target], files: 1,
+      display: `python "$QG/${script}" -Path "${target}"`,
+    });
 
   for (const tool of TOOL_ORDER) {
     switch (tool) {
       case 'tools/hygiene-check.mjs':
         // Гигиена читает байты любого файла — фильтр по расширению здесь не нужен.
-        lines.push(`node "$QG/tools/hygiene-check.mjs" ${quoteAll(files)}`);
+        node(tool, [...files], `node "$QG/${tool}" ${quoteAll(files)}`);
         break;
       case 'tools/analyzer-run.mjs':
-        if (toolFires(tool, files, appliesMap)) {
-          const changed = filesFor(tool, files, appliesMap);
-          lines.push(`node "$QG/tools/analyzer-run.mjs" ${changed.map((f) => `--changed "${f}"`).join(' ')}`);
-        }
-        break;
       case 'tools/platform-context-run.mjs':
         if (toolFires(tool, files, appliesMap)) {
           const changed = filesFor(tool, files, appliesMap);
-          lines.push(`node "$QG/tools/platform-context-run.mjs" ${changed.map((f) => `--changed "${f}"`).join(' ')}`);
+          node(tool, changed.flatMap((f) => ['--changed', f]), `node "$QG/${tool}" ${changed.map((f) => `--changed "${f}"`).join(' ')}`);
         }
         break;
       case 'tools/query-lint.mjs':
-        if (toolFires(tool, files, appliesMap)) {
-          lines.push(`node "$QG/tools/query-lint.mjs" ${quoteAll(filesFor(tool, files, appliesMap))}`);
-        }
-        break;
       case 'tools/bsl-lint.mjs':
-        if (toolFires(tool, files, appliesMap)) {
-          lines.push(`node "$QG/tools/bsl-lint.mjs" ${quoteAll(filesFor(tool, files, appliesMap))}`);
-        }
-        break;
       case 'tools/rename-check.mjs':
         if (toolFires(tool, files, appliesMap)) {
-          lines.push(`node "$QG/tools/rename-check.mjs" ${quoteAll(filesFor(tool, files, appliesMap))}`);
+          const own = filesFor(tool, files, appliesMap);
+          node(tool, [...own], `node "$QG/${tool}" ${quoteAll(own)}`);
         }
         break;
       case 'tools/xml/orphan-check.mjs':
-        if (hasXmlChange) {
-          const roots = [...new Set(xmlFiles.map((f) => xmlTreeRoot(f, rootDir)))].sort();
-          for (const r of roots) lines.push(`node "$QG/tools/xml/orphan-check.mjs" "${r}"`);
-        }
-        break;
       case 'tools/xml/uuid-unique.mjs':
         if (hasXmlChange) {
           const roots = [...new Set(xmlFiles.map((f) => xmlTreeRoot(f, rootDir)))].sort();
-          for (const r of roots) lines.push(`node "$QG/tools/xml/uuid-unique.mjs" "${r}"`);
+          for (const r of roots) node(tool, [r], `node "$QG/${tool}" "${r}"`);
         }
         break;
       case 'tools/xml/meta-validate.py':
         for (const f of xmlFiles) {
           const v = xmlFileValidator(f, rootDir);
-          if (v && v !== 'tools/xml/form-validate.py') lines.push(`python "$QG/${v}" -Path "${f}"`);
+          if (v && v !== 'tools/xml/form-validate.py') python(v, f);
         }
         break;
       case 'tools/xml/cfe-validate.py':
-        lines.push(...xmlRootValidators(xmlFiles, rootDir));
+        for (const r of xmlRootValidators(xmlFiles, rootDir)) python(r.script, r.target);
         break;
       case 'tools/xml/form-validate.py':
-        if (hasXmlChange) {
-          // Только реальные Form.xml — form-validate проверяет связность обработчиков формы,
-          // а не любую XML.
-          for (const f of files.filter((f) => FORM_XML_PATH.test(f))) {
-            lines.push(`python "$QG/tools/xml/form-validate.py" -Path "${f}"`);
-          }
-        }
+        // Только реальные Form.xml — form-validate проверяет связность обработчиков формы,
+        // а не любую XML.
+        if (hasXmlChange) for (const f of files.filter((x) => FORM_XML_PATH.test(x))) python(tool, f);
         break;
       case 'tools/catalog.mjs':
         if (catalogScopesApply(resolvedCode, bslFiles)) {
@@ -794,18 +793,30 @@ function buildToolCommands({ files, resolvedCode, archetypeLabels, bslFiles, roo
           // qg:AI-11 (needs: diff) проверяется по сравнению версий, а не по коду как он есть —
           // сохрани его ДО делегирования читателю: у него нет оболочки, чтобы построить diff
           // самому. Без файла attest не примет карточку в examined (task-22).
-          lines.push(`git diff HEAD -- ${quoteAll(bslFiles)} > <файл.diff>  # сначала сравнение версий, потом читатель`);
-          lines.push(`node "$QG/tools/catalog.mjs" index --archetypes ${arch}`);
-          lines.push(
-            `node "$QG/tools/catalog.mjs" attest --result <файл.json> --files ${quoteAll(bslFiles)} --archetypes ${arch} --diff <файл.diff>`
-          );
+          specs.push({
+            kind: 'diff', name: 'catalog', files: bslFiles.length, diffFiles: bslFiles,
+            display: `git diff HEAD -- ${quoteAll(bslFiles)} > <файл.diff>  # сначала сравнение версий, потом читатель`,
+          });
+          specs.push({
+            kind: 'index', name: 'catalog', bin: 'node', script: tool, args: ['index', '--archetypes', arch], files: 0,
+            display: `node "$QG/${tool}" index --archetypes ${arch}`,
+          });
+          specs.push({
+            kind: 'manual', name: 'catalog', files: bslFiles.length, arch, attestFiles: bslFiles,
+            display: `node "$QG/${tool}" attest --result <файл.json> --files ${quoteAll(bslFiles)} --archetypes ${arch} --diff <файл.diff>`,
+          });
         }
         break;
       default:
         break;
     }
   }
-  return lines;
+  return specs;
+}
+
+/** Строки раздела «Инструменты» плана — каждая с буквальным `$QG`. */
+function buildToolCommands(ctx) {
+  return buildToolSpecs(ctx).map((s) => s.display);
 }
 
 /**
@@ -991,72 +1002,29 @@ function analyzerMetrics(rootDir, files, { skip }) {
 
 function cmdPlan(args) {
   const jsonMode = args.json === true;
-  const noAnalyzer = args['no-analyzer'] === true;
   const write = (s) => {
     if (!jsonMode) process.stdout.write(s);
   };
   const diag = (s) => process.stderr.write(s);
 
-  const { files, sessionId, error } = planFileList(args);
-  if (error) {
-    process.stderr.write(error);
+  const ctx = planContext(args);
+  if (ctx.error) {
+    process.stderr.write(ctx.error);
     return 2;
   }
-  if (!files.length) {
-    process.stderr.write('Список файлов пуст — план печатать не для чего.\n' + rootLine());
-    return 2;
-  }
+  const { files, sessionId, rootDir, testPaths, profile, bslFiles } = ctx;
+  const { ok: analyzerOk, reason: analyzerReason } = ctx.analyzer;
+  if (!analyzerOk) diag(`сложность не считалась: ${analyzerReason}\n`);
+  const { resolved, archetypes: archetypeLabels, volume } = profile;
+  const complexityFired = analyzerOk && profile.complexity.length > 0;
 
-  const rootDir = root();
   write(`1c-quality-gate v${pluginVersion() || '?'}\n`);
   write(rootLine());
   write(sessionId ? `Сессия: ${sessionId} (файлов: ${files.length})\n\n` : `Файлы: ${files.length} (переданы явно через --files)\n\n`);
 
-  const configState = resolveConfigState(rootDir);
-  const config = configState.values;
-
-  // Пути автотестов решают, взводится ли гейт вообще; неверные молча не работали бы — отказ.
-  const testPaths = config.tests?.paths ?? [];
-  const testPathsCheck = validatePatterns(testPaths);
-  if (!testPathsCheck.ok) {
-    process.stderr.write(
-      `Настройка проекта отклонена: tests.paths — ${testPathsCheck.errors.join('; ')}. ` +
-        'Нужен массив путей от корня проекта, например ["src/cfe/Автотесты"] (docs/CONFIG.md, раздел tests).\n'
-    );
-    return 2;
-  }
-
-  const { ok: analyzerOk, metrics, reason: analyzerReason } = analyzerMetrics(rootDir, files, { skip: noAnalyzer });
-  if (!analyzerOk) diag(`сложность не считалась: ${analyzerReason}\n`);
-
-  let profile;
-  try {
-    profile = computeProfile({ files, root: rootDir, config, metrics, configState });
-  } catch (e) {
-    // Неверная запись `archetypes.custom` (extends на неизвестную метку, попытка понизить
-    // минимум, name и extends вместе или ни одного) — план печатать не для чего: молча
-    // применённая частично неверная настройка хуже отказа.
-    process.stderr.write(`Настройка проекта отклонена: ${e.message}\n`);
-    return 2;
-  }
-  const { resolved, archetypes: archetypeLabels, volume, driver } = profile;
-  const complexityFired = analyzerOk && profile.complexity.length > 0;
-  const complexityDisplay = analyzerOk ? (profile.complexity.length ? profile.complexity.join(',') : 'none') : 'not_computed';
-
   write('## Профиль\n');
-  write(
-    `volume=${volume} files=${profile.files} loc=+${profile.loc.added}/-${profile.loc.removed} ` +
-      `archetypes=[${archetypeLabels.length ? archetypeLabels.join(',') : 'none'}] complexity=[${complexityDisplay}] driver=${driver}\n`
-  );
-  // Причина, по которой объём НЕ C1 (>1 метода / новый метод / изменённая сигнатура / порог
-  // строк либо файлов) — без неё «C2» видно, а почему C2 — нет, и первое же «почему так
-  // глубоко на трёх строках?» превращается в спор без записи, на которую можно сослаться.
-  if (profile.volumeReason) write(`объём: ${volume} (${profile.volumeReason})\n`);
-  if (!analyzerOk) write(`сложность не считалась: ${analyzerReason}\n`);
-  write(`resolved: code=${resolved.code} arch=${resolved.arch === null ? 'skip' : resolved.arch} xml=${resolved.xml} hygiene=${resolved.hygiene}\n`);
-  write(`${profile.scopeLine}\n\n`);
-
-  const bslFiles = files.filter((f) => /\.(bsl|os)$/i.test(f));
+  for (const l of profileLines(ctx)) write(`${l}\n`);
+  write('\n');
 
   // Исключение видно в плане, а не только в поле config следа: прогон по смешанной правке
   // иначе выглядит так, будто про тестовые файлы забыли.
@@ -1114,6 +1082,230 @@ function cmdPlan(args) {
   return 0;
 }
 
+/**
+ * Состав и профиль прогона — общая часть `plan` и `run`. Ошибка настройки или состава
+ * возвращается текстом: печатает её вызывающий, в свой поток.
+ */
+function planContext(args) {
+  const { files, sessionId, error } = planFileList(args);
+  if (error) return { error };
+  if (!files.length) return { error: 'Список файлов пуст — план печатать не для чего.\n' + rootLine() };
+
+  const rootDir = root();
+  const configState = resolveConfigState(rootDir);
+  const config = configState.values;
+
+  // Пути автотестов решают, взводится ли гейт вообще; неверные молча не работали бы — отказ.
+  const testPaths = config.tests?.paths ?? [];
+  const testPathsCheck = validatePatterns(testPaths);
+  if (!testPathsCheck.ok) {
+    return {
+      error:
+        `Настройка проекта отклонена: tests.paths — ${testPathsCheck.errors.join('; ')}. ` +
+        'Нужен массив путей от корня проекта, например ["src/cfe/Автотесты"] (docs/CONFIG.md, раздел tests).\n',
+    };
+  }
+
+  const analyzer = analyzerMetrics(rootDir, files, { skip: args['no-analyzer'] === true });
+
+  let profile;
+  try {
+    profile = computeProfile({ files, root: rootDir, config, metrics: analyzer.metrics, configState });
+  } catch (e) {
+    // Неверная запись `archetypes.custom` (extends на неизвестную метку, попытка понизить
+    // минимум, name и extends вместе или ни одного) — план печатать не для чего: молча
+    // применённая частично неверная настройка хуже отказа.
+    return { error: `Настройка проекта отклонена: ${e.message}\n` };
+  }
+  const bslFiles = files.filter((f) => /\.(bsl|os)$/i.test(f));
+  return { files, sessionId, rootDir, testPaths, analyzer, profile, bslFiles };
+}
+
+/** Строки профиля — одинаковые в `plan` и `run`: по ним модель сверяет глубину контуров. */
+function profileLines({ profile, analyzer }) {
+  const { resolved, archetypes: labels, volume, driver } = profile;
+  const complexity = analyzer.ok ? (profile.complexity.length ? profile.complexity.join(',') : 'none') : 'not_computed';
+  const out = [
+    `volume=${volume} files=${profile.files} loc=+${profile.loc.added}/-${profile.loc.removed} ` +
+      `archetypes=[${labels.length ? labels.join(',') : 'none'}] complexity=[${complexity}] driver=${driver}`,
+  ];
+  // Причина, по которой объём НЕ C1 (>1 метода / новый метод / изменённая сигнатура / порог
+  // строк либо файлов) — без неё «C2» видно, а почему C2 — нет, и первое же «почему так
+  // глубоко на трёх строках?» превращается в спор без записи, на которую можно сослаться.
+  if (profile.volumeReason) out.push(`объём: ${volume} (${profile.volumeReason})`);
+  if (!analyzer.ok) out.push(`сложность не считалась: ${analyzer.reason}`);
+  out.push(`resolved: code=${resolved.code} arch=${resolved.arch === null ? 'skip' : resolved.arch} xml=${resolved.xml} hygiene=${resolved.hygiene}`);
+  out.push(profile.scopeLine);
+  return out;
+}
+
+const EVIDENCE_LINE = /^\[qg [a-z_]+: .*\]\s*$/;
+const RUN_TIMEOUT_MS = { 'analyzer-run': 600000, 'platform-context-run': 300000 };
+/** Сколько строк вывода инструмента с находками попадает в ответ; остальное — в файле. */
+const RUN_OUTPUT_LINES = 60;
+
+/** Итог одного инструмента по его же строкам следа: `run` вердиктов не выносит. */
+function toolOutcome(r, evidence) {
+  if (r.error) return { label: `СБОЙ: не запустился (${r.error.code || r.error.message})`, failed: true, show: true };
+  if (r.signal) return { label: `СБОЙ: прерван по таймауту (${r.signal})`, failed: true, show: true };
+  if (!evidence.length) {
+    return r.status === 0
+      ? { label: 'исполнен, строк следа не печатает', failed: false, show: false }
+      : { label: `СБОЙ: код ${r.status}, строки следа нет`, failed: true, show: true };
+  }
+  const violations = evidence.filter((l) => /verdict=violation/.test(l)).length;
+  if (violations) return { label: `находки (записей violation: ${violations})`, failed: false, show: true };
+  if (evidence.some((l) => /^\[qg not_verified:/.test(l))) return { label: 'не проверено — см. след', failed: false, show: true };
+  if (evidence.every((l) => /^\[qg skipped:/.test(l))) return { label: 'пропуск — см. след', failed: false, show: false };
+  return { label: 'чисто', failed: false, show: false };
+}
+
+/**
+ * Инструментальная фаза одним вызовом: исполняет раздел «Инструменты» плана по порядку.
+ *
+ * Зачем. Замер по живым сессиям: на прогон приходилось около пятнадцати ходов оболочки на
+ * инструменты гейта, перед каждым — поиск пути к плагину, и каждый ход основной модели заново
+ * оплачивал контекст сессии. Вывод чистых инструментов при этом оставался в контексте до конца.
+ * Здесь ход один, полный вывод — в файлах состояния, в ответе — сводка, вывод только тех
+ * инструментов, у которых есть находки или сбой, и черновик следа.
+ *
+ * Инвариант не меняется: строку следа печатает инструмент. `run` собирает напечатанное и сам
+ * не сочиняет ничего — в том числе за упавший инструмент: его строки в черновике просто нет,
+ * и валидатор следа это увидит. Сбой прогон не останавливает; код возврата тогда 1.
+ */
+function cmdRun(args) {
+  const ctx = planContext(args);
+  if (ctx.error) {
+    process.stderr.write(ctx.error);
+    return 2;
+  }
+  const { files, sessionId, rootDir, profile, bslFiles } = ctx;
+  const { resolved, archetypes: archetypeLabels, volume } = profile;
+
+  let specs = buildToolSpecs({ files, resolvedCode: resolved.code, archetypeLabels, bslFiles, rootDir });
+  if (typeof args.only === 'string') {
+    const known = new Set([...TOOL_ORDER.map(toolName), ...specs.map((s) => s.name)]);
+    const wanted = args.only.split(',').map((s) => s.trim()).filter(Boolean);
+    const unknown = wanted.filter((w) => !known.has(w));
+    if (unknown.length) {
+      process.stderr.write(`--only: неизвестный инструмент ${unknown.join(', ')}. Доступны: ${[...known].sort().join(', ')}\n`);
+      return 2;
+    }
+    specs = specs.filter((s) => wanted.includes(s.name));
+  }
+
+  const runDir = join(rootDir, ...stateDirSegments(), `qg-run-${sessionId || 'manual'}`);
+  rmSync(runDir, { recursive: true, force: true });
+  mkdirSync(runDir, { recursive: true });
+  const relRun = relative(rootDir, runDir).split(sep).join('/');
+  const qgRoot = dirname(HERE).split(sep).join('/');
+  const python = process.env.QG_PYTHON || 'python';
+
+  const w = (s) => process.stdout.write(s);
+  w(`1c-quality-gate v${pluginVersion() || '?'} · run · ${sessionId ? `сессия ${sessionId}` : 'файлы переданы через --files'} · файлов ${files.length}\n`);
+  w(rootLine());
+  w(`QG=${qgRoot}\n\n`);
+  w('## Профиль\n');
+  for (const l of profileLines(ctx)) w(`${l}\n`);
+  w('\n## Инструменты\n');
+
+  const evidenceAll = [];
+  const shown = [];
+  let failed = 0;
+  let diffPath = null;
+  let manual = null;
+  let n = 0;
+
+  for (const spec of specs) {
+    if (spec.kind === 'manual') {
+      manual = spec;
+      continue;
+    }
+    n++;
+    const t0 = Date.now();
+    const tag = `${String(n).padStart(2, '0')}-${spec.name}`;
+    let r;
+    if (spec.kind === 'diff') {
+      r = spawnSync('git', ['diff', 'HEAD', '--', ...spec.diffFiles], { cwd: rootDir, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+      if (!r.error && r.status === 0) {
+        diffPath = join(runDir, 'change.diff');
+        writeFileSync(diffPath, r.stdout || '', 'utf8');
+      }
+    } else {
+      const bin = spec.bin === 'python' ? python : process.execPath;
+      r = spawnSync(bin, [join(dirname(HERE), spec.script), ...spec.args], {
+        cwd: rootDir, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024,
+        timeout: RUN_TIMEOUT_MS[spec.name] || 180000, env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
+      });
+    }
+    const secs = ((Date.now() - t0) / 1000).toFixed(1).replace('.', ',');
+    const output = `${r.stdout || ''}${r.stderr ? `\n--- stderr ---\n${r.stderr}` : ''}`;
+    const title = spec.kind === 'diff' ? 'git-diff' : spec.kind === 'index' ? 'catalog-index' : spec.name;
+
+    if (spec.kind === 'diff') {
+      const ok = diffPath !== null;
+      if (!ok) failed++;
+      w(`${title.padEnd(24)}${ok ? `сохранено: ${relRun}/change.diff` : `СБОЙ: git diff не выполнен (код ${r.status ?? '?'})`}\n`);
+      continue;
+    }
+    if (spec.kind === 'index') {
+      const ok = !r.error && r.status === 0;
+      if (ok) writeFileSync(join(runDir, 'catalog-index.txt'), r.stdout || '', 'utf8');
+      else failed++;
+      w(`${title.padEnd(24)}${ok ? `сохранено: ${relRun}/catalog-index.txt — вход субагента antipattern-reader` : `СБОЙ: код ${r.status ?? '?'}`}\n`);
+      if (!ok) shown.push({ title, tag, output });
+      continue;
+    }
+
+    writeFileSync(join(runDir, `${tag}.log`), output, 'utf8');
+    const evidence = (r.stdout || '').split(/\r?\n/).filter((l) => EVIDENCE_LINE.test(l)).map((l) => l.trim());
+    const outcome = toolOutcome(r, evidence);
+    if (outcome.failed) failed++;
+    else evidenceAll.push(...evidence);
+    const target = spec.bin === 'python' ? ` ${spec.args[1]}` : '';
+    w(`${title.padEnd(24)}${outcome.label.padEnd(40)}${secs.padStart(6)} с${target}\n`);
+    if (outcome.show || args.verbose === true) shown.push({ title, tag, output });
+  }
+
+  if (shown.length) {
+    w('\n## Вывод инструментов с находками и сбоями\n');
+    for (const s of shown) {
+      const lines = s.output.split(/\r?\n/).filter((l) => l.trim() !== '' && !EVIDENCE_LINE.test(l) && !/^## quality evidence/.test(l));
+      const cut = args.verbose === true ? lines : lines.slice(0, RUN_OUTPUT_LINES);
+      w(`### ${s.title}\n${cut.join('\n')}\n`);
+      if (cut.length < lines.length) w(`… ещё строк: ${lines.length - cut.length} — полностью: ${relRun}/${s.tag}.log\n`);
+      w('\n');
+    }
+  }
+
+  const draft = [profile.scopeLine, ...evidenceAll];
+  writeFileSync(join(runDir, 'evidence.md'), `## quality evidence\n\n${draft.join('\n')}\n`, 'utf8');
+  w('\n## Черновик следа\n');
+  w('Строки напечатаны инструментами — переноси в отчёт дословно. Записи модельных проходов допиши сам.\n\n');
+  for (const l of draft) w(`${l}\n`);
+
+  w(`\n## Файлы прогона: ${relRun}/\n`);
+  w('Полный вывод каждого инструмента — <NN>-<инструмент>.log, черновик следа — evidence.md.\n');
+
+  w('\n## Дальше\n');
+  if (failed) w(`- СБОЕВ: ${failed}. Строки следа за упавший инструмент нет и быть не должно: перезапусти его отдельно либо закрой записью skipped с причиной.\n`);
+  const { refs, checklist } = refsAndChecklist(archetypeLabels);
+  for (const p of codeModelPasses({ resolvedCode: resolved.code, volume, archetypeLabels, bslFiles, refs, checklist })) {
+    // В плане индекс напечатан строкой выше; здесь он сохранён файлом, чтобы не занимать контекст.
+    w(`- ${p.replace('(см. index выше)', `(индекс: ${relRun}/catalog-index.txt)`)}\n`);
+  }
+  if (manual) {
+    const d = diffPath ? `"${relRun}/change.diff"` : '<файл.diff>';
+    w(`- после читателя: node "$QG/${manual.script || 'tools/catalog.mjs'}" attest --result <файл.json> --files ${quoteAll(manual.attestFiles)} --archetypes ${manual.arch} --diff ${d}\n`);
+  }
+  w(`- контур arch: ${archContourLine(resolved, archetypeLabels, ctx.analyzer.ok && profile.complexity.length > 0)}\n`);
+  w(`- контур xml: ${xmlContourLine(resolved.xml)}\n`);
+  w('- Закрыть в следе:\n');
+  for (const id of mustCloseList({ archetypeLabels, resolvedCode: resolved.code, bslFiles })) w(`  - ${id}: ${closeNote(id)}\n`);
+
+  return failed ? 1 : 0;
+}
+
 function main(argv) {
   const [cmd, ...rest] = argv.slice(2);
   const args = parseArgs(rest);
@@ -1123,6 +1315,8 @@ function main(argv) {
       return cmdStatus();
     case 'plan':
       return cmdPlan(args);
+    case 'run':
+      return cmdRun(args);
     case 'verify':
       return cmdVerify(args);
     case 'release':
@@ -1132,6 +1326,7 @@ function main(argv) {
         'Использование:\n' +
           '  node gate.mjs status\n' +
           '  node gate.mjs plan [--files <f> ...] [--json] [--no-analyzer]\n' +
+          '  node gate.mjs run [--files <f> ...] [--only <инструмент,...>] [--no-analyzer] [--verbose]\n' +
           '  node gate.mjs verify --layer <code|arch|xml|hygiene> <файл> [...]\n' +
           '  node gate.mjs release --evidence <файл>\n' +
           '  node gate.mjs release --class C0 --reason "<почему>"\n'
