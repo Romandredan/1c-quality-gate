@@ -1674,6 +1674,11 @@ section('Валидатор пакета — состав компонентов
 {
   const pkg = join(WORK, 'pkg-broken');
   writeBytes('pkg-broken/agents/разведчик.md', '---\nname: другое-имя\ndescription: тест\nmodel: gpt\n---\n\nтело\n');
+  // Список запретов вместо закрытого списка: закрытый `tools` в Claude Code отрезает MCP
+  // целиком, поэтому читающий код субагент задаётся тем, чего ему нельзя. «Только читающий»
+  // при этом обязан быть записан явно — без запрета Edit и Write агент получает запись.
+  writeBytes('pkg-broken/agents/читатель.md', '---\nname: читатель\ndescription: тест\ndisallowedTools: Edit, Write, Agent\nmodel: fable\n---\n\nтело\n');
+  writeBytes('pkg-broken/agents/писатель.md', '---\nname: писатель\ndescription: тест\ndisallowedTools: Bash\n---\n\nтело\n');
   writeBytes('pkg-broken/commands/проба.md', '---\nargumentHint: подсказка\n---\n\nтело\n');
   writeBytes('pkg-broken/skills/big-skill/SKILL.md', `---\nname: big-skill\ndescription: тест\n---\n\n${'т'.repeat(40000)}\n`);
   writeBytes('pkg-broken/skills/big-skill/references/anchors.md', 'раздел «Нет такого» навыка `big-skill`\n');
@@ -1691,7 +1696,11 @@ section('Валидатор пакета — состав компонентов
     !r.out.includes('engine=bsl-context@0.18.1/'), r.out.trim().slice(0, 300));
   check('имя агента сверяется с именем файла', r.out.includes('не совпадает с именем файла'), r.out.trim().slice(0, 200));
   check('модель агента вне набора — ошибка', r.out.includes('model "gpt"'), r.out.trim().slice(0, 200));
-  check('у агента требуется tools', /нет поля tools/.test(r.out), r.out.trim().slice(0, 200));
+  check('у агента требуется tools или disallowedTools',
+    /разведчик\.md.*нет поля tools или disallowedTools/.test(r.out), r.out.trim().slice(0, 200));
+  check('агент со списком запретов и моделью fable проходит', !/читатель\.md/.test(r.out), r.out.trim().slice(0, 300));
+  check('список запретов без Edit и Write — ошибка',
+    /писатель\.md.*обязан запретить Edit и Write/.test(r.out), r.out.trim().slice(0, 300));
   check('camelCase-поле команды названо с исправлением',
     r.out.includes('"argumentHint" не читается') && r.out.includes('argument-hint'), r.out.trim().slice(0, 200));
   check('навык сверх предела размера — ошибка', /при пределе \d+/.test(r.out), r.out.trim().slice(0, 200));
@@ -2961,6 +2970,14 @@ const mustContain = [
   ['agents/antipattern-reader.md', 'quote', 'читатель обязан цитировать строку кода'],
   ['agents/antipattern-reader.md', 'catalog.mjs" index', 'читатель получает индекс из инструмента'],
   ['skills/bsl-code-review/SKILL.md', 'antipattern-reader', 'контур кода делегирует проход по каталогу читателю'],
+  // Холодный читатель — субагент и универсальный путь слоя 2; модель сессии выше opus
+  // передаётся параметром запуска, иначе читатель окажется слабее автора.
+  ['skills/bsl-code-review/SKILL.md', 'субагент `cold-reader` обязательно', 'на высокой цене ошибки читатель обязателен'],
+  ['skills/bsl-code-review/SKILL.md', 'параметром `model`', 'модель сессии передаётся читателю параметром запуска'],
+  ['skills/bsl-code-review/SKILL.md', 'законен, только если недоступен и он', 'пропуск слоя 2 требует недоступности обоих исполнителей'],
+  ['skills/bsl-code-review/references/cold-reader.md', 'Почему отдельный субагент', 'обоснование выноса читателя в субагента'],
+  ['skills/quality-gate/SKILL.md', 'cold-reader', 'оркестратор знает холодного читателя'],
+  ['shared/index-first.md', 'Почему дважды и почему жёстко', 'обоснование правила индекса рядом с блоком'],
   ['skills/bsl-code-review/SKILL.md', 'catalog.mjs" attest', 'контур кода аттестует результат читателя'],
   ['skills/quality-gate/SKILL.md', 'antipattern-reader', 'оркестратор знает субагента-читателя'],
   ['skills/quality-gate/SKILL.md', 'tools/catalog.mjs', 'оркестратор называет инструмент аттестации'],
@@ -2981,6 +2998,43 @@ for (const [file, needle, label] of mustContain) {
 // должен быть облегчён до дешёвой модели — оба условия ловят регрессию молча, без падения на
 // живом прогоне.
 check('верификатор не грузит каталог антипаттернов', !readFileSync(join(ROOT, 'agents', 'bsl-verifier.md'), 'utf8').includes('catalog/'));
+// Субагент, выходящий за переданные ему файлы, обязан идти в индекс кода раньше перебора.
+// Блок правила живёт в одном месте (`shared/index-first.md`) и переносится в агентов дословно:
+// агент читает только свой файл, а разошедшаяся копия правила действует молча по-старому.
+// Закрытый список `tools` в Claude Code отрезает MCP целиком — с ним правило невыполнимо,
+// поэтому такие агенты заданы списком запретов, и запуск субагентов им тоже закрыт.
+{
+  const src = readFileSync(join(ROOT, 'shared', 'index-first.md'), 'utf8').replace(/\r\n/g, '\n');
+  const block = src.match(/<!-- index-first:begin -->\n([\s\S]*?)\n<!-- index-first:end -->/)?.[1] || '';
+  check('блок «сначала индекс» в источнике найден', block.includes('проверь его наличие дважды'));
+  for (const name of ['bsl-scout', 'bsl-verifier', 'cold-reader']) {
+    const p = join(ROOT, 'agents', `${name}.md`);
+    const text = existsSync(p) ? readFileSync(p, 'utf8').replace(/\r\n/g, '\n') : '';
+    const fm = text.match(/^---\n([\s\S]*?)\n---/)?.[1] || '';
+    check(`${name}: блок «сначала индекс» стоит дословно`, block !== '' && text.includes(block));
+    check(`${name}: закрытого списка tools нет — MCP наследуется`, fm !== '' && !/^tools:/m.test(fm));
+    const denied = new Set((fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] || '').split(',').map((s) => s.trim()));
+    check(`${name}: запись и запуск субагентов запрещены`, ['Edit', 'Write', 'Agent'].every((t) => denied.has(t)));
+  }
+  const stale = readdirSync(join(ROOT, 'agents')).filter((f) => readFileSync(join(ROOT, 'agents', f), 'utf8').includes('rlm-tools-bsl'));
+  check('агенты не ссылаются на снятый индекс rlm-tools-bsl', stale.length === 0, stale.join(', '));
+}
+// Холодный читатель — отдельный субагент: как роль внутри навыка он запускался через
+// универсального агента, который получал все инструменты и сам подгружал навык контура.
+// Модель зафиксирована нижней границей: `inherit` на дешёвой сессии дал бы дешёвого читателя.
+{
+  const cold = existsSync(join(ROOT, 'agents', 'cold-reader.md')) ? readFileSync(join(ROOT, 'agents', 'cold-reader.md'), 'utf8') : '';
+  check('холодный читатель: модель не ниже opus', /^model:\s*(opus|fable)\s*$/m.test(cold));
+  check('холодный читатель: навыки контуров ему закрыты', /^disallowedTools:.*\bSkill\b/m.test(cold));
+  for (const [needle, label] of [
+    ['как написан, а не как задуман', 'первый вопрос'],
+    ['На каких входных данных он ломается', 'второй вопрос'],
+    ['Какое ожидаемое поведение из него не следует', 'третий вопрос'],
+    ['Нет цитаты — нет находки', 'находка без цитаты не принимается'],
+    ['О замысле не спрашивай и не угадывай его', 'замысел не запрашивается'],
+    ['вход не холодный', 'протёкший замысел называется в ответе'],
+  ]) check(`холодный читатель: ${label}`, cold.includes(needle));
+}
 check('читатель работает не на haiku', /^model:\s*(sonnet|opus|inherit)/m.test(readFileSync(join(ROOT, 'agents', 'antipattern-reader.md'), 'utf8')));
 
 // ---------------------------------------------------------------------------
@@ -6850,6 +6904,10 @@ section('План прогона печатает инструмент');
   check('требования к следу перечислены', plan.mustClose.includes('query-execution') && plan.mustClose.includes('compilation'), JSON.stringify(plan.mustClose));
   // Архетип query держит minCode=L2 — слой 2 обязан появиться в «Закрыть в следе» (task-22).
   check('на L2 logic-review в mustClose', plan.profile.resolved.code === 'L2' && plan.mustClose.includes('logic-review'), JSON.stringify(plan.mustClose));
+  // Слой 2 без исполнителя-субагента у большинства пользователей всегда закрывался пропуском:
+  // advisor() — примитив одного окружения. План обязан называть универсальный путь.
+  check('на L2 план называет субагента cold-reader',
+    (plan.modelPasses?.passes || []).some((p) => /^слой 2:.*cold-reader/.test(p)), JSON.stringify(plan.modelPasses));
   check('строка про git diff перед index/attest в инструментах',
     plan.tools.some((t) => /^git diff HEAD --/.test(t)), plan.tools.join('\n'));
   check('строка attest несёт --diff', plan.tools.some((t) => /catalog\.mjs" attest.*--diff/.test(t)), plan.tools.join('\n'));

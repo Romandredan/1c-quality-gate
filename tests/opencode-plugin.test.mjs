@@ -224,6 +224,19 @@ check('ошибка клиента гасится', survived);
   check('разбор: непризнанная конструкция — null', reg.parseFrontmatter('---\n- список\n---\nтело') === null);
   const p = reg.parseFrontmatter('---\nmode: subagent\ntools:\n  bash: false\n---\nтело');
   check('разбор: булево во вложенной карте — булево', p?.data.tools.bash === false && p.body === 'тело');
+  // Субагент, заданный списком запретов (так в Claude Code сохраняется доступ к MCP), в
+  // OpenCode обязан получить всё, кроме запрещённого. Без этой ветки пустой `tools` давал
+  // карту из одних false — агент без чтения, неотличимый от «агент ничего не нашёл».
+  {
+    const dir = mkdtempSync(join(tmpdir(), 'qg-oc-deny-'));
+    writeFileSync(join(dir, 'reader.md'), '---\nname: reader\ndescription: тест\ndisallowedTools: Edit, Write, Bash, Agent\n---\nтело');
+    const [, def] = reg.agentsFrom(dir).find(([n]) => n === 'reader') || [];
+    check('перевод: список запретов открывает чтение и навыки',
+      def?.tools?.read === true && def?.tools?.grep === true && def?.tools?.glob === true && def?.tools?.skill === true);
+    check('перевод: запрещённое закрыто картой и разрешением',
+      def?.tools?.bash === false && def?.tools?.edit === false && def?.tools?.write === false && def?.permission?.edit === 'deny');
+    rmSync(dir, { recursive: true, force: true });
+  }
   const folded = reg.parseFrontmatter('---\ndescription: >-\n  первая\n  вторая\n---\nтело');
   check('разбор: свёрнутый блок собирается целиком', folded?.data.description === 'первая\nвторая');
 }

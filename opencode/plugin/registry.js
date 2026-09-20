@@ -159,14 +159,21 @@ export function agentsFrom(dir) {
   return entries(dir)
     .filter(([, p]) => p.body)
     .map(([name, p]) => {
-      const granted = new Set(
-        String(p.data.tools || '')
-          .split(',')
-          .map((t) => TOOL_NAMES[t.trim().toLowerCase()])
-          .filter(Boolean)
-      );
+      const keysOf = (list) =>
+        new Set(
+          String(list || '')
+            .split(',')
+            .map((t) => TOOL_NAMES[t.trim().toLowerCase()])
+            .filter(Boolean)
+        );
+      // Субагент задаётся либо закрытым списком `tools`, либо списком запретов
+      // `disallowedTools`: второй нужен Claude Code, где закрытый список отрезает MCP. Здесь
+      // MCP разрешён в обоих случаях, но без этой ветки пустой `tools` давал карту из одних
+      // false — агента без чтения.
+      const denyOnly = !p.data.tools && p.data.disallowedTools;
+      const listed = keysOf(denyOnly ? p.data.disallowedTools : p.data.tools);
       const tools = {};
-      for (const k of TOOL_KEYS) tools[k] = granted.has(k);
+      for (const k of TOOL_KEYS) tools[k] = denyOnly ? !listed.has(k) : listed.has(k);
 
       const def = { mode: 'subagent', prompt: p.body, tools };
       if (p.data.description !== undefined) def.description = p.data.description;

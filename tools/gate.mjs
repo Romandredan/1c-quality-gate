@@ -856,7 +856,9 @@ function codeModelPasses({ resolvedCode, volume, archetypeLabels, bslFiles, refs
     // операции» формальным признаком не считаются — это остаётся суждением модели.
     const coldReader = volume === 'C3' || archetypeLabels.includes('rights') || archetypeLabels.includes('object-event');
     passes.push(
-      `слой 2: advisor(); холодный читатель — ${coldReader ? 'да (проведение/права либо класс C3)' : `нет (класс ${volume})`}` +
+      `слой 2: ${coldReader
+        ? 'субагент cold-reader обязателен (проведение/права либо класс C3); advisor() — дополнительно, если есть'
+        : `advisor(); нет его в среде — субагент cold-reader (класс ${volume})`}` +
         ' — «деньги»/«необратимые операции» решает модель по смыслу правки'
     );
   }
@@ -904,7 +906,7 @@ function closeNote(id) {
     case 'platform-antipatterns':
       return 'печатает catalog.mjs attest: applied либо skipped reason=not_applicable/unreadable';
     case 'logic-review':
-      return 'слой 2 (advisor(), холодный читатель при высокой цене ошибки): applied либо skipped reason=...';
+      return 'слой 2 (субагент cold-reader и/или advisor()): applied; skipped reason=... — только если недоступны оба';
     default:
       return '';
   }
