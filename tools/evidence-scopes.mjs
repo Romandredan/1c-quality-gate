@@ -214,6 +214,22 @@ export const SCOPES = {
     granularity: 'files',
     applies: ['.bsl', '.os']
   },
+  // Правила с предметом от проекта (секция bslLint настройки). Слов механики у плагина нет:
+  // при пустом списке проекта проверка неприменима и отмечается пропуском с причиной.
+  'comment-reference': {
+    layer: 'code',
+    tool: 'tools/bsl-lint.mjs',
+    about: 'ссылка на задачу или документ разработки в комментарии изменённого метода',
+    granularity: 'files',
+    applies: ['.bsl', '.os']
+  },
+  'mechanic-word': {
+    layer: 'code',
+    tool: 'tools/bsl-lint.mjs',
+    about: 'слово механики из списка проекта в имени, объявленном в изменённом методе',
+    granularity: 'files',
+    applies: ['.bsl', '.os']
+  },
   'api-verification': {
     layer: 'code',
     tool: null,
@@ -420,6 +436,8 @@ export const QG_IDS = {
   'qg:BSL-RECORD-MANAGER-READ-ONLY': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-QUERIED-OBJECT-ATTRIBUTES': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-OWN-STRUCTURE-CHECK': { tool: 'tools/bsl-lint.mjs' },
+  'qg:BSL-COMMENT-REFERENCE': { tool: 'tools/bsl-lint.mjs' },
+  'qg:BSL-MECHANIC-WORD': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-STALE-LOCAL-CALL': { tool: 'tools/rename-check.mjs' },
 
   // --- код, модельные ------------------------------------------------------
