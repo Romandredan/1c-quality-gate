@@ -35,6 +35,12 @@
  *     вызовам внутри модуля — через параметр метода.
  *   - `qg:BSL-OWN-STRUCTURE-CHECK` — `Свойство` в цикле по списку полей: проверка состава
  *     структуры, которую мог создать собственный конструктор модуля. Только вопросом.
+ *   - `qg:BSL-COMMENT-REFERENCE` — ссылка на задачу, решение или проектный документ в
+ *     комментарии изменённого метода. Метки — встроенный список либо `bslLint.commentMarkers`.
+ *   - `qg:BSL-MECHANIC-WORD` — слово механики из списка проекта (`bslLint.mechanicWords`) в
+ *     имени, объявленном в изменённом методе. Своего списка у плагина нет.
+ *   Обе последние — подсказки: печатаются меткой «ПОДСКАЗКА», в след уходят тем же `violation`.
+ *   Строгий режим `bslLint.strictRecordManager` делает находкой любое `СоздатьМенеджерЗаписи()`.
  *
  * У правил переноса, пакета, менеджера и состава структуры есть уровень «вопрос» — сигнал
  * есть, решающего факта в модуле нет (текст пакета не собран литералом, менеджер уходит
@@ -87,7 +93,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { recordRun } from './run-journal.mjs';
-import { versionSuffix } from './config.mjs';
+import { versionSuffix, readConfig } from './config.mjs';
 import { extractQueryLiterals, maskLiteral } from './query-lint.mjs';
 
 /** Символы идентификатора 1С: кириллица делает `\b` в JS бесполезной. */
@@ -1785,8 +1791,12 @@ function hasWord(text, re) {
  * считается: менеджер там источник, а не приёмник.
  *
  * Приближение: вызывающие ищутся только в этом модуле.
+ *
+ * Строгий режим (`bslLint.strictRecordManager` в настройке проекта) отмечает любое
+ * `СоздатьМенеджерЗаписи()` — для команды, принявшей правило «пишем набором записей, читаем
+ * запросом». По умолчанию выключен: стандарт запись менеджером по полному ключу допускает.
  */
-export function lintReadOnlyRecordManager(source) {
+export function lintReadOnlyRecordManager(source, strict = false) {
   const masked = maskModule(source);
   const findings = [];
   const routines = parseRoutines(masked);
@@ -1800,6 +1810,18 @@ export function lintReadOnlyRecordManager(source) {
     while ((m = createRe.exec(body)) !== null) {
       const manager = m[1];
       const register = m[2];
+      if (strict) {
+        findings.push({
+          severity: 'warn',
+          rule: 'qg:BSL-RECORD-MANAGER-READ-ONLY',
+          line: lineAt(source, routine.bodyStart + m.index),
+          method: routine.name,
+          message:
+            `менеджер записи «${manager}» регистра «${register}»: по правилу проекта запись идёт ` +
+            'набором записей, чтение — запросом (строгий режим bslLint.strictRecordManager)',
+        });
+        continue;
+      }
       const readAt = body.search(new RegExp(`(?<![${W}.])${manager}\\s*\\.\\s*Прочитать\\s*\\(`, 'iu'));
       if (readAt === -1) continue;
       if (new RegExp(`(?<![${W}.])${manager}\\s*\\.\\s*(Записать|Удалить)\\s*\\(`, 'iu').test(body)) continue;
@@ -2071,6 +2093,210 @@ export function lintStructureCompositionCheck(source) {
 }
 
 /**
+ * Находка-подсказка: сигнал надёжен, а дефектом он становится только по соглашению команды.
+ * Печатается меткой «ПОДСКАЗКА», в след уходит тем же `violation`.
+ */
+function hint(finding) {
+  return { ...finding, severity: 'warn', hint: true };
+}
+
+/**
+ * Комментарии модуля: позиция и текст после `//`. Строковые литералы пропускаются, как в маске:
+ * `//` внутри строки — не комментарий.
+ */
+function commentSpans(source) {
+  const spans = [];
+  let inString = false;
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i];
+    if (c === '\n') {
+      // Многострочный литерал продолжается строкой с `|`; обычная строка литерал закрывает.
+      continue;
+    }
+    if (c === '"') {
+      if (inString && source[i + 1] === '"') {
+        i++;
+        continue;
+      }
+      inString = !inString;
+      continue;
+    }
+    if (!inString && c === '/' && source[i + 1] === '/') {
+      const end = source.indexOf('\n', i);
+      const stop = end === -1 ? source.length : end;
+      spans.push({ pos: i, text: source.slice(i + 2, stop).replace(/\r$/, '') });
+      i = stop - 1;
+    }
+  }
+  return spans;
+}
+
+/**
+ * Части модуля, которые считаются правкой: изменённые методы вместе с блоком комментария над
+ * объявлением — описание метода меняют вместе с ним. `null` — весь модуль.
+ */
+function changedRegions(source, masked, onlyRoutines) {
+  if (!onlyRoutines) return null;
+  const regions = [];
+  for (const routine of parseRoutines(masked)) {
+    if (!onlyRoutines.has(routine.name.toLowerCase())) continue;
+    const lines = source.slice(0, routine.start).split('\n');
+    lines.pop();
+    let from = routine.start - (source.slice(0, routine.start).length - lines.join('\n').length);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].trim().startsWith('//')) break;
+      from -= lines[i].length + 1;
+    }
+    regions.push({ from: Math.max(0, from), to: routine.end });
+  }
+  return regions;
+}
+
+/**
+ * Метки ссылок на задачи и документы разработки — встроенный список правила
+ * `qg:BSL-COMMENT-REFERENCE`. Проект заменяет его ключом `bslLint.commentMarkers`.
+ */
+export const DEFAULT_COMMENT_MARKERS = [
+  'задач[аеиуы]?\\s*№?\\s*\\d+(?:\\.\\d+)*',
+  'решени[еяю]\\s+владельца',
+  'ревью',
+  'openspec',
+  '(?:design|proposal|tasks|spec)\\.md',
+  '\\.ya?ml:\\d+',
+  'ADR-\\d+',
+];
+
+/*
+ * Слова «спецификация» в списке нет намеренно: на корпусе УТ 11.5 и 14 расширений оно дало
+ * больше половины совпадений, и все они были предметным термином — ресурсная спецификация,
+ * спецификация заказа внешнего сервиса. Документ разработки опознаётся по имени файла.
+ */
+
+/**
+ * Ссылки на задачи и обоснования решений в комментариях кода.
+ *
+ * История решения, номер задачи, «решение владельца», ссылка на спецификацию нужны тому, кто
+ * решение пересматривает, а читает их каждый, кто открывает метод. Место таким записям — в
+ * документе решений; в коде остаётся, что код делает, и причина, по которой он не делает
+ * очевидного (#std453). Ссылка на стандарт (`#std…`) и на метод («См. …») меткой не являются
+ * и разрешены.
+ *
+ * Сигнал: строка комментария совпадает с одной из меток. Ловятся только метки, а не
+ * рассуждение как таковое: длинное обоснование без меток инструмент не увидит. Метка почти
+ * всегда сопровождает перенесённое из обсуждения рассуждение, поэтому этого достаточно.
+ * Проверяются изменённые методы вместе с описанием над ними.
+ */
+export function lintCommentReferences(source, markers = DEFAULT_COMMENT_MARKERS, onlyRoutines = null) {
+  const masked = maskModule(source);
+  const regions = changedRegions(source, masked, onlyRoutines);
+  const patterns = markers.map((m) => new RegExp(m, 'iu'));
+  const findings = [];
+  for (const span of commentSpans(source)) {
+    if (regions && !regions.some((r) => span.pos >= r.from && span.pos < r.to)) continue;
+    const hit = patterns.map((re) => span.text.match(re)).find(Boolean);
+    if (!hit) continue;
+    findings.push(hint({
+      rule: 'qg:BSL-COMMENT-REFERENCE',
+      line: lineAt(source, span.pos),
+      message:
+        `ссылка на задачу или документ разработки в комментарии («${hit[0]}»): история решения ` +
+        'нужна тому, кто его пересматривает, и живёт в документе решений. В коде остаётся, что ' +
+        'код делает, и причина, по которой он не делает очевидного (#std453)',
+    }));
+  }
+  return findings;
+}
+
+/** Начала слов в идентификаторе: позиция 0 и каждая заглавная после строчной или цифры. */
+function wordStarts(name) {
+  const starts = [0];
+  for (let i = 1; i < name.length; i++) {
+    const upper = name[i] !== name[i].toLowerCase();
+    const prevLower = name[i - 1] === name[i - 1].toLowerCase() && name[i - 1] !== name[i - 1].toUpperCase();
+    if (upper && (prevLower || /\d/.test(name[i - 1]))) starts.push(i);
+  }
+  return starts;
+}
+
+/**
+ * Слова механики в именах.
+ *
+ * Имя из предметной области (#std647) говорит, что лежит в переменной; имя механики —
+ * «Кандидат», «Снимок», «Прочие» — говорит только, на каком шаге алгоритма значение появилось.
+ * Если имя из предметной области не подбирается, метод обычно собирает несвязанные вещи. Эту
+ * половину правила инструмент не выражает: он ловит только слова из списка проекта.
+ *
+ * Список задаёт проект ключом `bslLint.mechanicWords` — у плагина своего списка нет: какие слова
+ * механика, решает команда. Запись — начало слова внутри имени: `Окн` находит `НачалоОкнаСбора`,
+ * но не `Покно`. Проверяются имена, объявленные в изменённых методах: сам метод, параметры,
+ * переменные, переменные цикла, псевдонимы и параметры запросов в литералах метода.
+ */
+export function lintMechanicWords(source, words, onlyRoutines = null) {
+  const masked = maskModule(source);
+  const findings = [];
+  const entries = words.map((w) => String(w).toLowerCase()).filter(Boolean);
+  if (entries.length === 0) return findings;
+
+  const matchOf = (name) => {
+    const lower = name.toLowerCase();
+    for (const start of wordStarts(name)) {
+      const entry = entries.find((e) => lower.startsWith(e, start));
+      if (entry) return entry;
+    }
+    return null;
+  };
+
+  for (const routine of parseRoutines(masked)) {
+    if (onlyRoutines && !onlyRoutines.has(routine.name.toLowerCase())) continue;
+    const body = masked.slice(routine.bodyStart, routine.end);
+    const names = new Map();
+    const note = (name, pos, kind) => {
+      const key = name.toLowerCase();
+      if (!names.has(key)) names.set(key, { name, pos, kind });
+    };
+    note(routine.name, routine.start, 'метод');
+    // Регистр сохраняется: по заглавным буквам определяются начала слов внутри имени.
+    const close = closingParen(masked, routine.bodyStart);
+    const params = close === -1 ? [] : splitArguments(masked.slice(routine.bodyStart, close)).map((p) =>
+      p.replace(/=[\s\S]*$/u, '').replace(new RegExp(`(?<![${W}])Знач(?![${W}])`, 'iu'), '').trim());
+    for (const p of params) {
+      if (p) note(p, routine.start, 'параметр');
+    }
+    for (const a of body.matchAll(new RegExp(`(?<![${W}.])(${IDENT})\\s*=(?!=)`, 'gu'))) {
+      if (startsStatement(masked, routine.bodyStart + a.index)) note(a[1], routine.bodyStart + a.index, 'переменная');
+    }
+    for (const a of body.matchAll(new RegExp(`(?:Перем|Для\\s+Каждого|Для)\\s+(${IDENT})`, 'giu'))) {
+      note(a[1], routine.bodyStart + a.index, 'переменная');
+    }
+    const raw = source.slice(routine.bodyStart, routine.end);
+    for (const literal of extractQueryLiterals(raw)) {
+      const text = maskLiteral(literal.raw);
+      for (const a of text.matchAll(new RegExp(`(?<![${W}])КАК\\s+(${IDENT})`, 'giu'))) {
+        note(a[1], routine.bodyStart + literal.start, 'псевдоним запроса');
+      }
+      for (const a of text.matchAll(new RegExp(`&(${IDENT})`, 'gu'))) {
+        note(a[1], routine.bodyStart + literal.start, 'параметр запроса');
+      }
+    }
+
+    for (const { name, pos, kind } of names.values()) {
+      const entry = matchOf(name);
+      if (!entry) continue;
+      findings.push(hint({
+        rule: 'qg:BSL-MECHANIC-WORD',
+        line: lineAt(source, pos),
+        method: routine.name,
+        message:
+          `${kind} «${name}»: слово механики из списка проекта («${entry}»). Имя из предметной ` +
+          'области говорит, что лежит в значении, а не на каком шаге алгоритма оно появилось ' +
+          '(#std647). Если такое имя не подбирается, метод, скорее всего, собирает несвязанные вещи',
+      }));
+    }
+  }
+  return findings;
+}
+
+/**
  * Переменная передана аргументом вызова — целиком, а не полем.
  *
  * Разбор линейный, а не регулярным выражением по скобкам: вложенные квантификаторы на модуле
@@ -2107,7 +2333,34 @@ function passedAsArgument(body, name) {
   return false;
 }
 
-function checkFile(path) {
+const LINT_DEFAULTS = { mechanicWords: [], commentMarkers: null, strictRecordManager: false };
+
+/**
+ * Секция `bslLint` настройки проекта, проверенная до прогона.
+ *
+ * Неверное значение — ошибка вызова, а не тихий откат к умолчанию: список слов, который не
+ * применился, неотличим от списка, по которому ничего не нашлось.
+ */
+function lintSettings() {
+  const raw = readConfig().bslLint || {};
+  const settings = { ...LINT_DEFAULTS, ...raw };
+  const strings = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string');
+  if (!strings(settings.mechanicWords)) throw new Error('mechanicWords — ожидается массив строк');
+  if (settings.commentMarkers !== null && !strings(settings.commentMarkers)) {
+    throw new Error('commentMarkers — ожидается null либо массив строк');
+  }
+  for (const marker of settings.commentMarkers || []) {
+    try {
+      new RegExp(marker, 'iu');
+    } catch (e) {
+      throw new Error(`commentMarkers: «${marker}» не регулярное выражение (${e.message})`);
+    }
+  }
+  if (typeof settings.strictRecordManager !== 'boolean') throw new Error('strictRecordManager — ожидается true или false');
+  return settings;
+}
+
+function checkFile(path, settings = LINT_DEFAULTS) {
   if (!existsSync(path)) {
     return {
       findings: [{ severity: 'error', rule: 'file-missing', line: 0, message: 'файл не найден' }],
@@ -2120,11 +2373,14 @@ function checkFile(path) {
   findings.push(...lintUnboundedColumns(source));
   findings.push(...lintRefDotAccess(source));
   findings.push(...lintDispatchFallback(source));
-  findings.push(...lintFieldTransfer(source, changedRoutines(path, source)));
+  const changed = changedRoutines(path, source);
+  findings.push(...lintFieldTransfer(source, changed));
   findings.push(...lintBatchSingleResult(source));
-  findings.push(...lintReadOnlyRecordManager(source));
+  findings.push(...lintReadOnlyRecordManager(source, settings.strictRecordManager === true));
   findings.push(...lintQueriedObjectAttributes(source));
   findings.push(...lintStructureCompositionCheck(source));
+  findings.push(...lintCommentReferences(source, settings.commentMarkers || DEFAULT_COMMENT_MARKERS, changed));
+  findings.push(...lintMechanicWords(source, settings.mechanicWords || [], changed));
   const objectXml = findObjectXml(path);
   let metaResolved = false;
   if (objectXml) {
@@ -2142,7 +2398,7 @@ function checkFile(path) {
   return { findings, metaResolved, formResolved, source };
 }
 
-function evidenceBlock(findings, modulesSeen, metaResolved, files = [], formsSeen = false, formResolved = false) {
+function evidenceBlock(findings, modulesSeen, metaResolved, files = [], formsSeen = false, formResolved = false, wordsListed = false) {
   const lines = [];
 
   const hitTxn = modulesSeen && findings.some((f) => f.rule === 'qg:BSL-TXN-IN-HANDLER');
@@ -2233,11 +2489,28 @@ function evidenceBlock(findings, modulesSeen, metaResolved, files = [], formsSee
     ['record-manager-read', 'qg:BSL-RECORD-MANAGER-READ-ONLY'],
     ['queried-object-attributes', 'qg:BSL-QUERIED-OBJECT-ATTRIBUTES'],
     ['own-structure-check', 'qg:BSL-OWN-STRUCTURE-CHECK'],
+    ['comment-reference', 'qg:BSL-COMMENT-REFERENCE'],
   ]) {
     const hit = findings.some((f) => f.rule === id);
     recordRun({ scope, tool: 'tools/bsl-lint.mjs', verdict: hit ? 'violation' : 'clean', files });
     lines.push(`[qg applied: layer=code, scope=${scope}, ids=[${id}], verdict=${hit ? `violation:${id}` : 'clean'}]`);
   }
+
+  // Слов механики у плагина нет: пустой список проекта — правило неприменимо, а не «чисто».
+  // Иначе проект без списка получал бы в след проверку, которую никто не проводил.
+  const hitWord = findings.some((f) => f.rule === 'qg:BSL-MECHANIC-WORD');
+  recordRun({
+    scope: 'mechanic-word',
+    tool: 'tools/bsl-lint.mjs',
+    verdict: !wordsListed ? 'not_applicable' : hitWord ? 'violation' : 'clean',
+    files,
+  });
+  lines.push(
+    !wordsListed
+      ? '[qg skipped: layer=code, scope=mechanic-word, reason=not_applicable]'
+      : '[qg applied: layer=code, scope=mechanic-word, ids=[qg:BSL-MECHANIC-WORD], ' +
+        `verdict=${hitWord ? 'violation:qg:BSL-MECHANIC-WORD' : 'clean'}]`
+  );
 
   // `attribute-access` до этого правила был проверкой без инструмента: строку следа писала
   // модель, и валидатору нечем было отличить прогон от чтения глазами. Теперь строку печатает
@@ -2289,7 +2562,14 @@ function main(argv) {
     return 2;
   }
 
-  const report = files.map((f) => ({ file: f, ...checkFile(f) }));
+  let settings;
+  try {
+    settings = lintSettings();
+  } catch (e) {
+    process.stderr.write(`Настройка bslLint не применима: ${e.message}\n`);
+    return 2;
+  }
+  const report = files.map((f) => ({ file: f, ...checkFile(f, settings) }));
 
   // Правило про чтение базы из цикла — единственное, которому мало одного файла: цикл и
   // чтение обычно лежат в разных методах, а нередко и в разных модулях. Граф строится по
@@ -2315,7 +2595,7 @@ function main(argv) {
   // формы рядом — отдельным фактом: без него список реквизитов пуст и сверять не с чем.
   const formsSeen = files.some((f) => basename(f) === 'Module.bsl' && basename(dirname(f)) === 'Form');
   const formResolved = report.some((r) => r.formResolved);
-  const evidence = evidenceBlock(findings, modulesSeen, metaResolved, files, formsSeen, formResolved);
+  const evidence = evidenceBlock(findings, modulesSeen, metaResolved, files, formsSeen, formResolved, settings.mechanicWords.length > 0);
 
   if (asJson) {
     process.stdout.write(JSON.stringify({ files: report, errors, warns, evidence }, null, 2) + '\n');
@@ -2327,7 +2607,8 @@ function main(argv) {
     process.stdout.write(`${r.file}\n`);
     for (const f of r.findings) {
       const where = f.line ? `:${f.line}` : '';
-      process.stdout.write(`  ${f.severity === 'error' ? 'ОШИБКА' : f.question ? 'ВОПРОС' : 'ВНИМАНИЕ'}${where} [${f.rule}] ${f.message}\n`);
+      const label = f.severity === 'error' ? 'ОШИБКА' : f.question ? 'ВОПРОС' : f.hint ? 'ПОДСКАЗКА' : 'ВНИМАНИЕ';
+      process.stdout.write(`  ${label}${where} [${f.rule}] ${f.message}\n`);
     }
     process.stdout.write('\n');
   }
