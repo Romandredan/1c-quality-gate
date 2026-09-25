@@ -21,6 +21,19 @@
  *     примитивного типа. Присваивание уходит В РЕКВИЗИТ и приводится к его типу, обращение
  *     через точку падает в рантайме. В `&НаСервереБезКонтекста` контекста формы нет, и там тот
  *     же код работает — оттого дефект выглядит случайным.
+ *   - `qg:BSL-FIELD-TRANSFER` — три и больше присваивания «поле ← поле» из одного источника в
+ *     один приёмник: второе описание состава данных, которое разъезжается с первым. Только в
+ *     методах, написанных или изменённых относительно HEAD: в типовом коде такой перенос —
+ *     обычный стиль, и находки по нетронутым методам разбирались бы в каждом отчёте заново.
+ *   - `qg:BSL-BATCH-ONE-RESULT` — из `ВыполнитьПакет()` берётся один результат, последний
+ *     запрос-выборка (хватает `Выполнить()`), либо индекс считается от `ВГраница()` у пакета
+ *     постоянного состава.
+ *   - `qg:BSL-RECORD-MANAGER-READ-ONLY` — менеджер записи регистра сведений читается и не
+ *     изменяется: запись, которую не меняют, читается запросом (#std447).
+ *
+ * У трёх последних правил есть уровень «вопрос» — сигнал есть, решающего факта в модуле нет
+ * (текст пакета не собран литералом, менеджер уходит наружу, значение при переносе
+ * преобразуется). Вопрос печатается меткой «ВОПРОС» и уходит в след тем же `violation`.
  *
  * Зачем отдельный инструмент, а не правило в своде. Правило «не открывай транзакцию в
  * обработчике» формулируется одной строкой и ровно поэтому его легко не применить: проверка
@@ -52,7 +65,11 @@
  *   - реквизиты формы читаются из `Ext/Form.xml` рядом с модулем и только примитивных типов:
  *     у реквизита-таблицы обращение через точку законно, а у составного типа законно и
  *     объектное присваивание. Переменная, названная именем КОЛОНКИ реквизита-таблицы,
- *     безопасна и в проверку не попадает.
+ *     безопасна и в проверку не попадает;
+ *   - перенос полей: тип приёмника и источника не выводится, перенос в структуру и в реквизиты
+ *     объекта одинаковы; сравнение с HEAD идёт по телам методов с тем же именем;
+ *   - состав пакета считается только по тексту, собранному одним литералом в методе или в
+ *     функции этого модуля; вызывающие менеджера записи ищутся только в этом модуле.
  *
  * Использование:
  *   node bsl-lint.mjs <файл.bsl> [<файл.bsl> ...] [--json]
@@ -62,8 +79,10 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { recordRun } from './run-journal.mjs';
 import { versionSuffix } from './config.mjs';
+import { extractQueryLiterals, maskLiteral } from './query-lint.mjs';
 
 /** Символы идентификатора 1С: кириллица делает `\b` в JS бесполезной. */
 const W = 'A-Za-zА-Яа-яЁё0-9_';
@@ -1320,6 +1339,542 @@ export function lintDbReadsInLoops(units) {
   return findings;
 }
 
+/**
+ * Находка-вопрос.
+ *
+ * Уровень для случаев, где сигнал есть, а решающего факта в тексте модуля нет: состав пакета
+ * собран не литералом, менеджер записи уходит наружу, при переносе значение преобразуется.
+ * Предупреждение утверждало бы дефект, который инструмент не доказал; молчание спрятало бы
+ * сигнал. Вопрос печатается отдельной меткой, а в след уходит тем же `violation`, что и
+ * предупреждение: снять его можно только ответом в отчёте, а не тем, что его никто не увидел.
+ */
+function question(finding) {
+  return { ...finding, severity: 'warn', question: true };
+}
+
+/** Присваивание начинает строку — иначе это сравнение внутри условия, а не присваивание. */
+function startsStatement(masked, pos) {
+  const lineStart = masked.lastIndexOf('\n', pos) + 1;
+  return masked.slice(lineStart, pos).trim() === '';
+}
+
+/**
+ * Перенос полей поштучно из одного источника в один приёмник.
+ *
+ * Форма: `Приемник.Х = Источник.Х` три раза и больше в одном методе — строка выборки
+ * перекладывается в структуру постановки, реквизиты — в структуру настроек, параметры — в
+ * менеджер записи. Каждая такая строка — второе описание состава, которое разъезжается с
+ * первым при добавлении поля: новое поле доезжает до источника и молча теряется на переносе.
+ * Одноимённые поля переносит `ЗаполнитьЗначенияСвойств` одной строкой, а если приёмник заведён
+ * только ради передачи дальше — источник передаётся как есть. Разноимённые поля обычно значат,
+ * что одно значение ходит по коду под двумя именами: у строки выборки поле переименовывается
+ * псевдонимом запроса, и перенос снова сводится к одной строке.
+ *
+ * Сигнал: три и больше присваивания «поле ← поле» из одного источника в один приёмник.
+ * Контр-сигналы:
+ *   - значение при переносе преобразуется (`СокрЛП(Источник.Х)`, `Число(…)`, выражение) —
+ *     такие строки ЗаполнитьЗначенияСвойств не заменит, и если без них порог не набирается,
+ *     находка понижается до вопроса;
+ *   - над первым переносом стоит комментарий о двух словарях потребителей — законная форма,
+ *     когда у одного значения два адресата с разными именами полей и оба имени нужны.
+ *
+ * Приближения: приёмник и источник сравниваются по имени переменной, тип не выводится —
+ * `Объект.Х = Данные.Х` в модуле формы для инструмента то же самое, что перенос в структуру.
+ * Комментарий-исключение опознаётся по слову «словар»: пояснение другими словами инструмент
+ * не увидит.
+ */
+const TRANSFER_MIN = 3;
+
+/**
+ * Методы модуля, написанные или изменённые относительно HEAD.
+ *
+ * Нужны правилу переноса полей: такой перенос — обычный стиль типового кода, на корпусе УТ 11.5
+ * и четырнадцати расширений он есть примерно в каждом шестом модуле. Проверка модуля целиком
+ * выдавала бы находки по методам, которых правка не касалась, и их разбирали бы в каждом
+ * отчёте заново. Сравнение с HEAD — тот же приём, что у `rename-check.mjs`.
+ *
+ * Возвращает `null`, если сравнивать не с чем (нет git, файл новый): тогда новым считается
+ * весь модуль.
+ */
+export function changedRoutines(path, source) {
+  const r = spawnSync('git', ['show', `HEAD:./${basename(path)}`], {
+    cwd: dirname(path),
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (r.error || r.status !== 0) return null;
+  const bodies = (text) => {
+    const masked = maskModule(text);
+    const map = new Map();
+    for (const routine of parseRoutines(masked)) {
+      map.set(routine.name.toLowerCase(), text.slice(routine.start, routine.end).replace(/[ \t]*\r?\n/g, '\n').trim());
+    }
+    return map;
+  };
+  const before = bodies(String(r.stdout || '').replace(/^﻿/, ''));
+  const changed = new Set();
+  for (const [name, body] of bodies(source)) {
+    if (before.get(name) !== body) changed.add(name);
+  }
+  return changed;
+}
+
+export function lintFieldTransfer(source, onlyRoutines = null) {
+  const masked = maskModule(source);
+  const findings = [];
+  const directRe = new RegExp(`^(${IDENT})\\s*\\.\\s*(${IDENT})$`, 'u');
+  const refRe = new RegExp(`(?<![${W}.])(${IDENT})\\s*\\.\\s*(${IDENT})(?![${W}])(?!\\s*[.(])`, 'gu');
+  const controlWord = word('Тогда|Цикл|Попытка|Иначе|ИначеЕсли|КонецЕсли|И|ИЛИ|НЕ', 'iu');
+
+  for (const routine of parseRoutines(masked)) {
+    if (onlyRoutines && !onlyRoutines.has(routine.name.toLowerCase())) continue;
+    const groups = new Map();
+    const add = (receiver, field, entry) => {
+      const key = `${receiver.toLowerCase()} ${entry.source.toLowerCase()}`;
+      if (!groups.has(key)) groups.set(key, { receiver, source: entry.source, entries: [] });
+      const group = groups.get(key);
+      // Одно поле, присвоенное в нескольких ветках, — один перенос, а не несколько: иначе
+      // `Исход.Текст = Результат.Текст` в четырёх ветках набирал бы порог сам с собой.
+      if (group.entries.some((e) => e.field.toLowerCase() === field.toLowerCase())) return;
+      group.entries.push({ field, ...entry });
+    };
+
+    const body = masked.slice(routine.bodyStart, routine.end);
+    // Две формы одного переноса: присваивание полю и `Вставить` с ключом-литералом. Имя ключа
+    // берётся из исходника по позиции: в маске содержимое строк погашено.
+    // Ищется только начало присваивания, правая часть берётся до ближайшей `;` отдельно. Одна
+    // регулярка с правой частью внутри стартовала бы на сравнении в `Если А.Х = Б.Х Тогда` и
+    // поглощала присваивание на следующей строке вместе с условием.
+    const assign = new RegExp(`(?<![${W}.])(${IDENT})\\s*\\.\\s*(${IDENT})\\s*=(?!=)`, 'gu');
+    const insert = new RegExp(`(?<![${W}.])(${IDENT})\\s*\\.\\s*Вставить\\s*\\(([^,;()]*),([^;]*)\\)\\s*;`, 'giud');
+    const statements = [];
+    for (const s of body.matchAll(assign)) {
+      const from = s.index + s[0].length;
+      const end = body.indexOf(';', from);
+      if (end === -1) continue;
+      statements.push({ index: s.index, receiver: s[1], field: s[2], rhs: body.slice(from, end) });
+    }
+    for (const s of body.matchAll(insert)) {
+      const [from, to] = s.indices[2];
+      const key = source.slice(routine.bodyStart + from, routine.bodyStart + to).trim().replace(/^"|"$/g, '');
+      if (!new RegExp(`^${IDENT}$`, 'u').test(key)) continue;
+      statements.push({ index: s.index, receiver: s[1], field: key, rhs: s[3] });
+    }
+    for (const s of statements) {
+      const pos = routine.bodyStart + s.index;
+      if (!startsStatement(masked, pos)) continue;
+      const rhs = s.rhs.trim();
+      if (controlWord.test(rhs)) continue;
+      const receiver = s.receiver.toLowerCase();
+      const direct = rhs.match(directRe);
+      if (direct) {
+        if (direct[1].toLowerCase() === receiver) continue;
+        add(s.receiver, s.field, { source: direct[1], sourceField: direct[2], kind: 'direct', pos });
+        continue;
+      }
+      // Преобразованный перенос: в правой части ровно один источник и одно его поле.
+      const refs = [...rhs.matchAll(refRe)].map((r) => ({ source: r[1], field: r[2] }));
+      const sources = new Set(refs.map((r) => r.source.toLowerCase()));
+      const fields = new Set(refs.map((r) => r.field.toLowerCase()));
+      if (refs.length && sources.size === 1 && fields.size === 1 && refs[0].source.toLowerCase() !== receiver) {
+        add(s.receiver, s.field, { source: refs[0].source, sourceField: refs[0].field, kind: 'transformed', pos });
+      }
+    }
+
+    for (const group of groups.values()) {
+      const direct = group.entries.filter((e) => e.kind === 'direct');
+      if (group.entries.length < TRANSFER_MIN) continue;
+
+      const first = Math.min(...group.entries.map((e) => e.pos));
+      if (commentAbove(source, first, /словар/iu)) continue;
+
+      const renamed = direct.filter((e) => e.field.toLowerCase() !== e.sourceField.toLowerCase());
+      const names = direct.map((e) => e.field).join(', ');
+      const what = `«${group.source}» → «${group.receiver}»`;
+      const advice = renamed.length === 0
+        ? `одноимённые поля переносит ЗаполнитьЗначенияСвойств(${group.receiver}, ${group.source}) одной строкой, ` +
+          `а если «${group.receiver}» заведена только ради передачи дальше — передайте «${group.source}» как есть`
+        : `имена различаются (${renamed.map((e) => `${e.sourceField} → ${e.field}`).join(', ')}): если ` +
+          `«${group.source}» — строка выборки запроса, назовите поле в запросе именем приёмника, и перенос ` +
+          'сведётся к ЗаполнитьЗначенияСвойств или к передаче строки как есть';
+
+      const base = {
+        rule: 'qg:BSL-FIELD-TRANSFER',
+        line: lineAt(source, first),
+        method: routine.name,
+        receiverKind: receiverKind(masked, routine, group.receiver),
+        sourceKind: sourceKind(masked, routine, group.source),
+      };
+      if (direct.length >= TRANSFER_MIN) {
+        findings.push({
+          ...base,
+          severity: 'warn',
+          message:
+            `поля переносятся поштучно, ${direct.length} присваиваний ${what} (${names}): второе описание ` +
+            `состава, которое разъедется с первым при добавлении поля. Замена: ${advice}. Если у значения ` +
+            'два адресата с разными словарями полей и оба нужны — поясните это комментарием над переносом',
+        });
+      } else {
+        findings.push(question({
+          ...base,
+          message:
+            `${group.entries.length} присваиваний ${what}, из них ${group.entries.length - direct.length} с ` +
+            'преобразованием значения: такие строки ЗаполнитьЗначенияСвойств не заменит. Нужно ли ' +
+            'преобразование при каждом переносе, или значение можно привести один раз у источника?',
+        }));
+      }
+    }
+  }
+  return findings;
+}
+
+/** Правые части присваиваний переменной в теле метода. */
+function assignedValues(masked, routine, name) {
+  const body = masked.slice(routine.bodyStart, routine.end);
+  const re = new RegExp(`(?<![${W}.])${name}\\s*=(?!=)\\s*([^;]*)`, 'giu');
+  return [...body.matchAll(re)].map((a) => a[1].trim());
+}
+
+/** Имя объявлено параметром метода: текст между скобками объявления. */
+function isParameter(masked, routine, name) {
+  const close = masked.indexOf(')', routine.bodyStart);
+  const params = close === -1 ? '' : masked.slice(routine.bodyStart, close);
+  return new RegExp(`(?<![${W}])${name}(?![${W}])`, 'iu').test(params);
+}
+
+/** Чем является приёмник переноса — по его присваиванию в этом методе. */
+function receiverKind(masked, routine, name) {
+  const values = assignedValues(masked, routine, name);
+  if (values.some((r) => /СоздатьМенеджерЗаписи\s*\(/iu.test(r))) return 'record-manager';
+  if (values.some((r) => /^Новый\s+Структура/iu.test(r))) return 'new-structure';
+  if (values.some((r) => new RegExp(`^${IDENT}(?:\\s*\\.\\s*${IDENT})*\\s*\\.\\s*Добавить\\s*\\(`, 'u').test(r))) return 'added-row';
+  if (values.some((r) => new RegExp(`^(?:${IDENT}\\s*\\.\\s*)?${IDENT}\\s*\\(`, 'u').test(r))) return 'function-result';
+  if (values.length) return 'other';
+  return isParameter(masked, routine, name) ? 'parameter' : 'unknown';
+}
+
+/** Чем является источник переноса — по его присваиванию в этом методе. */
+function sourceKind(masked, routine, name) {
+  if (/^(Объект|ЭтотОбъект|Элементы|Форма|ЭтаФорма|ТекущиеДанные)$/iu.test(name)) return 'form-context';
+  const values = assignedValues(masked, routine, name);
+  const body = masked.slice(routine.bodyStart, routine.end);
+  if (values.some((r) => /\.\s*Выбрать\s*\(/iu.test(r))) return 'selection';
+  if (values.some((r) => /ЗначенияРеквизитовОбъекта\s*\(/iu.test(r))) return 'attributes';
+  if (new RegExp(`Для\\s+Каждого\\s+${name}\\s+Из`, 'iu').test(body)) return 'loop-row';
+  if (values.some((r) => /ТекущиеДанные$/iu.test(r))) return 'form-context';
+  if (values.length) return 'other';
+  return isParameter(masked, routine, name) ? 'parameter' : 'unknown';
+}
+
+/** Строки комментария непосредственно над позицией (до первой некомментарной строки). */
+function commentAbove(source, pos, re) {
+  const lines = source.slice(0, pos).split('\n');
+  lines.pop();
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line.startsWith('//')) break;
+    if (re.test(line)) return true;
+  }
+  return false;
+}
+
+/**
+ * Текст запроса, собранный одним литералом.
+ *
+ * Состав пакета считается только по тексту, который виден целиком: литерал в самом методе
+ * (`Новый Запрос("…")`, `Запрос.Текст = "…"`, через переменную с одним присваиванием) либо
+ * функция этого же модуля, в теле которой ровно один литерал запроса и нет склейки. Всё
+ * остальное — `СтрЗаменить`, `+`, вызов чужого модуля — возвращает `null`: число запросов
+ * тогда неизвестно, и находка становится вопросом.
+ */
+function literalQueryText(source, masked, expressionStart, expressionEnd, routines) {
+  const raw = source.slice(expressionStart, expressionEnd).trim();
+  const bare = masked.slice(expressionStart, expressionEnd).trim();
+  if (/^"/.test(raw)) {
+    if (/[+]/.test(bare)) return null;
+    const literals = extractQueryLiterals(raw);
+    return literals.length === 1 ? literals[0].raw : null;
+  }
+  const call = bare.match(new RegExp(`^(${IDENT})\\s*\\(`, 'u'));
+  if (call) {
+    const target = routines.find((r) => r.name.toLowerCase() === call[1].toLowerCase());
+    if (!target) return null;
+    const body = source.slice(target.bodyStart, target.end);
+    const bodyMasked = masked.slice(target.bodyStart, target.end);
+    if (/СтрЗаменить|СтрШаблон/iu.test(bodyMasked) || /"\s*\+|\+\s*"/.test(body)) return null;
+    const literals = extractQueryLiterals(body);
+    return literals.length === 1 ? literals[0].raw : null;
+  }
+  return null;
+}
+
+/** Запросы пакета по порядку: текст без литералов SDBL, пустые части отброшены. */
+function batchStatements(literal) {
+  return maskLiteral(literal)
+    .split(';')
+    .map((s) => s.trim())
+    .filter((s) => s !== '');
+}
+
+/**
+ * Пакет, из которого нужен один результат.
+ *
+ * `Запрос.Выполнить()` у пакетного текста выполняет все его запросы и возвращает результат
+ * последнего. Если из `ВыполнитьПакет()` берётся ровно один элемент и это последний запрос —
+ * выборка, а не `ПОМЕСТИТЬ` или `УНИЧТОЖИТЬ`, — пакет не нужен: индекс в нём — лишнее место,
+ * которое разъедется с текстом запроса, а читатель ищет, зачем нужны остальные результаты.
+ *
+ * Вторая форма — индекс от границы (`Пакет[Пакет.ВГраница() - 1]`) у пакета постоянного
+ * состава: расчёт выглядит защитой от изменения текста, но при вставке запроса в середину так
+ * же молча возьмёт не ту таблицу. Инструмент сам считает номер и печатает его.
+ *
+ * Контр-сигналы: два обращения по индексу и больше (кроме формы от границы); перебор пакета
+ * циклом; пакет возвращается из метода или передаётся в другой. Если текст не собран одним
+ * литералом, состав не посчитать — одиночное обращение даёт вопрос, форма от границы молчит.
+ */
+export function lintBatchSingleResult(source) {
+  const masked = maskModule(source);
+  const findings = [];
+  const routines = parseRoutines(masked);
+  const executeRe = new RegExp(`(?<![${W}.])(${IDENT})\\s*=\\s*(${IDENT})\\s*\\.\\s*ВыполнитьПакет\\s*\\(\\s*\\)`, 'giu');
+
+  for (const routine of routines) {
+    const body = masked.slice(routine.bodyStart, routine.end);
+    executeRe.lastIndex = 0;
+    let m;
+    while ((m = executeRe.exec(body)) !== null) {
+      const batch = m[1];
+      const queryVar = m[2];
+      const at = routine.bodyStart + m.index;
+      const after = body.slice(m.index + m[0].length);
+
+      const loopOver = new RegExp(`Для\\s+Каждого\\s+${IDENT}\\s+Из\\s+${batch}\\s+Цикл`, 'iu');
+      const escapes = new RegExp(
+        `(?:Возврат\\s+${batch}\\s*;)|(?:[(,]\\s*${batch}\\s*[,)])|(?:=\\s*${batch}\\s*;)`, 'iu');
+      if (loopOver.test(after) || escapes.test(after)) continue;
+
+      const accessRe = new RegExp(`(?<![${W}.])${batch}\\s*\\[([^\\]]*)\\]`, 'giu');
+      const accesses = [...after.matchAll(accessRe)].map((a) => ({
+        index: a[1].replace(/\s+/g, ''),
+        pos: at + m[0].length + a.index,
+      }));
+      if (accesses.length === 0) continue;
+
+      const text = queryTextOf(source, masked, routine, queryVar, at, routines);
+      const statements = text === null ? null : batchStatements(text);
+      const last = statements ? statements.length - 1 : null;
+      const lastIsSelection = statements
+        ? !hasWord(statements[last], word('ПОМЕСТИТЬ|УНИЧТОЖИТЬ', 'iu')) && hasWord(statements[last], word('ВЫБРАТЬ', 'iu'))
+        : false;
+
+      const upper = new RegExp(`^${batch}\\.ВГраница\\(\\)`, 'iu');
+      for (const access of accesses) {
+        const offset = access.index.match(new RegExp(`^${batch}\\.ВГраница\\(\\)-(\\d+)$`, 'iu'));
+        if (offset && statements) {
+          findings.push({
+            severity: 'warn',
+            rule: 'qg:BSL-BATCH-ONE-RESULT',
+            line: lineAt(source, access.pos),
+            method: routine.name,
+            message:
+              `индекс «${batch}[${access.index}]» считается от границы у пакета постоянного состава ` +
+              `(${statements.length} запросов): это ${batch}[${last - Number(offset[1])}]. Пишите номер числом с ` +
+              'комментарием о составе пакета: при вставке запроса в середину расчёт так же молча возьмёт ' +
+              'не ту таблицу, только заметить это труднее',
+          });
+        }
+      }
+      if (accesses.length !== 1) continue;
+
+      const only = accesses[0];
+      const pointsToLast = upper.test(only.index) && !/-/.test(only.index)
+        ? true
+        : /^\d+$/.test(only.index) && last !== null
+          ? Number(only.index) === last
+          : null;
+      const base = { rule: 'qg:BSL-BATCH-ONE-RESULT', line: lineAt(source, at), method: routine.name };
+      if (statements && pointsToLast && lastIsSelection) {
+        findings.push({
+          ...base,
+          severity: 'warn',
+          message:
+            `из «${batch} = ${queryVar}.ВыполнитьПакет()» берётся один результат — последний запрос пакета ` +
+            `(${batch}[${only.index}] из ${statements.length}), и это выборка. ${queryVar}.Выполнить() выполняет ` +
+            'все запросы пакета и возвращает именно его: пакет и индекс, который разъедется с текстом ' +
+            'запроса, не нужны',
+        });
+      } else if (!statements && (pointsToLast !== false)) {
+        findings.push(question({
+          ...base,
+          message:
+            `из «${batch} = ${queryVar}.ВыполнитьПакет()» берётся один результат (${batch}[${only.index}]), а ` +
+            'состав пакета инструмент не посчитал: текст собран не одним литералом. Если это последний ' +
+            `запрос пакета и он не создаёт и не уничтожает временную таблицу — хватит ${queryVar}.Выполнить()`,
+        }));
+      }
+    }
+  }
+  return findings;
+}
+
+/** Текст запроса переменной `queryVar`, заданный до позиции `before` в теле метода. */
+function queryTextOf(source, masked, routine, queryVar, before, routines) {
+  const body = masked.slice(routine.bodyStart, before);
+  const modified = new RegExp(
+    `(?:${queryVar}\\s*\\.\\s*Текст\\s*=\\s*${queryVar}\\s*\\.\\s*Текст)|(?:СтрЗаменить\\s*\\(\\s*${queryVar}\\s*\\.\\s*Текст)`, 'iu');
+  if (modified.test(body)) return null;
+
+  const setters = [
+    ...[...body.matchAll(new RegExp(`(?<![${W}.])${queryVar}\\s*=\\s*Новый\\s+Запрос\\s*\\(`, 'giu'))].map((s) => ({ s, ctor: true })),
+    ...[...body.matchAll(new RegExp(`(?<![${W}.])${queryVar}\\s*\\.\\s*Текст\\s*=`, 'giu'))].map((s) => ({ s, ctor: false })),
+  ].sort((a, b) => b.s.index - a.s.index);
+  for (const { s, ctor } of setters) {
+    const start = routine.bodyStart + s.index + s[0].length;
+    const end = ctor ? closingParen(masked, start) : masked.indexOf(';', start);
+    if (end === -1 || end > before) return null;
+    const expr = masked.slice(start, end).trim();
+    // Пустоту конструктора проверяет исходник: в маске литерал погашен и выглядит пустым.
+    if (ctor && source.slice(start, end).trim() === '') continue;
+    // Переменная с текстом: ровно одно присваивание литерала выше по методу.
+    const variable = expr.match(new RegExp(`^(${IDENT})$`, 'u'));
+    if (variable) {
+      const assigns = [...body.matchAll(new RegExp(`(?<![${W}.])${variable[1]}\\s*=(?!=)`, 'giu'))];
+      const touched = new RegExp(`(?:СтрЗаменить|СтрШаблон)\\s*\\(\\s*${variable[1]}`, 'iu').test(body);
+      if (assigns.length !== 1 || touched) return null;
+      const aStart = routine.bodyStart + assigns[0].index + assigns[0][0].length;
+      return literalQueryText(source, masked, aStart, masked.indexOf(';', aStart), routines);
+    }
+    return literalQueryText(source, masked, start, end, routines);
+  }
+  return null;
+}
+
+/** Позиция закрывающей скобки вызова, открытого перед `from`. */
+function closingParen(masked, from) {
+  let depth = 1;
+  for (let i = from; i < masked.length; i++) {
+    if (masked[i] === '(') depth++;
+    if (masked[i] === ')' && --depth === 0) return i;
+  }
+  return -1;
+}
+
+function hasWord(text, re) {
+  re.lastIndex = 0;
+  return re.test(text);
+}
+
+/**
+ * Менеджер записи регистра сведений, который только читают.
+ *
+ * `СоздатьМенеджерЗаписи()` плюс `Прочитать()` ради проверки существования или одного поля, и
+ * дальше менеджер не изменяется и не записывается. Запись, которую не меняют, читается
+ * запросом (#std447): менеджер тянет всю запись со всеми ресурсами и реквизитами, требует
+ * заполнить ключ поштучно и выглядит подготовкой к записи, которой нет, — читатель ищет, где
+ * она происходит.
+ *
+ * Контр-сигнал: менеджер возвращается из функции или передаётся в другой метод — изменить и
+ * записать его может вызывающий. Тогда находка — вопрос, и в ней названы методы этого модуля,
+ * которые функцию вызывают. `ЗаполнитьЗначенияСвойств(Приемник, Менеджер)` передачей не
+ * считается: менеджер там источник, а не приёмник.
+ *
+ * Приближение: вызывающие ищутся только в этом модуле.
+ */
+export function lintReadOnlyRecordManager(source) {
+  const masked = maskModule(source);
+  const findings = [];
+  const routines = parseRoutines(masked);
+  const createRe = new RegExp(
+    `(?<![${W}.])(${IDENT})\\s*=\\s*РегистрыСведений\\s*\\.\\s*(${IDENT})\\s*\\.\\s*СоздатьМенеджерЗаписи\\s*\\(\\s*\\)`, 'giu');
+
+  for (const routine of routines) {
+    const body = masked.slice(routine.bodyStart, routine.end);
+    createRe.lastIndex = 0;
+    let m;
+    while ((m = createRe.exec(body)) !== null) {
+      const manager = m[1];
+      const register = m[2];
+      const readAt = body.search(new RegExp(`(?<![${W}.])${manager}\\s*\\.\\s*Прочитать\\s*\\(`, 'iu'));
+      if (readAt === -1) continue;
+      if (new RegExp(`(?<![${W}.])${manager}\\s*\\.\\s*(Записать|Удалить)\\s*\\(`, 'iu').test(body)) continue;
+      const afterRead = body.slice(readAt);
+      const assignAfter = [...afterRead.matchAll(new RegExp(`(?<![${W}.])${manager}\\s*\\.\\s*${IDENT}\\s*=(?!=)`, 'giu'))]
+        .some((a) => startsStatement(masked, routine.bodyStart + readAt + a.index));
+      if (assignAfter) continue;
+
+      const returned = new RegExp(`Возврат\\s+${manager}\\s*;`, 'iu').test(body);
+      const passed = passedAsArgument(body, manager);
+
+      const base = {
+        rule: 'qg:BSL-RECORD-MANAGER-READ-ONLY',
+        line: lineAt(source, routine.bodyStart + m.index),
+        method: routine.name,
+      };
+      if (returned || passed) {
+        const callers = routines
+          .filter((r) => r !== routine)
+          .filter((r) => new RegExp(`(?<![${W}.])${routine.name}\\s*\\(`, 'iu').test(masked.slice(r.bodyStart, r.end)))
+          .map((r) => r.name);
+        findings.push(question({
+          ...base,
+          message:
+            `менеджер записи «${manager}» регистра «${register}» читается и не изменяется в этом методе, но ` +
+            `${returned ? 'возвращается из функции' : 'передаётся в другой метод'}. Записывает ли его вызывающий` +
+            `${callers.length ? ` (в этом модуле: ${callers.join(', ')})` : ''}? Если нет — запись, которую не ` +
+            'меняют, читается запросом (#std447)',
+        }));
+        continue;
+      }
+      findings.push({
+        ...base,
+        severity: 'warn',
+        message:
+          `менеджер записи «${manager}» регистра «${register}» только читается: после Прочитать() нет ни ` +
+          'записи, ни удаления, ни изменения ресурсов. Запись, которую не меняют, читается запросом ' +
+          '(#std447): менеджер тянет запись целиком и выглядит подготовкой к записи, которой нет',
+      });
+    }
+  }
+  return findings;
+}
+
+/**
+ * Переменная передана аргументом вызова — целиком, а не полем.
+ *
+ * Разбор линейный, а не регулярным выражением по скобкам: вложенные квантификаторы на модуле
+ * в десяток килобайт уходили в перебор без конца. Вызываемый определяется по открывающей
+ * скобке, в которой стоит аргумент. `ЗаполнитьЗначенияСвойств(Приемник, Переменная)`
+ * передачей не считается: там переменная источник, а не приёмник.
+ */
+function passedAsArgument(body, name) {
+  const re = new RegExp(`(?<![${W}.])${name}(?![${W}])`, 'giu');
+  let m;
+  while ((m = re.exec(body)) !== null) {
+    const before = body.slice(0, m.index).replace(/\s+$/, '');
+    const after = body.slice(m.index + m[0].length).replace(/^\s+/, '');
+    if (!/[(,]$/.test(before) || !/^[,)]/.test(after)) continue;
+    let depth = 0;
+    let open = -1;
+    for (let i = m.index - 1; i >= 0; i--) {
+      const c = body[i];
+      if (c === ')') depth++;
+      else if (c === '(') {
+        if (depth === 0) {
+          open = i;
+          break;
+        }
+        depth--;
+      } else if (c === ';') break;
+    }
+    if (open === -1) continue;
+    const callee = body.slice(0, open).match(new RegExp(`(${IDENT})\\s*$`, 'u'));
+    const firstArg = body.slice(open + 1, m.index).trim() === '';
+    if (callee && /^ЗаполнитьЗначенияСвойств$/iu.test(callee[1]) && !firstArg) continue;
+    return true;
+  }
+  return false;
+}
+
 function checkFile(path) {
   if (!existsSync(path)) {
     return {
@@ -1333,6 +1888,9 @@ function checkFile(path) {
   findings.push(...lintUnboundedColumns(source));
   findings.push(...lintRefDotAccess(source));
   findings.push(...lintDispatchFallback(source));
+  findings.push(...lintFieldTransfer(source, changedRoutines(path, source)));
+  findings.push(...lintBatchSingleResult(source));
+  findings.push(...lintReadOnlyRecordManager(source));
   const objectXml = findObjectXml(path);
   let metaResolved = false;
   if (objectXml) {
@@ -1432,6 +1990,19 @@ function evidenceBlock(findings, modulesSeen, metaResolved, files = [], formsSee
       `verdict=${hitLoopRead ? 'violation:qg:BSL-DB-READ-IN-LOOP' : 'clean'}]`
   );
 
+  // Три правила уровня метода, применимые к любому модулю: метаданные им не нужны, и модуль
+  // без переносов, пакетов и менеджеров записи — проверенный модуль, а не непроверяемый.
+  // Находка-вопрос уходит в след тем же `violation`: снимается ответом в отчёте.
+  for (const [scope, id] of [
+    ['field-transfer', 'qg:BSL-FIELD-TRANSFER'],
+    ['batch-single-result', 'qg:BSL-BATCH-ONE-RESULT'],
+    ['record-manager-read', 'qg:BSL-RECORD-MANAGER-READ-ONLY'],
+  ]) {
+    const hit = findings.some((f) => f.rule === id);
+    recordRun({ scope, tool: 'tools/bsl-lint.mjs', verdict: hit ? 'violation' : 'clean', files });
+    lines.push(`[qg applied: layer=code, scope=${scope}, ids=[${id}], verdict=${hit ? `violation:${id}` : 'clean'}]`);
+  }
+
   // `attribute-access` до этого правила был проверкой без инструмента: строку следа писала
   // модель, и валидатору нечем было отличить прогон от чтения глазами. Теперь строку печатает
   // инструмент и отмечается в журнале — рукописный «clean» по этому имени больше не проходит.
@@ -1520,7 +2091,7 @@ function main(argv) {
     process.stdout.write(`${r.file}\n`);
     for (const f of r.findings) {
       const where = f.line ? `:${f.line}` : '';
-      process.stdout.write(`  ${f.severity === 'error' ? 'ОШИБКА' : 'ВНИМАНИЕ'}${where} [${f.rule}] ${f.message}\n`);
+      process.stdout.write(`  ${f.severity === 'error' ? 'ОШИБКА' : f.question ? 'ВОПРОС' : 'ВНИМАНИЕ'}${where} [${f.rule}] ${f.message}\n`);
     }
     process.stdout.write('\n');
   }
