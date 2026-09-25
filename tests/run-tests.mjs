@@ -2184,6 +2184,143 @@ section('Состав структуры проверяется списком �
 }
 
 // ---------------------------------------------------------------------------
+section('Ссылки на задачи и документы разработки в комментариях');
+
+// Проект с настройкой bslLint: bsl-lint читает её из корня, который называет CLAUDE_PROJECT_DIR.
+const lintProject = (name, settings) => {
+  const dir = join(WORK, name);
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, '.1c-quality-gate.json'), JSON.stringify({ bslLint: settings }), 'utf8');
+  return { dir, opts: { env: { CLAUDE_PROJECT_DIR: dir } } };
+};
+
+{
+  const f = writeBytes('comment-refs/Module.bsl', [
+    '// Отправляет команду шлюзу. См. ОбщийМодуль.ОтправитьКоманду, оформление по #std453.',
+    'Процедура ОтправитьКоманду(Команда)',
+    '\t// Третья проверка - основание команды (задача 10.6): отменённое основание не отправляется.',
+    '\tЕсли Команда.Отменена Тогда',
+    '\t\tВозврат;',
+    '\tКонецЕсли;',
+    '\t// Остаток по ресурсной спецификации считает типовой механизм.',
+    '\tСообщить("// задача 5 - это текст сообщения, а не комментарий");',
+    'КонецПроцедуры',
+  ].join('\n'));
+  const r = run('tools/bsl-lint.mjs', [f]);
+  const hits = r.out.split('\n').filter((l) => l.includes('[qg:BSL-COMMENT-REFERENCE] '));
+  check('метка задачи в комментарии — одна подсказка',
+    hits.length === 1 && hits[0].includes('ПОДСКАЗКА') && hits[0].includes('задача 10'), hits.join(' | ').slice(0, 300));
+  check('вердикт меток ушёл в след',
+    r.out.includes('scope=comment-reference, ids=[qg:BSL-COMMENT-REFERENCE], verdict=violation:qg:BSL-COMMENT-REFERENCE'),
+    r.out.trim().slice(-900));
+}
+{
+  // Свой список меток заменяет встроенный целиком.
+  const p = lintProject('comment-refs-custom', { commentMarkers: ['TRACK-\\d+'] });
+  const f = join(p.dir, 'Module.bsl');
+  writeFileSync(f, 'Процедура П()\n\t// задача 10.6\n\t// см. TRACK-42\n\tА = 1;\nКонецПроцедуры\n', 'utf8');
+  const r = run('tools/bsl-lint.mjs', [f], p.opts);
+  const hits = r.out.split('\n').filter((l) => l.includes('[qg:BSL-COMMENT-REFERENCE] '));
+  check('свой список меток заменяет встроенный', hits.length === 1 && hits[0].includes('TRACK-42'), hits.join(' | ').slice(0, 300));
+}
+{
+  // Неверная настройка — ошибка вызова, а не тихий откат к умолчанию.
+  const p = lintProject('comment-refs-broken', { commentMarkers: ['задача ('] });
+  const f = join(p.dir, 'Module.bsl');
+  writeFileSync(f, 'Процедура П()\n\tА = 1;\nКонецПроцедуры\n', 'utf8');
+  const r = run('tools/bsl-lint.mjs', [f], p.opts);
+  check('неверное регулярное выражение в commentMarkers — код 2 с объяснением',
+    r.code === 2 && r.out.includes('commentMarkers'), `код ${r.code}: ${r.out.trim().slice(0, 200)}`);
+}
+
+// ---------------------------------------------------------------------------
+section('Слова механики в именах');
+
+{
+  // Список пуст по умолчанию: правило неприменимо, и это пропуск с причиной, а не «чисто».
+  const f = writeBytes('mechanic-empty/Module.bsl', 'Процедура П()\n\tКандидаты = 1;\nКонецПроцедуры\n');
+  const r = run('tools/bsl-lint.mjs', [f]);
+  check('без списка проекта — ни одной находки и пропуск в следе',
+    !r.out.includes('[qg:BSL-MECHANIC-WORD] ') && r.out.includes('scope=mechanic-word, reason=not_applicable'),
+    r.out.trim().slice(-900));
+}
+{
+  // «Окно» склоняется: форма «Окна» — отдельная запись списка.
+  const p = lintProject('mechanic-words', { mechanicWords: ['Кандидат', 'ОкноСбор', 'ОкнаСбор'] });
+  const f = join(p.dir, 'Module.bsl');
+  writeFileSync(f, [
+    'Функция ЗаписиКВыпуску(НачалоОкнаСбора)',
+    '\tКандидаты = Новый Массив;',
+    '\tЗапрос = Новый Запрос("ВЫБРАТЬ Т.Ссылка КАК КандидатНаВыпуск ИЗ Документ.Заказ КАК Т ГДЕ Т.Дата > &НачалоОкнаСбора");',
+    '\tПоказатьОкноСборки = Ложь;',
+    '\tВозврат Кандидаты;',
+    'КонецФункции',
+  ].join('\n'), 'utf8');
+  const r = run('tools/bsl-lint.mjs', [f], p.opts);
+  const hits = r.out.split('\n').filter((l) => l.includes('[qg:BSL-MECHANIC-WORD] '));
+  const text = hits.join(' | ');
+  check('слово из списка в переменной, параметре и псевдониме запроса — подсказки',
+    hits.every((l) => l.includes('ПОДСКАЗКА')) && text.includes('«Кандидаты»') && text.includes('«НачалоОкнаСбора»')
+      && text.includes('«КандидатНаВыпуск»'), text.slice(0, 500));
+  // «ОкноСбор» совпадает с началом слова «ОкноСборки» внутри имени — даже если это окно формы.
+  // Поэтому список проекта составляется из однозначных для него начал слов.
+  check('совпадение по началу слова внутри имени', text.includes('«ПоказатьОкноСборки»'), text.slice(0, 500));
+  check('вердикт слов ушёл в след',
+    r.out.includes('scope=mechanic-word, ids=[qg:BSL-MECHANIC-WORD], verdict=violation:qg:BSL-MECHANIC-WORD'),
+    r.out.trim().slice(-900));
+}
+{
+  // Запись совпадает только с началом слова: «Окн» не находит «Покно».
+  const p = lintProject('mechanic-boundary', { mechanicWords: ['Окн'] });
+  const f = join(p.dir, 'Module.bsl');
+  writeFileSync(f, 'Процедура П()\n\tПокнопочно = 1;\nКонецПроцедуры\n', 'utf8');
+  const r = run('tools/bsl-lint.mjs', [f], p.opts);
+  check('запись внутри слова, а не в начале — не находка', !r.out.includes('[qg:BSL-MECHANIC-WORD] '), r.out.trim().slice(0, 300));
+}
+
+// ---------------------------------------------------------------------------
+section('Строгий режим менеджера записи');
+
+{
+  const p = lintProject('manager-strict', { strictRecordManager: true });
+  const f = join(p.dir, 'Module.bsl');
+  writeFileSync(f, [
+    'Процедура Закрыть(Ключ)',
+    '\tМенеджер = РегистрыСведений.Очередь.СоздатьМенеджерЗаписи();',
+    '\tМенеджер.Ключ = Ключ;',
+    '\tМенеджер.Статус = 3;',
+    '\tМенеджер.Записать();',
+    'КонецПроцедуры',
+  ].join('\n'), 'utf8');
+  const strict = run('tools/bsl-lint.mjs', [f], p.opts);
+  check('строгий режим: менеджер, который пишет запись, — находка',
+    strict.out.includes('[qg:BSL-RECORD-MANAGER-READ-ONLY] ') && strict.out.includes('strictRecordManager'), strict.out.trim().slice(0, 300));
+  const plain = run('tools/bsl-lint.mjs', [f]);
+  check('без строгого режима тот же код — не находка', !plain.out.includes('[qg:BSL-RECORD-MANAGER-READ-ONLY] '),
+    plain.out.trim().slice(0, 300));
+}
+{
+  // Следы с настройкой и без неё принимает валидатор.
+  const p = lintProject('bsllint-evidence', { mechanicWords: ['Кандидат'] });
+  const f = join(p.dir, 'Module.bsl');
+  writeFileSync(f, 'Процедура П()\n\t// задача 1\n\tКандидаты = 1;\nКонецПроцедуры\n', 'utf8');
+  for (const [name, opts, config] of [['со списком слов', p.opts, 'custom:bslLint'], ['без настройки', {}, 'default']]) {
+    const printed = run('tools/bsl-lint.mjs', [f], opts).out.split('## quality evidence')[1]?.trim() || '';
+    const report = writeBytes(`ev-bsllint-${name === 'без настройки' ? 'plain' : 'words'}.md`,
+      '## quality evidence\n\n' +
+      `[qg scope: volume=C1, files=1, archetypes=[none], driver=volume, resolved=code:L1, config=${config}]\n` +
+      '[qg sentinel: target=v8std, id=std454, status=found]\n' +
+      printed + '\n' +
+      '[qg not_verified: dimension=compilation, reason=no_platform]\n' +
+      CATALOG_DECLARED);
+    const r = run('tools/evidence-validator.mjs', [report, '--gate'], opts);
+    check(`записи следа меток и слов (${name}) проходят валидатор`, r.code === 0,
+      `${printed.slice(-500)} → ${r.out.trim().slice(0, 300)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 section('Сверка «диск ↔ состав»');
 
 {
@@ -3732,7 +3869,11 @@ section('Каталог антипаттернов — формат карточ
   // 13 вместо 12 КБ: три признака с инструментом (перенос полей, пакет ради одного результата,
   // менеджер записи для чтения) заняли 635 байт при запасе в 346. Строка признака с
   // инструментом нужна и тому, кто находку не ищет: по ней находят карточку «Как чинить».
-  check('индекс укладывается в 13 КБ', Buffer.byteLength(md) <= 13 * 1024, String(Buffer.byteLength(md)));
+  //
+  // 14 вместо 13 КБ: ещё четыре признака с инструментом (реквизиты объекта, найденного
+  // запросом; проверка состава структуры; метки в комментариях; слова механики) заняли 875
+  // байт при запасе в 735.
+  check('индекс укладывается в 14 КБ', Buffer.byteLength(md) <= 14 * 1024, String(Buffer.byteLength(md)));
 }
 
 // ---------------------------------------------------------------------------
