@@ -172,6 +172,31 @@ export const SCOPES = {
     granularity: 'files',
     applies: ['.bsl', '.os']
   },
+  // Три правила уровня метода из разбора ревью: перенос полей поштучно, пакет ради одного
+  // результата, менеджер записи только для чтения. Отдельные имена, потому что вердикт по
+  // одному ничего не говорит о другом; у всех трёх есть уровень «вопрос», который уходит в след
+  // тем же violation.
+  'field-transfer': {
+    layer: 'code',
+    tool: 'tools/bsl-lint.mjs',
+    about: 'поля переносятся поштучно из одного источника в один приёмник',
+    granularity: 'files',
+    applies: ['.bsl', '.os']
+  },
+  'batch-single-result': {
+    layer: 'code',
+    tool: 'tools/bsl-lint.mjs',
+    about: 'ВыполнитьПакет ради одного результата; индекс от границы у пакета постоянного состава',
+    granularity: 'files',
+    applies: ['.bsl', '.os']
+  },
+  'record-manager-read': {
+    layer: 'code',
+    tool: 'tools/bsl-lint.mjs',
+    about: 'менеджер записи регистра сведений только для чтения (#std447)',
+    granularity: 'files',
+    applies: ['.bsl', '.os']
+  },
   'api-verification': {
     layer: 'code',
     tool: null,
@@ -373,6 +398,9 @@ export const QG_IDS = {
   'qg:BSL-FORM-ATTR-SHADOW': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-DISPATCH-NO-FALLBACK': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-DB-READ-IN-LOOP': { tool: 'tools/bsl-lint.mjs' },
+  'qg:BSL-FIELD-TRANSFER': { tool: 'tools/bsl-lint.mjs' },
+  'qg:BSL-BATCH-ONE-RESULT': { tool: 'tools/bsl-lint.mjs' },
+  'qg:BSL-RECORD-MANAGER-READ-ONLY': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-STALE-LOCAL-CALL': { tool: 'tools/rename-check.mjs' },
 
   // --- код, модельные ------------------------------------------------------
