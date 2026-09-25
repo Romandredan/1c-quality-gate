@@ -197,6 +197,23 @@ export const SCOPES = {
     granularity: 'files',
     applies: ['.bsl', '.os']
   },
+  // Правила второго захода по тому же разбору. Реквизиты объекта, найденного запросом, — один
+  // шаг по вызовам внутри модуля; проверка состава структуры — только вопросом: откуда пришла
+  // структура, инструмент не знает.
+  'queried-object-attributes': {
+    layer: 'code',
+    tool: 'tools/bsl-lint.mjs',
+    about: 'реквизиты объекта, найденного запросом этого модуля, читаются отдельным обращением',
+    granularity: 'files',
+    applies: ['.bsl', '.os']
+  },
+  'own-structure-check': {
+    layer: 'code',
+    tool: 'tools/bsl-lint.mjs',
+    about: 'состав структуры проверяется Свойство в цикле по списку полей',
+    granularity: 'files',
+    applies: ['.bsl', '.os']
+  },
   'api-verification': {
     layer: 'code',
     tool: null,
@@ -401,6 +418,8 @@ export const QG_IDS = {
   'qg:BSL-FIELD-TRANSFER': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-BATCH-ONE-RESULT': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-RECORD-MANAGER-READ-ONLY': { tool: 'tools/bsl-lint.mjs' },
+  'qg:BSL-QUERIED-OBJECT-ATTRIBUTES': { tool: 'tools/bsl-lint.mjs' },
+  'qg:BSL-OWN-STRUCTURE-CHECK': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-STALE-LOCAL-CALL': { tool: 'tools/rename-check.mjs' },
 
   // --- код, модельные ------------------------------------------------------

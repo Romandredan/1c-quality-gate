@@ -30,10 +30,16 @@
  *     постоянного состава.
  *   - `qg:BSL-RECORD-MANAGER-READ-ONLY` — менеджер записи регистра сведений читается и не
  *     изменяется: запись, которую не меняют, читается запросом (#std447).
+ *   - `qg:BSL-QUERIED-OBJECT-ATTRIBUTES` — `ЗначенияРеквизитовОбъекта` по ссылке, которую
+ *     вернул запрос этого же модуля: реквизиты выбираются в том же запросе. Один шаг по
+ *     вызовам внутри модуля — через параметр метода.
+ *   - `qg:BSL-OWN-STRUCTURE-CHECK` — `Свойство` в цикле по списку полей: проверка состава
+ *     структуры, которую мог создать собственный конструктор модуля. Только вопросом.
  *
- * У трёх последних правил есть уровень «вопрос» — сигнал есть, решающего факта в модуле нет
- * (текст пакета не собран литералом, менеджер уходит наружу, значение при переносе
- * преобразуется). Вопрос печатается меткой «ВОПРОС» и уходит в след тем же `violation`.
+ * У правил переноса, пакета, менеджера и состава структуры есть уровень «вопрос» — сигнал
+ * есть, решающего факта в модуле нет (текст пакета не собран литералом, менеджер уходит
+ * наружу, значение при переносе преобразуется, источник структуры неизвестен). Вопрос
+ * печатается меткой «ВОПРОС» и уходит в след тем же `violation`.
  *
  * Зачем отдельный инструмент, а не правило в своде. Правило «не открывай транзакцию в
  * обработчике» формулируется одной строкой и ровно поэтому его легко не применить: проверка
@@ -1839,6 +1845,232 @@ export function lintReadOnlyRecordManager(source) {
 }
 
 /**
+ * Реквизиты объекта, найденного запросом, читаются отдельным обращением.
+ *
+ * Запрос находит ссылку, и сразу за ним `ОбщегоНазначения.ЗначенияРеквизитовОбъекта` по этой
+ * ссылке читает её реквизиты: два обращения к базе там, где хватило бы одного, и сбор данных,
+ * размазанный по двум местам. Реквизиты выбираются в том же запросе, который находит объект.
+ *
+ * Сигнал: первый аргумент `ЗначенияРеквизитовОбъекта` / `ЗначениеРеквизитаОбъекта` получен из
+ * результата запроса — в этом же методе (выборка, выгрузка, колонка, элемент по индексу, строка
+ * цикла) либо из функции этого модуля, которая возвращает результат запроса. Один шаг по вызовам
+ * внутри модуля: если аргумент — параметр метода, проверяются вызовы метода в этом модуле, и
+ * находка ставится, когда хотя бы один вызывающий передаёт на это место значение из запроса.
+ *
+ * Контр-сигнал: объект пришёл параметром извне модуля — вызывающих в модуле нет либо ни один
+ * не передаёт значение из запроса. Реквизит, который запрос прочитать не может (хранилище
+ * значения), инструменту не виден: тип реквизита из текста модуля не выводится, и это сказано
+ * в тексте находки.
+ */
+const ATTR_READ_RE = new RegExp(
+  `ОбщегоНазначения\\s*\\.\\s*(ЗначенияРеквизитовОбъекта|ЗначениеРеквизитаОбъекта)\\s*\\(`, 'giu');
+
+/** Выражение возвращает результат запроса: выполнение, выборка, выгрузка или колонка. */
+const QUERY_RESULT_RE = /\.\s*(?:Выполнить|ВыполнитьПакет|Выбрать|Выгрузить|ВыгрузитьКолонку)\s*\(/iu;
+
+/** Функции модуля, чей `Возврат` отдаёт результат запроса (напрямую или через переменную). */
+function queryReturningFunctions(masked, routines) {
+  const out = new Set();
+  for (const routine of routines) {
+    const body = masked.slice(routine.bodyStart, routine.end);
+    const returns = [...body.matchAll(new RegExp(`(?<![${W}])Возврат\\s+([^;]+);`, 'giu'))].map((r) => r[1].trim());
+    const derived = queryDerivedNames(masked, routine, new Set());
+    if (returns.some((r) => QUERY_RESULT_RE.test(r) || derived.has(baseName(r)))) out.add(routine.name.toLowerCase());
+  }
+  return out;
+}
+
+/** Имя в начале выражения: `Т[0]` → `т`, `Выборка.Ссылка` → `выборка`. */
+function baseName(expression) {
+  const m = expression.match(new RegExp(`^(${IDENT})`, 'u'));
+  return m ? m[1].toLowerCase() : '';
+}
+
+/**
+ * Переменные метода, значение которых получено из результата запроса.
+ *
+ * Выборка, выгрузка, колонка — прямо; строка цикла по такой коллекции; элемент по индексу или
+ * поле такой переменной; результат функции модуля из `queryFunctions`. Проход повторяется, пока
+ * множество растёт: `Т = Ф(); Строка = Т[0]; Ссылка = Строка.Ссылка` — три шага.
+ */
+function queryDerivedNames(masked, routine, queryFunctions) {
+  const body = masked.slice(routine.bodyStart, routine.end);
+  const assigns = [...body.matchAll(new RegExp(`(?<![${W}.])(${IDENT})\\s*=(?!=)\\s*([^;]+);`, 'gu'))]
+    .filter((a) => startsStatement(masked, routine.bodyStart + a.index))
+    .map((a) => ({ name: a[1].toLowerCase(), value: a[2].trim() }));
+  const loops = [...body.matchAll(new RegExp(`Для\\s+Каждого\\s+(${IDENT})\\s+Из\\s+([^\\n]+?)\\s+Цикл`, 'giu'))]
+    .map((l) => ({ name: l[1].toLowerCase(), value: l[2].trim() }));
+  const derived = new Set();
+  const isDerived = (value) => {
+    if (QUERY_RESULT_RE.test(value)) return true;
+    const call = value.match(new RegExp(`^(${IDENT})\\s*\\(`, 'u'));
+    if (call && queryFunctions.has(call[1].toLowerCase())) return true;
+    const base = baseName(value);
+    return base !== '' && derived.has(base) && new RegExp(`^${IDENT}\\s*(?:\\[[^\\]]*\\]|\\.\\s*${IDENT})*$`, 'u').test(value);
+  };
+  let grown = true;
+  while (grown) {
+    grown = false;
+    for (const item of [...assigns, ...loops]) {
+      if (!derived.has(item.name) && isDerived(item.value)) {
+        derived.add(item.name);
+        grown = true;
+      }
+    }
+  }
+  return derived;
+}
+
+/** Выражение из запроса: производное имя, его элемент или поле, либо вызов функции с запросом. */
+function derivedExpression(expression, derived, queryFunctions) {
+  const value = expression.trim();
+  if (QUERY_RESULT_RE.test(value)) return true;
+  const call = value.match(new RegExp(`^(${IDENT})\\s*\\(`, 'u'));
+  if (call) return queryFunctions.has(call[1].toLowerCase());
+  return derived.has(baseName(value)) && new RegExp(`^${IDENT}\\s*(?:\\[[^\\]]*\\]|\\.\\s*${IDENT})*$`, 'u').test(value);
+}
+
+/** Аргументы вызова, разделённые запятыми верхнего уровня. */
+function splitArguments(text) {
+  const args = [];
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '(' || c === '[') depth++;
+    else if (c === ')' || c === ']') depth--;
+    else if (c === ',' && depth === 0) {
+      args.push(text.slice(from, i));
+      from = i + 1;
+    }
+  }
+  args.push(text.slice(from));
+  return args.map((a) => a.trim());
+}
+
+/** Имена параметров метода по порядку, без `Знач` и значений по умолчанию. */
+function parameterNames(masked, routine) {
+  const close = closingParen(masked, routine.bodyStart);
+  if (close === -1) return [];
+  return splitArguments(masked.slice(routine.bodyStart, close)).map((p) =>
+    p.replace(/=[\s\S]*$/u, '').replace(new RegExp(`(?<![${W}])Знач(?![${W}])`, 'iu'), '').trim().toLowerCase());
+}
+
+export function lintQueriedObjectAttributes(source) {
+  const masked = maskModule(source);
+  const findings = [];
+  const routines = parseRoutines(masked);
+  const queryFunctions = queryReturningFunctions(masked, routines);
+
+  for (const routine of routines) {
+    const body = masked.slice(routine.bodyStart, routine.end);
+    const derived = queryDerivedNames(masked, routine, queryFunctions);
+    const params = parameterNames(masked, routine);
+    ATTR_READ_RE.lastIndex = 0;
+    let m;
+    while ((m = ATTR_READ_RE.exec(body)) !== null) {
+      const open = routine.bodyStart + m.index + m[0].length;
+      const close = closingParen(masked, open);
+      if (close === -1) continue;
+      const argument = splitArguments(masked.slice(open, close))[0] || '';
+
+      let ground = null;
+      if (derivedExpression(argument, derived, queryFunctions)) {
+        ground = `«${argument}» получено из результата запроса в этом же методе`;
+      } else {
+        const position = params.indexOf(baseName(argument));
+        if (position !== -1 && baseName(argument) === argument.toLowerCase()) {
+          const callRe = new RegExp(`(?<![${W}.])${routine.name}\\s*\\(`, 'giu');
+          for (const caller of routines) {
+            if (caller === routine) continue;
+            const callerBody = masked.slice(caller.bodyStart, caller.end);
+            const callerDerived = queryDerivedNames(masked, caller, queryFunctions);
+            for (const call of callerBody.matchAll(callRe)) {
+              const cOpen = caller.bodyStart + call.index + call[0].length;
+              const cClose = closingParen(masked, cOpen);
+              if (cClose === -1) continue;
+              const passed = splitArguments(masked.slice(cOpen, cClose))[position];
+              if (passed && derivedExpression(passed, callerDerived, queryFunctions)) {
+                ground = `параметр «${argument}» получает «${passed}» из результата запроса в «${caller.name}»`;
+                break;
+              }
+            }
+            if (ground) break;
+          }
+        }
+      }
+      if (!ground) continue;
+
+      findings.push({
+        severity: 'warn',
+        rule: 'qg:BSL-QUERIED-OBJECT-ATTRIBUTES',
+        line: lineAt(source, routine.bodyStart + m.index),
+        method: routine.name,
+        message:
+          `${m[1]} по объекту, найденному запросом: ${ground}. Это второе обращение к базе там, где ` +
+          'хватило бы одного: выберите реквизиты в том же запросе, который находит объект. Если ' +
+          'реквизит запросом не читается (хранилище значения) — находка ложная, поясните это в отчёте',
+      });
+    }
+  }
+  return findings;
+}
+
+/**
+ * Проверка состава структуры списком полей.
+ *
+ * Цикл по списку имён полей, в теле — `Структура.Свойство(Имя)`. Для структуры, которую создал
+ * собственный конструктор модуля, такая проверка — защита от невозможного: состав задан кодом,
+ * и отсутствие поля означает опечатку, которую проверка прячет под видом штатной ветки
+ * (`qg:AI-19`, раздел о составе структуры). Инструмент не знает, откуда структура пришла, —
+ * поэтому находка только вопросом.
+ *
+ * Сигнал: `Для Каждого <И> Из СтрРазделить(<литерал или переменная с литералом>, …) Цикл` и в
+ * теле цикла `<С>.Свойство(<И>)`. Контр-сигнала в тексте нет: структура из внешнего источника
+ * (разобранный JSON, параметры от другой подсистемы) законно проверяется по составу, и это
+ * ответ на вопрос.
+ */
+export function lintStructureCompositionCheck(source) {
+  const masked = maskModule(source);
+  const findings = [];
+  const loopRe = new RegExp(`Для\\s+Каждого\\s+(${IDENT})\\s+Из\\s+СтрРазделить\\s*\\(([^,)]*)`, 'giu');
+  // Циклы разбираются один раз на модуль: разбор на каждый метод стоил секунды на модуле в 4 МБ.
+  const allLoops = parseLoops(masked);
+  for (const routine of parseRoutines(masked)) {
+    const loops = allLoops.filter((l) => l.headerEnd >= routine.bodyStart && l.headerEnd < routine.end);
+    for (const loop of loops) {
+      const header = masked.slice(Math.max(routine.bodyStart, loop.headerEnd - 400), loop.headerEnd);
+      const lastFor = [...header.matchAll(loopRe)].pop();
+      if (!lastFor) continue;
+      const item = lastFor[1];
+      const listArg = lastFor[2].trim();
+      // Литерал в маске погашен до пробелов в кавычках; переменная — одно имя с литералом выше.
+      const literal = listArg === '' || /^\s*$/.test(listArg);
+      const variable = !literal && new RegExp(`^${IDENT}$`, 'u').test(listArg)
+        && new RegExp(`(?<![${W}.])${listArg}\\s*=\\s*"`, 'iu').test(source.slice(routine.bodyStart, loop.headerEnd));
+      if (!literal && !variable) continue;
+      const loopBody = masked.slice(loop.bodyStart, loop.end);
+      const check = loopBody.match(new RegExp(`(${IDENT})\\s*\\.\\s*Свойство\\s*\\(\\s*${item}\\s*[,)]`, 'iu'));
+      if (!check) continue;
+      findings.push({
+        severity: 'warn',
+        question: true,
+        rule: 'qg:BSL-OWN-STRUCTURE-CHECK',
+        line: lineAt(source, loop.headerEnd),
+        method: routine.name,
+        message:
+          `состав «${check[1]}» проверяется списком полей (Свойство в цикле по СтрРазделить). ` +
+          'Структура создаётся собственным конструктором модуля? Тогда её состав задан кодом, и ' +
+          'проверка — защита от невозможного: опечатка в имени поля прячется под штатной веткой ' +
+          '(qg:AI-19). Проверка заполненности значений при этом остаётся, если запись может прийти ' +
+          'не из кода',
+      });
+    }
+  }
+  return findings;
+}
+
+/**
  * Переменная передана аргументом вызова — целиком, а не полем.
  *
  * Разбор линейный, а не регулярным выражением по скобкам: вложенные квантификаторы на модуле
@@ -1891,6 +2123,8 @@ function checkFile(path) {
   findings.push(...lintFieldTransfer(source, changedRoutines(path, source)));
   findings.push(...lintBatchSingleResult(source));
   findings.push(...lintReadOnlyRecordManager(source));
+  findings.push(...lintQueriedObjectAttributes(source));
+  findings.push(...lintStructureCompositionCheck(source));
   const objectXml = findObjectXml(path);
   let metaResolved = false;
   if (objectXml) {
@@ -1990,13 +2224,15 @@ function evidenceBlock(findings, modulesSeen, metaResolved, files = [], formsSee
       `verdict=${hitLoopRead ? 'violation:qg:BSL-DB-READ-IN-LOOP' : 'clean'}]`
   );
 
-  // Три правила уровня метода, применимые к любому модулю: метаданные им не нужны, и модуль
-  // без переносов, пакетов и менеджеров записи — проверенный модуль, а не непроверяемый.
+  // Правила уровня метода, применимые к любому модулю: метаданные им не нужны, и модуль без
+  // переносов, пакетов, менеджеров записи и чтений реквизитов — проверенный, а не непроверяемый.
   // Находка-вопрос уходит в след тем же `violation`: снимается ответом в отчёте.
   for (const [scope, id] of [
     ['field-transfer', 'qg:BSL-FIELD-TRANSFER'],
     ['batch-single-result', 'qg:BSL-BATCH-ONE-RESULT'],
     ['record-manager-read', 'qg:BSL-RECORD-MANAGER-READ-ONLY'],
+    ['queried-object-attributes', 'qg:BSL-QUERIED-OBJECT-ATTRIBUTES'],
+    ['own-structure-check', 'qg:BSL-OWN-STRUCTURE-CHECK'],
   ]) {
     const hit = findings.some((f) => f.rule === id);
     recordRun({ scope, tool: 'tools/bsl-lint.mjs', verdict: hit ? 'violation' : 'clean', files });
