@@ -302,7 +302,8 @@ export function shellBefore({ root, cwd, command, key }) {
 
 /**
  * После команды: найти и взвести изменённые файлы 1С.
- * Возвращает { armed: [результаты armGate], blind: [что не удалось посмотреть — впервые за сессию] }.
+ * Возвращает { armed: [результаты armGate], blind: [что не удалось посмотреть — впервые за сессию],
+ * relevant: проект похож на 1С — только тогда адаптеру уместно говорить о гейте }.
  */
 export function shellAfter({ root, cwd, command, key, sessionId, ensureConfig = null, readConfig = null, env = process.env }) {
   const t0 = Date.now();
@@ -317,7 +318,7 @@ export function shellAfter({ root, cwd, command, key, sessionId, ensureConfig = 
   const blind = [];
   const armed = [];
   let speak = looksLike1C(root, env);
-  const done = () => ({ armed, blind: speak ? onlyNew(dir, sessionId, blind) : [] });
+  const done = () => ({ armed, blind: speak ? onlyNew(dir, sessionId, blind) : [], relevant: speak });
 
   if (!rec?.start) {
     blind.push('нет отметки старта команды (хук до команды не отработал)');

@@ -256,6 +256,18 @@ await new Promise((r) => setTimeout(r, 2300));
   check('хук: событие в ответе — PostToolUseFailure', out?.hookSpecificOutput?.hookEventName === 'PostToolUseFailure');
   check('хук: модель получает подсказку о взводе', /изменено командой оболочки/.test(out?.hookSpecificOutput?.additionalContext || ''));
   check('хук: код возврата 0', post.status === 0);
+
+  // Фоновая команда: хук «после» срабатывает при запуске — модель предупреждается, но только в
+  // проекте 1С (у R.failure уже есть состояние гейта); в чужом проекте хук молчит.
+  const bg = (cwd) =>
+    JSON.stringify({ session_id: 'bg-s', tool_use_id: `toolu_bg_${cwd.length}`, cwd, hook_event_name: 'PostToolUse', tool_input: { command: 'python long.py', run_in_background: true } });
+  const bgRun = (cwd, arg) => spawnSync(process.execPath, [hook, arg], { input: bg(cwd), encoding: 'utf8', env: CLEAN_ENV, cwd });
+  bgRun(R.failure, 'pre');
+  const bg1C = bgRun(R.failure, 'post');
+  check('хук: фоновая команда в проекте 1С — предупреждение модели', /в фоне/.test(bg1C.stdout));
+  bgRun(noGit1C, 'pre');
+  const bgOther = bgRun(noGit1C, 'post');
+  check('хук: фоновая команда в чужом проекте — тишина', bgOther.stdout.trim() === '');
 }
 
 // --- Собственный поток гейта через оболочку не взводит гейт заново ---

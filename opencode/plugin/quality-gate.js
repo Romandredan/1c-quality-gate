@@ -103,11 +103,18 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
     // file-URL, а не путь: динамический import() по голому пути на Windows
     // падает с ERR_UNSUPPORTED_ESM_URL_SCHEME, и плагин молча не работал бы вообще.
     core = await import(pathToFileURL(join(packageRoot, 'hooks', 'gate-core.mjs')).href);
-    shell = await import(pathToFileURL(join(packageRoot, 'hooks', 'shell-core.mjs')).href);
     stateDir = await import(pathToFileURL(join(packageRoot, 'tools', 'state-dir.mjs')).href);
     ({ ensureConfig, readConfig } = await import(pathToFileURL(join(packageRoot, 'tools', 'config.mjs')).href));
   } catch {
     return {};
+  }
+
+  // Взвод по командам оболочки — отдельным импортом: его сбой не должен выключать взвод по
+  // правкам и мягкий гейт, которые работают без него. Без модуля ветка bash пропускается.
+  try {
+    shell = await import(pathToFileURL(join(packageRoot, 'hooks', 'shell-core.mjs')).href);
+  } catch {
+    shell = null;
   }
 
   // Карта callID → путь файла: аргументы известны на before, взводим на after,
@@ -210,6 +217,7 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
     'tool.execute.before': async (input, output) => {
       try {
         if (String(input.tool || '').toLowerCase() === 'bash') {
+          if (!shell) return;
           const command = String(output?.args?.command || '');
           const cwd = output?.args?.workdir || root;
           const key = shell.callKey({ id: input.callID, sessionId: input.sessionID, command });
