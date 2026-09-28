@@ -27,9 +27,21 @@ try {
   /* настройка не обязана мешать взводу гейта */
 }
 
-function report({ armed, blind, sessionId, eventName }) {
-  if (!armed.length && !blind.length) return;
+/**
+ * Фоновая команда: хук «после» срабатывает в момент запуска, а запись в файлы идёт позже —
+ * гейт её не увидит. Сказать модели прямо дешевле, чем делать вид, что проверка есть.
+ */
+const BACKGROUND_NOTE =
+  '[гейт качества 1С] Команда запущена в фоне: файлы 1С, которые она изменит, гейт не увидит — ' +
+  'хук срабатывает в момент запуска. Если команда пишет модули или XML метаданных, запусти её не в фоне.';
+
+function report({ armed, blind, relevant, background, sessionId, eventName }) {
+  const warnBackground = background && relevant;
+  if (!armed.length && !blind.length && !warnBackground) return;
   const out = {};
+  if (warnBackground && !armed.length) {
+    out.hookSpecificOutput = { hookEventName: eventName, additionalContext: BACKGROUND_NOTE };
+  }
   if (armed.length) {
     // Вывод обязан быть JSON с hookSpecificOutput: простой текст из PostToolUse до модели
     // не доходит (см. gate-arm.mjs).
@@ -38,7 +50,11 @@ function report({ armed, blind, sessionId, eventName }) {
     if (armed.length > LIST_MAX + 1) rest.push(`… и ещё ${armed.length - LIST_MAX - 1} — полный список: gate.mjs status`);
     out.hookSpecificOutput = {
       hookEventName: eventName,
-      additionalContext: '[изменено командой оболочки]\n' + first + (rest.length ? '\nТакже взведены:\n' + rest.join('\n') : ''),
+      additionalContext:
+        '[изменено командой оболочки]\n' +
+        first +
+        (rest.length ? '\nТакже взведены:\n' + rest.join('\n') : '') +
+        (warnBackground ? '\n\n' + BACKGROUND_NOTE : ''),
     };
     const names = armed.slice(0, 10).map((a) => a.rel).join(', ') + (armed.length > 10 ? ` и ещё ${armed.length - 10}` : '');
     const created = armed.find((a) => a.created)?.created;
@@ -66,7 +82,8 @@ try {
       shellBefore(args);
     } else if (process.argv[2] === 'post') {
       const eventName = payload?.hook_event_name === 'PostToolUseFailure' ? 'PostToolUseFailure' : 'PostToolUse';
-      report({ ...shellAfter({ ...args, sessionId, ensureConfig, readConfig }), sessionId, eventName });
+      const background = payload?.tool_input?.run_in_background === true;
+      report({ ...shellAfter({ ...args, sessionId, ensureConfig, readConfig }), background, sessionId, eventName });
     }
   }
 } catch {
