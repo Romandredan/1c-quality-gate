@@ -24,6 +24,7 @@ import { resolveProjectRoot } from './project-root.mjs';
 import { readConfig, resolve as resolveConfigState, versionSuffix, pluginVersion } from './config.mjs';
 import { removeFileSync } from './fs-safe.mjs';
 import { stateDirSegments } from './state-dir.mjs';
+import { withStateLock } from './state-lock.mjs';
 import { computeProfile, ARCHETYPES, BASE_CHECKLIST } from './profile.mjs';
 import { SCOPES } from './evidence-scopes.mjs';
 import { readCatalog } from './gen-catalog-index.mjs';
@@ -279,6 +280,19 @@ function staleArtifacts(rootDir) {
   return out;
 }
 
+/**
+ * Файлы сессии, правленные после снимка: новые и те, у которых сдвинулись счётчик или время
+ * правки. Отметки проверенного не сравниваются — они не правка, а доказательство по ней.
+ */
+function scopeChanges(before = {}, after = {}) {
+  return Object.entries(after)
+    .filter(([rel, meta]) => {
+      const was = before[rel];
+      return !was || was.edits !== meta.edits || was.lastEdit !== meta.lastEdit;
+    })
+    .map(([rel]) => rel);
+}
+
 function cmdRelease(args) {
   const state = readPending();
   if (!state || Object.keys(state.sessions || {}).length === 0) {
@@ -410,10 +424,39 @@ function cmdRelease(args) {
   // (кириллическое имя проекта — норма для 1С), и без проверки release рапортовал успех,
   // а Stop-хук продолжал блокировать завершение. Успех, не отличимый от невыполнения, —
   // ровно тот класс отказа, против которого написан весь плагин.
-  delete state.sessions[sessionId];
-  if (Object.keys(state.sessions).length) {
-    writeFileSync(pending, JSON.stringify(state, null, 2), 'utf8');
-  } else if (!removeFileSync(pending)) {
+  //
+  // Запись — под замком состояния и по СВЕЖЕМУ прочтению. Проверка следа выше занимает
+  // секунды, и снимок, прочитанный в начале, мог устареть: соседняя сессия взвела свои
+  // файлы, а своя получила правку, которой прогон не видел. Записать старый снимок значило бы
+  // молча потерять первое и снять гейт со второго.
+  const outcome = withStateLock(dir, () => {
+    const fresh = readPending();
+    const current = fresh?.sessions?.[sessionId];
+    if (!current) return { gone: true };
+    const moved = scopeChanges(sessionState.files, current.files);
+    if (moved.length) return { moved };
+    delete fresh.sessions[sessionId];
+    const left = Object.keys(fresh.sessions).length;
+    if (left) writeFileSync(pending, JSON.stringify(fresh, null, 2), 'utf8');
+    else if (!removeFileSync(pending)) return { notRemoved: true };
+    return { rest: left };
+  });
+  if (outcome.gone) {
+    process.stderr.write(
+      `Сессия ${sessionId} исчезла из состояния гейта во время снятия — её снял параллельный вызов ` +
+        'или состояние повреждено. Проверь: node gate.mjs status\n'
+    );
+    return 2;
+  }
+  if (outcome.moved) {
+    process.stderr.write(
+      'Во время снятия сессия получила правки, которых прогон не видел, — гейт НЕ снят:\n' +
+        outcome.moved.map((f) => `  ${f}\n`).join('') +
+        'Прогони проверку по текущему состоянию и повтори снятие.\n'
+    );
+    return 2;
+  }
+  if (outcome.notRemoved) {
     process.stderr.write(
       'Маркер гейта не удалился — гейт НЕ снят:\n' +
         `  ${pending}\n` +
@@ -442,16 +485,7 @@ function cmdRelease(args) {
     if (isInside(root(), src) && !isInside(dir, src)) strayReport = relative(root(), src).split(sep).join('/');
   }
 
-  let doneState = { version: 2, sessions: {} };
-  if (existsSync(done)) {
-    try {
-      const prev = JSON.parse(readFileSync(done, 'utf8'));
-      if (prev?.sessions) doneState = prev;
-    } catch {
-      /* повреждённый журнал снятий перезаписываем */
-    }
-  }
-  doneState.sessions[sessionId] = {
+  const record = {
     releasedAt: new Date().toISOString(),
     armedAt: sessionState.armedAt,
     files: sessionState.files,
@@ -470,10 +504,24 @@ function cmdRelease(args) {
       })),
     ],
   };
-  writeFileSync(done, JSON.stringify(doneState, null, 2), 'utf8');
+  // Журнал снятий пишут и взвод (стирает запись своей сессии), и снятия соседних сессий —
+  // тоже чтение-изменение-запись, тоже под замком.
+  withStateLock(dir, () => {
+    let doneState = { version: 2, sessions: {} };
+    if (existsSync(done)) {
+      try {
+        const prev = JSON.parse(readFileSync(done, 'utf8'));
+        if (prev?.sessions) doneState = prev;
+      } catch {
+        /* повреждённый журнал снятий перезаписываем */
+      }
+    }
+    doneState.sessions[sessionId] = record;
+    writeFileSync(done, JSON.stringify(doneState, null, 2), 'utf8');
+  });
 
   const count = Object.keys(sessionState.files || {}).length;
-  const rest = Object.keys(state.sessions).length;
+  const rest = outcome.rest;
   if (warnings.length) {
     process.stdout.write(`Гейт снят, но след неполон (${warnings.length}) — это записано в журнал снятий:\n`);
     for (const w of warnings) {
@@ -547,30 +595,35 @@ function cmdVerify(args) {
     return 2;
   }
 
-  const session = state.sessions[sessionId];
   const now = new Date().toISOString();
-  let marked = 0;
 
-  for (const rel of Object.keys(session.files || {})) {
-    if (!files.some((f) => rel.endsWith(String(f).replace(/\\/g, '/')))) continue;
-    const entry = session.files[rel];
-    entry.verified = entry.verified || {};
-    entry.verified[layer] = now;
-    marked++;
-  }
+  // Отметка ставится в свежем прочтении под замком: снимок из начала команды мог устареть,
+  // и его запись затёрла бы взвод, случившийся за это время.
+  const { marked, listing } = withStateLock(paths().dir, () => {
+    const fresh = readPending();
+    const session = fresh?.sessions?.[sessionId];
+    if (!session) return { marked: 0, listing: [] };
+    let n = 0;
+    for (const rel of Object.keys(session.files || {})) {
+      if (!files.some((f) => rel.endsWith(String(f).replace(/\\/g, '/')))) continue;
+      const entry = session.files[rel];
+      entry.verified = entry.verified || {};
+      entry.verified[layer] = now;
+      n++;
+    }
+    if (n) writeFileSync(paths().pending, JSON.stringify(fresh, null, 2), 'utf8');
+    return { marked: n, listing: Object.keys(session.files || {}) };
+  });
 
   if (marked === 0) {
     process.stdout.write(
       `В охвате сессии ${sessionId} нет ни одного из указанных файлов. Её состав:\n` +
-        Object.keys(session.files || {})
-          .map((f) => `  ${f}`)
-          .join('\n') +
+        listing.map((f) => `  ${f}`).join('\n') +
         '\n'
     );
     return 1;
   }
 
-  writeFileSync(paths().pending, JSON.stringify(state, null, 2), 'utf8');
   process.stdout.write(`Отмечено проверенным на слое ${layer}: ${marked} файл(ов).\n`);
   process.stdout.write('Отметка снимается автоматически при следующей правке файла.\n');
   return 0;

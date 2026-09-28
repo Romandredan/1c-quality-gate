@@ -1,9 +1,10 @@
 /**
  * Ядро механики гейта: классификация файлов, взвод, чтение состояния, тексты сообщений.
  *
- * Единый источник для трёх потребителей:
+ * Единый источник для четырёх потребителей:
  *   - hooks/gate-arm.mjs   — PostToolUse-хук Claude Code;
  *   - hooks/gate-check.mjs — Stop-хук Claude Code;
+ *   - hooks/shell-core.mjs — взвод по правкам из оболочки (хук gate-shell.mjs и плагин OpenCode);
  *   - opencode/plugin/quality-gate.js — плагин OpenCode (tool.execute.after + session.idle).
  *
  * Вынесено сюда, чтобы три копии classifyFile и записи состояния не разъезжались при
@@ -19,9 +20,18 @@ import { join, relative, isAbsolute, sep } from 'node:path';
 import { stateDirSegments } from '../tools/state-dir.mjs';
 import { removeFileSync } from '../tools/fs-safe.mjs';
 import { matchesAny } from '../tools/path-match.mjs';
+import { withStateLock } from '../tools/state-lock.mjs';
 
 export const PENDING = 'qg-pending.json';
 export const DONE = 'qg-done.json';
+
+/**
+ * Расширения, которые classifyFile может признать файлом 1С. Нужны тем, кто ищет кандидатов
+ * сам, а не получает путь от инструмента правки (hooks/shell-core.mjs): список лишь сужает
+ * поиск, решение «файл 1С или нет» остаётся за classifyFile. Новое расширение в classifyFile
+ * без записи здесь — правки таких файлов из оболочки гейт не увидит; сверяется тестом.
+ */
+export const FILE_EXTENSIONS = ['bsl', 'os', 'xml', 'mdo', 'form'];
 
 /**
  * Типовые каталоги объектов метаданных в выгрузках 1С (нижний регистр).
@@ -181,64 +191,70 @@ export function armGate({ root, filePath, sessionId, ensureConfig = null, readCo
   // Пути автотестов (`tests.paths`) гейт не взводит вовсе. Решение принимается здесь, в
   // единственной точке взвода: всё, что дальше, работает от списка файлов сессии.
   if (matchesAny(rel, testPathsOf(readConfig, root))) {
-    unarm({ pendingPath, sessionId, rel });
+    // Снятие тоже пишет состояние — под тем же замком, иначе затирает параллельный взвод.
+    if (existsSync(stateDir)) withStateLock(stateDir, () => unarm({ pendingPath, sessionId, rel }));
     return null;
   }
 
   mkdirSync(stateDir, { recursive: true });
 
-  // Состояние разделено по сессиям. Один маркер на проект ломается при параллельной
-  // работе: сессия, правившая свои файлы, упирается в гейт, взведённый чужой сессией,
-  // и либо снимает чужой маркер, либо не может завершиться. Каждая сессия отвечает
-  // только за свои правки.
-  let state = { version: 2, sessions: {} };
-  if (existsSync(pendingPath)) {
-    try {
-      const prev = JSON.parse(readFileSync(pendingPath, 'utf8'));
-      if (prev?.sessions) state = prev;
-      else if (prev?.files) state.sessions['legacy'] = { armedAt: prev.armedAt, files: prev.files };
-    } catch {
-      /* повреждённый маркер перезаписываем свежим */
+  // Чтение-изменение-запись состояния — под замком: параллельные хуки взвода иначе теряют
+  // записи друг друга (побеждает последний пишущий). Подробности — tools/state-lock.mjs.
+  const outside = withStateLock(stateDir, () => {
+    // Состояние разделено по сессиям. Один маркер на проект ломается при параллельной
+    // работе: сессия, правившая свои файлы, упирается в гейт, взведённый чужой сессией,
+    // и либо снимает чужой маркер, либо не может завершиться. Каждая сессия отвечает
+    // только за свои правки.
+    let state = { version: 2, sessions: {} };
+    if (existsSync(pendingPath)) {
+      try {
+        const prev = JSON.parse(readFileSync(pendingPath, 'utf8'));
+        if (prev?.sessions) state = prev;
+        else if (prev?.files) state.sessions['legacy'] = { armedAt: prev.armedAt, files: prev.files };
+      } catch {
+        /* повреждённый маркер перезаписываем свежим */
+      }
     }
-  }
 
-  const now = new Date().toISOString();
-  const session = state.sessions[sessionId] || { armedAt: now, files: {} };
-  // Файл вне корня хранится под абсолютным ключом (см. toProjectRelative). Взвод обязан
-  // сказать об этом наружу: часть контуров по чужому файлу не работает, и узнать это
-  // модель должна сейчас, а не при отклонении следа в конце прогона.
-  const outside = isAbsolute(rel);
-  const entry = session.files[rel] || { kind, edits: 0 };
-  entry.kind = kind;
-  entry.edits += 1;
-  entry.lastEdit = now;
+    const now = new Date().toISOString();
+    const session = state.sessions[sessionId] || { armedAt: now, files: {} };
+    const entry = session.files[rel] || { kind, edits: 0 };
+    entry.kind = kind;
+    entry.edits += 1;
+    entry.lastEdit = now;
 
-  // Правка обесценивает все доказательства по этому файлу. Гейт — требование к ТЕКУЩЕМУ
-  // состоянию артефакта, а не отметка «инструмент когда-то запускался»: проверки, сделанные
-  // до правки, относятся к другому содержимому и переиспользованы быть не могут.
-  delete entry.verified;
+    // Правка обесценивает все доказательства по этому файлу. Гейт — требование к ТЕКУЩЕМУ
+    // состоянию артефакта, а не отметка «инструмент когда-то запускался»: проверки, сделанные
+    // до правки, относятся к другому содержимому и переиспользованы быть не могут.
+    delete entry.verified;
 
-  session.files[rel] = entry;
-  session.updatedAt = now;
-  state.sessions[sessionId] = session;
+    session.files[rel] = entry;
+    session.updatedAt = now;
+    state.sessions[sessionId] = session;
 
-  writeFileSync(pendingPath, JSON.stringify(state, null, 2), 'utf8');
+    writeFileSync(pendingPath, JSON.stringify(state, null, 2), 'utf8');
 
-  // Новая правка обесценивает прошлый прогон ЭТОЙ сессии; чужие отметки не трогаем.
-  if (existsSync(donePath)) {
-    try {
-      const done = JSON.parse(readFileSync(donePath, 'utf8'));
-      if (done?.sessions) {
-        delete done.sessions[sessionId];
-        if (Object.keys(done.sessions).length) writeFileSync(donePath, JSON.stringify(done, null, 2), 'utf8');
-        else removeFileSync(donePath);
-      } else {
+    // Новая правка обесценивает прошлый прогон ЭТОЙ сессии; чужие отметки не трогаем.
+    if (existsSync(donePath)) {
+      try {
+        const done = JSON.parse(readFileSync(donePath, 'utf8'));
+        if (done?.sessions) {
+          delete done.sessions[sessionId];
+          if (Object.keys(done.sessions).length) writeFileSync(donePath, JSON.stringify(done, null, 2), 'utf8');
+          else removeFileSync(donePath);
+        } else {
+          removeFileSync(donePath);
+        }
+      } catch {
         removeFileSync(donePath);
       }
-    } catch {
-      removeFileSync(donePath);
     }
-  }
+
+    // Файл вне корня хранится под абсолютным ключом (см. toProjectRelative). Взвод обязан
+    // сказать об этом наружу: часть контуров по чужому файлу не работает, и узнать это
+    // модель должна сейчас, а не при отклонении следа в конце прогона.
+    return isAbsolute(rel);
+  });
 
   // Настройка проекта создаётся здесь и только здесь: это единственное место, где уже
   // известно, что проект на 1С. Заводить её при старте сессии значило бы сорить файлом в

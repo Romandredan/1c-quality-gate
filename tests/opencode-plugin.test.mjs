@@ -255,6 +255,35 @@ check('ошибка клиента гасится', survived);
   check('разбор: свёрнутый блок собирается целиком', folded?.data.description === 'первая\nвторая');
 }
 
+// Команда bash, записавшая модуль, взводит гейт: у неё нет файла в аргументах, изменения
+// находит ядро hooks/shell-core.mjs по снимку до и после — как хук gate-shell.mjs.
+{
+  const shRoot = makeProject();
+  const shPlugin = await makePlugin(shRoot, makeClient());
+  const target = join(shRoot, 'CommonModules', 'Генератор', 'Module.bsl');
+  const shOut = { output: 'готово' };
+  await shPlugin['tool.execute.before']({ callID: 'b1', sessionID: 'sb', tool: 'bash' }, { args: { command: 'python gen.py' } });
+  mkdirSync(join(shRoot, 'CommonModules', 'Генератор'), { recursive: true });
+  writeFileSync(target, 'Процедура Сгенерировано() КонецПроцедуры\n', 'utf8');
+  await shPlugin['tool.execute.after']({ callID: 'b1', sessionID: 'sb', tool: 'bash' }, shOut);
+  const shPending = join(shRoot, '.opencode', '.state', 'qg-pending.json');
+  const shFiles = existsSync(shPending) ? Object.keys(JSON.parse(readFileSync(shPending, 'utf8')).sessions?.sb?.files || {}) : [];
+  check('bash: записанный модуль взводит гейт в .opencode/.state', shFiles.includes('CommonModules/Генератор/Module.bsl'));
+  check('bash: подсказка о взводе в результате команды', shOut.output.startsWith('готово') && shOut.output.includes('изменено командой оболочки'));
+  check('bash: отметки старта не сорят в проекте',
+    !existsSync(join(shRoot, '.claude', '.state', 'qg-shell')) && !existsSync(join(shRoot, '.opencode', '.state', 'qg-shell')));
+
+  // Отдельный корень: модуль, записанный за секунду до команды, попал бы в её окно времени.
+  const roRoot = makeProject();
+  const roPlugin = await makePlugin(roRoot, makeClient());
+  const readOut = { output: 'список' };
+  await roPlugin['tool.execute.before']({ callID: 'b2', sessionID: 'sb2', tool: 'bash' }, { args: { command: 'ls' } });
+  await roPlugin['tool.execute.after']({ callID: 'b2', sessionID: 'sb2', tool: 'bash' }, readOut);
+  check('bash: команда без записи ничего не дописывает', readOut.output === 'список');
+  rmSync(shRoot, { recursive: true, force: true });
+  rmSync(roRoot, { recursive: true, force: true });
+}
+
 rmSync(root, { recursive: true, force: true });
 
 console.log(`\n${passed} пройдено, ${failed} провалено`);

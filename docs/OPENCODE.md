@@ -57,6 +57,7 @@ Claude Code и OpenCode он побайтово один, а своя копия
 | Аспект | Claude Code | OpenCode |
 |---|---|---|
 | Взвод гейта | хук PostToolUse (matcher Write/Edit/…) | `tool.execute.before/after` (write/edit/multiedit/patch/notebookedit) |
+| Взвод по команде оболочки | хуки `gate-shell.mjs` на `Bash` и `PowerShell`: до команды, после и после упавшей | `tool.execute.before/after` на `bash`; ядро общее — `hooks/shell-core.mjs` |
 | Подсказка о взводе | `additionalContext` хука | дописывается в результат инструмента |
 | Контроль завершения | Stop-хук отказывает в завершении (exit 2) — **жёсткий гейт** | `session.idle`: плагин отправляет агенту сообщение и возвращает его к работе — **мягкий гейт** |
 | Состояние | `.claude/.state/` | `.opencode/.state/` (через `QG_STATE_DIR`) |
