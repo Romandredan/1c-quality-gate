@@ -7774,7 +7774,7 @@ section('Исключение тестовых модулей — сопоста
 // ---------------------------------------------------------------------------
 // Изолированные наборы тестов — отдельными процессами: у них собственные счётчики
 // и временные каталоги, а их падение обязано быть видно в общем итоге CI.
-for (const suite of ['tests/gate-core.test.mjs', 'tests/opencode-plugin.test.mjs']) {
+for (const suite of ['tests/gate-core.test.mjs', 'tests/opencode-plugin.test.mjs', 'tests/shell-core.test.mjs']) {
   const res = spawnSync(process.execPath, [join(ROOT, ...suite.split('/'))], {
     encoding: 'utf8',
     env: { ...process.env },

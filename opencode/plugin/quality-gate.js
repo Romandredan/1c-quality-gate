@@ -4,8 +4,9 @@
  * Адаптация двух хуков Claude Code (gate-arm/gate-check) на плагинный API OpenCode:
  *
  *   - "tool.execute.before/after" — взвод гейта при правке .bsl/.os/XML метаданных
- *     (аналог PostToolUse). Подсказка дописывается в результат инструмента, чтобы
- *     модель увидела взвод немедленно, а не при попытке завершить работу.
+ *     инструментом правки и командой `bash` (аналог PostToolUse и хука gate-shell.mjs).
+ *     Подсказка дописывается в результат инструмента, чтобы модель увидела взвод
+ *     немедленно, а не при попытке завершить работу.
  *   - "event: session.idle" — возврат агента к работе, пока гейт не снят
  *     (аналог Stop-хука).
  *   - "config" — регистрация состава пакета в живой конфигурации: каталог навыков,
@@ -94,6 +95,7 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
   if (!packageRoot) return {};
 
   let core = null;
+  let shell = null;
   let stateDir = null;
   let ensureConfig = null;
   let readConfig = null;
@@ -101,6 +103,7 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
     // file-URL, а не путь: динамический import() по голому пути на Windows
     // падает с ERR_UNSUPPORTED_ESM_URL_SCHEME, и плагин молча не работал бы вообще.
     core = await import(pathToFileURL(join(packageRoot, 'hooks', 'gate-core.mjs')).href);
+    shell = await import(pathToFileURL(join(packageRoot, 'hooks', 'shell-core.mjs')).href);
     stateDir = await import(pathToFileURL(join(packageRoot, 'tools', 'state-dir.mjs')).href);
     ({ ensureConfig, readConfig } = await import(pathToFileURL(join(packageRoot, 'tools', 'config.mjs')).href));
   } catch {
@@ -110,6 +113,10 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
   // Карта callID → путь файла: аргументы известны на before, взводим на after,
   // когда правка фактически состоялась.
   const pendingCalls = new Map();
+
+  // Карта callID → команда оболочки. Файла у команды нет: что она изменила, ядро
+  // (hooks/shell-core.mjs) выясняет по снимку до и после, как хук Claude Code gate-shell.mjs.
+  const shellCalls = new Map();
 
   // Защита от бесконечного цикла возвратов. Счётчик — ПО СЕССИИ: sessionId →
   // { fingerprint, count }. Глобальный лимит (как у первой редакции, ключ = сессия +
@@ -202,6 +209,14 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
 
     'tool.execute.before': async (input, output) => {
       try {
+        if (String(input.tool || '').toLowerCase() === 'bash') {
+          const command = String(output?.args?.command || '');
+          const cwd = output?.args?.workdir || root;
+          const key = shell.callKey({ id: input.callID, sessionId: input.sessionID, command });
+          shellCalls.set(input.callID, { command, cwd, key });
+          shell.shellBefore({ root, cwd, command, key });
+          return;
+        }
         const file = fileOfArgs(output?.args);
         if (file) pendingCalls.set(input.callID, file);
       } catch {
@@ -211,6 +226,21 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
 
     'tool.execute.after': async (input, output) => {
       try {
+        const call = shellCalls.get(input.callID);
+        if (call) {
+          shellCalls.delete(input.callID);
+          const sessionId = String(input.sessionID || 'unknown-session');
+          const { armed, blind } = shell.shellAfter({ root, ...call, sessionId, ensureConfig, readConfig, env: stateEnv });
+          const notes = [];
+          if (armed.length) {
+            notes.push('[изменено командой оболочки]\n' + core.gateHint({ ...armed[0], sessionId, packageRoot, mode: 'opencode' }));
+            if (armed.length > 1) notes.push('Также взведены:\n' + armed.slice(1).map((a) => `Файл: ${a.rel}`).join('\n'));
+          }
+          if (blind.length) notes.push('Гейт не смог посмотреть правки оболочки: ' + blind.join('; '));
+          if (notes.length && output && typeof output.output === 'string') output.output += '\n\n' + notes.join('\n');
+          return;
+        }
+
         const file = pendingCalls.get(input.callID) || fileOfArgs(output?.args);
         pendingCalls.delete(input.callID);
         if (!file) return;
