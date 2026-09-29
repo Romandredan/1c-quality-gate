@@ -183,7 +183,7 @@ BSL (2):
 
 ```json
 {
-  "plugin": ["1c-quality-gate@git+https://github.com/Romandredan/1c-quality-gate.git#v3.13.1"]
+  "plugin": ["1c-quality-gate@git+https://github.com/Romandredan/1c-quality-gate.git#v3.14.0"]
 }
 ```
 
@@ -654,7 +654,7 @@ node "$QG/tools/config.mjs" show
 
 ```json
 {
-  "analyzer": { "engine": "bsl-analyzer", "version": "0.2.79", "required": false },
+  "analyzer": { "engine": "bsl-analyzer", "version": "0.2.81", "required": false },
   "volume": { "c1MaxLines": 40, "c1MaxFiles": 1 },
   "complexity": { "maxNesting": 4, "maxMethodLines": 120, "maxParams": 7 },
   "archetypes": {
