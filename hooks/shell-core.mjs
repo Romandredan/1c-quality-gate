@@ -27,10 +27,19 @@
  *     но это чужой или уже проверенный код;
  *   - каталог состояния гейта.
  *
+ * Чья правка. Время изменения говорит, что файл записан, пока шла команда, но не говорит кем.
+ *   - Файл, чьё текущее содержимое записал инструмент правки другой сессии, не взводится: у той
+ *     сессии есть запись с тем же отпечатком (размер и время изменения), и это свидетельство
+ *     точное. Живой случай: параллельная сессия записала модуль во время 30-секундной сборки.
+ *   - Всё остальное взводится с источником shell: такой файл могли записать команда другой
+ *     сессии или процесс вне сессий (пользователь, выгрузка из конфигуратора), и различить их
+ *     по времени нельзя. Выход — отказ от файла с причиной, `gate.mjs disown`; молчаливый пропуск
+ *     оставил бы без проверки и то, что команда записала сама.
+ *
  * Границы:
  *   - файл вне затронутых каталогов (путь вычислен внутри скрипта и лежит в чужом дереве) не виден;
  *   - вложенный репозиторий или submodule внутри найденного git-дерева не просматривается;
- *   - правка другого процесса в том же окне времени приписывается этой сессии;
+ *   - правка процесса вне сессий в том же окне времени взводится у этой сессии — снимается отказом;
  *   - rebase и cherry-pick создают коммиты во время команды — их файлы взводятся; разрешение
  *     конфликта в коммите слияния не видно: коммиты слияния пропускаются;
  *   - касание файла без изменения содержимого взводит гейт — ошибка в громкую сторону;
@@ -46,7 +55,17 @@ import { join, dirname, resolve, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { armGate, classifyFile, FILE_EXTENSIONS, PENDING } from './gate-core.mjs';
+import {
+  armGate,
+  classifyFile,
+  fileStamp,
+  sameStamp,
+  pathKey,
+  foreignToolClaims,
+  toProjectRelative,
+  FILE_EXTENSIONS,
+  PENDING,
+} from './gate-core.mjs';
 import { stateDirSegments } from '../tools/state-dir.mjs';
 
 const SLACK_MS = 2000; // грубая точность времени на части файловых систем (FAT — 2 с)
@@ -303,6 +322,7 @@ export function shellBefore({ root, cwd, command, key }) {
 /**
  * После команды: найти и взвести изменённые файлы 1С.
  * Возвращает { armed: [результаты armGate], blind: [что не удалось посмотреть — впервые за сессию],
+ * foreign: [{ rel, owner } — изменённые в окне команды файлы, записанные другой сессией],
  * relevant: проект похож на 1С — только тогда адаптеру уместно говорить о гейте }.
  */
 export function shellAfter({ root, cwd, command, key, sessionId, ensureConfig = null, readConfig = null, env = process.env }) {
@@ -317,8 +337,9 @@ export function shellAfter({ root, cwd, command, key, sessionId, ensureConfig = 
   }
   const blind = [];
   const armed = [];
+  const foreign = [];
   let speak = looksLike1C(root, env);
-  const done = () => ({ armed, blind: speak ? onlyNew(dir, sessionId, blind) : [], relevant: speak });
+  const done = () => ({ armed, foreign, blind: speak ? onlyNew(dir, sessionId, blind) : [], relevant: speak });
 
   if (!rec?.start) {
     blind.push('нет отметки старта команды (хук до команды не отработал)');
@@ -327,6 +348,17 @@ export function shellAfter({ root, cwd, command, key, sessionId, ensureConfig = 
   const start = rec.start;
   const stateDir = join(root, ...stateDirSegments(env));
   const seen = new Set();
+  // Записи других сессий читаются один раз, при первом кандидате: команда без правок их не
+  // читает вовсе. Правка, записанная после чтения, попадёт сюда по времени — её вернёт
+  // владельцу его собственный взвод (armGate, разбор гонки хуков).
+  let claims = null;
+  const ownerOf = (rel, path) => {
+    claims = claims || foreignToolClaims({ root, sessionId, env });
+    const theirs = claims.get(pathKey(rel));
+    if (!theirs) return null;
+    const stamp = fileStamp(path);
+    return theirs.find((c) => sameStamp(c.stamp, stamp))?.owner || null;
+  };
   // Взвод — сразу по мере нахождения: хук, прерванный по таймауту, не должен унести найденное.
   let outOfTime = false;
   const armAll = (list) => {
@@ -340,7 +372,14 @@ export function shellAfter({ root, cwd, command, key, sessionId, ensureConfig = 
       if (seen.has(k)) continue;
       seen.add(k);
       if (inside(stateDir, f) || !changedSince(f, start)) continue;
-      const r = armGate({ root, filePath: resolve(f), sessionId, ensureConfig, readConfig, env });
+      const path = resolve(f);
+      const rel = toProjectRelative(root, path);
+      const owner = ownerOf(rel, path);
+      if (owner) {
+        foreign.push({ rel, owner });
+        continue;
+      }
+      const r = armGate({ root, filePath: path, sessionId, source: 'shell', ensureConfig, readConfig, env });
       if (r) armed.push(r);
     }
   };

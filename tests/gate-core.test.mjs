@@ -202,6 +202,41 @@ check('подсказка взвода предупреждает об опис�
 const bmF = blockMessage({ sessionId: 's1', files, foreign: 3, packageRoot: root, mode: 'opencode', repeated: 0 });
 check('чужие правки: предупреждение не трогать', bmF.includes('другой сессии (3)') && bmF.includes('НЕ трогай'));
 
+// --- Источник взвода: инструмент правки знает файл точно, оболочка — по времени изменения ---
+// Сообщение блокировки обязано отделять одно от другого: файл, взведённый по времени, могла
+// записать не команда сессии, и выход для него — отказ с причиной, а не проверка чужой работы.
+{
+  const mixed = [
+    ['a.bsl', { kind: 'bsl', source: 'tool' }],
+    ['src/cfe/Р/Catalogs/Т.xml', { kind: 'metadata-xml', source: 'shell' }],
+  ];
+  for (const mode of ['claude', 'opencode']) {
+    const bm = blockMessage({ sessionId: 's1', files: mixed, packageRoot: root, mode });
+    check(`${mode}: файлы, взведённые по времени, названы отдельно`, /по времени изменения \(1\)/.test(bm) && bm.includes('src/cfe/Р/Catalogs/Т.xml'));
+    check(`${mode}: назван отказ от файла с причиной`, /gate\.mjs" disown --session s1 --reason/.test(bm));
+  }
+  check('без файлов, взведённых по времени, отказ не предлагается', !/disown/.test(bmC));
+
+  const sr = mkdtempSync(join(tmpdir(), 'qg-core-source-'));
+  const f = join(sr, 'src', 'CommonModules', 'М', 'Module.bsl');
+  mkdirSync(join(sr, 'src', 'CommonModules', 'М'), { recursive: true });
+  writeFileSync(f, 'Процедура Т() КонецПроцедуры\n', 'utf8');
+  const entry = () => readPendingState(sr, {}).sessions.s.files['src/CommonModules/М/Module.bsl'];
+
+  armGate({ root: sr, filePath: f, sessionId: 's', source: 'shell', env: {} });
+  check('взвод из оболочки: источник shell', entry().source === 'shell');
+  armGate({ root: sr, filePath: f, sessionId: 's', env: {} });
+  check('правка инструментом после оболочки: источник tool', entry().source === 'tool');
+  armGate({ root: sr, filePath: f, sessionId: 's', source: 'shell', env: {} });
+  check('оболочка после инструмента источник не понижает', entry().source === 'tool');
+  check('отпечаток — размер и время изменения файла', entry().stamp?.size > 0 && Number.isFinite(entry().stamp?.mtimeMs));
+
+  // Точное свидетельство у двух сессий сразу: обе правили файл инструментом, ни одна не теряет его.
+  armGate({ root: sr, filePath: f, sessionId: 's2', env: {} });
+  check('правка инструментом не забирает файл у сессии с источником tool', Boolean(readPendingState(sr, {}).sessions.s?.files));
+  rmSync(sr, { recursive: true, force: true });
+}
+
 // --- armGate: исключение путей tests.paths ---
 // Тестовый файл гейт не взводит вовсе: всё после взвода (Stop-хук, план, снятие) работает
 // от списка файлов сессии, и исключённого файла там быть не должно.

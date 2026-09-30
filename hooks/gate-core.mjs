@@ -15,8 +15,8 @@
  * поэтому обещать «завершение заблокировано» нельзя.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { join, relative, isAbsolute, sep } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
+import { join, relative, resolve, isAbsolute, sep } from 'node:path';
 import { stateDirSegments } from '../tools/state-dir.mjs';
 import { removeFileSync } from '../tools/fs-safe.mjs';
 import { matchesAny } from '../tools/path-match.mjs';
@@ -136,6 +136,105 @@ export function readPendingState(root, env = process.env) {
 }
 
 /**
+ * Отпечаток файла в момент взвода: размер и время изменения. Нужен, чтобы отличить «это
+ * содержимое записала другая сессия» от «файл изменился, пока шла моя команда»: взвод по
+ * правкам из оболочки знает только время, а инструмент правки — файл и сессию точно.
+ * Совпадение отпечатка означает одну и ту же запись файла; хеш содержимого для этого не
+ * нужен, а на дереве после выгрузки стоил бы чтения тысяч файлов на каждую команду.
+ */
+export function fileStamp(path) {
+  try {
+    const s = statSync(path);
+    return s.isFile() ? { size: s.size, mtimeMs: s.mtimeMs } : null;
+  } catch {
+    return null;
+  }
+}
+
+export function sameStamp(a, b) {
+  return Boolean(a && b) && a.size === b.size && Math.round(a.mtimeMs) === Math.round(b.mtimeMs);
+}
+
+/**
+ * Ключ сравнения путей состояния. Инструмент правки отдаёт путь так, как его набрала модель, а
+ * `git status` — так, как он записан на диске; в Windows это один и тот же файл.
+ */
+export function pathKey(rel) {
+  const p = String(rel).replace(/\\/g, '/');
+  return process.platform === 'win32' ? p.toLowerCase() : p;
+}
+
+function readSessions(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))?.sessions || {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Записи других сессий, сделанные инструментом правки: путь → [{ owner, stamp }].
+ * Берутся и взведённые сессии, и журнал снятий: владелец мог снять гейт раньше, чем
+ * закончилась чужая команда, в окно которой попала его правка.
+ *
+ * Записи с источником shell сюда не входят намеренно. Две команды разных сессий с
+ * пересекающимися окнами видят одно и то же изменение, и время не говорит, чья команда писала:
+ * отдать файл первой закончившейся значило бы угадать. Такой файл взводится у обеих, выход —
+ * явный отказ с причиной (`gate.mjs disown`).
+ */
+export function foreignToolClaims({ root, sessionId, env = process.env }) {
+  const stateDir = join(root, ...stateDirSegments(env));
+  const claims = new Map();
+  for (const name of [PENDING, DONE]) {
+    const path = join(stateDir, name);
+    if (!existsSync(path)) continue;
+    for (const [owner, session] of Object.entries(readSessions(path))) {
+      if (owner === sessionId) continue;
+      for (const [rel, entry] of Object.entries(session?.files || {})) {
+        if (entry?.source !== 'tool' || !entry.stamp) continue;
+        const key = pathKey(rel);
+        if (!claims.has(key)) claims.set(key, []);
+        claims.get(key).push({ owner, stamp: entry.stamp });
+      }
+    }
+  }
+  return claims;
+}
+
+/**
+ * Убирает сессию, оставшуюся без файлов. Отказы от файлов (`disowned`) уходят в журнал снятий:
+ * пропуск проверки обязан оставлять след и тогда, когда сессии в состоянии больше нет.
+ * Вызывается под замком состояния.
+ */
+export function retireEmptySession({ state, sessionId, donePath, now = new Date().toISOString() }) {
+  const session = state?.sessions?.[sessionId];
+  if (!session || Object.keys(session.files || {}).length) return false;
+  delete state.sessions[sessionId];
+  if (!session.disowned?.length) return true;
+  let done = { version: 2, sessions: {} };
+  if (existsSync(donePath)) {
+    try {
+      const prev = JSON.parse(readFileSync(donePath, 'utf8'));
+      if (prev?.sessions) done = prev;
+    } catch {
+      /* повреждённый журнал снятий перезаписываем */
+    }
+  }
+  done.sessions[sessionId] = {
+    releasedAt: now,
+    armedAt: session.armedAt,
+    files: {},
+    mode: 'disowned',
+    evidenceFile: null,
+    class: null,
+    reason: null,
+    disowned: session.disowned,
+  };
+  writeFileSync(donePath, JSON.stringify(done, null, 2), 'utf8');
+  return true;
+}
+
+/**
  * Пути автотестов из настройки. Любая ошибка — пустой список: хук качества не имеет права
  * ломать работу, а неверную настройку показывает `gate.mjs plan` отказом.
  */
@@ -153,14 +252,14 @@ function testPathsOf(readConfig, root) {
  * Снимает с сессии файл, взведённый до того, как его путь попал в `tests.paths`.
  * Опустевшая сессия удаляется: Stop-хук не должен держать работу из-за пустого набора.
  */
-function unarm({ pendingPath, sessionId, rel }) {
+function unarm({ pendingPath, donePath, sessionId, rel }) {
   if (!existsSync(pendingPath)) return;
   try {
     const state = JSON.parse(readFileSync(pendingPath, 'utf8'));
     const session = state?.sessions?.[sessionId];
     if (!session?.files?.[rel]) return;
     delete session.files[rel];
-    if (!Object.keys(session.files).length) delete state.sessions[sessionId];
+    retireEmptySession({ state, sessionId, donePath });
     writeFileSync(pendingPath, JSON.stringify(state, null, 2), 'utf8');
   } catch {
     /* повреждённое состояние перепишет следующий взвод рабочего файла */
@@ -178,8 +277,21 @@ function unarm({ pendingPath, sessionId, rel }) {
  * ensureConfig — функция из tools/config.mjs, передаётся снаружи, чтобы ядро не тянуло
  * конфигурацию в окружениях, где она недоступна. readConfig — оттуда же, по той же причине:
  * из неё берутся пути автотестов `tests.paths`, правки по которым гейт не взводит.
+ *
+ * source — откуда известно о правке. 'tool': инструмент правки назвал файл и сессию сам,
+ * свидетельство точное. 'shell': файл изменился, пока шла команда оболочки, — кто его записал,
+ * хук не видит. Точное свидетельство не понижается: файл, который сессия хоть раз правила
+ * инструментом, остаётся её файлом, и отказаться от него (`gate.mjs disown`) нельзя.
  */
-export function armGate({ root, filePath, sessionId, ensureConfig = null, readConfig = null, env = process.env }) {
+export function armGate({
+  root,
+  filePath,
+  sessionId,
+  source = 'tool',
+  ensureConfig = null,
+  readConfig = null,
+  env = process.env,
+}) {
   const kind = classifyFile(filePath);
   if (!kind) return null;
 
@@ -192,11 +304,13 @@ export function armGate({ root, filePath, sessionId, ensureConfig = null, readCo
   // единственной точке взвода: всё, что дальше, работает от списка файлов сессии.
   if (matchesAny(rel, testPathsOf(readConfig, root))) {
     // Снятие тоже пишет состояние — под тем же замком, иначе затирает параллельный взвод.
-    if (existsSync(stateDir)) withStateLock(stateDir, () => unarm({ pendingPath, sessionId, rel }));
+    if (existsSync(stateDir)) withStateLock(stateDir, () => unarm({ pendingPath, donePath, sessionId, rel }));
     return null;
   }
 
   mkdirSync(stateDir, { recursive: true });
+  const stamp = fileStamp(isAbsolute(filePath) ? filePath : resolve(root, filePath));
+  const reclaimed = [];
 
   // Чтение-изменение-запись состояния — под замком: параллельные хуки взвода иначе теряют
   // записи друг друга (побеждает последний пишущий). Подробности — tools/state-lock.mjs.
@@ -218,10 +332,16 @@ export function armGate({ root, filePath, sessionId, ensureConfig = null, readCo
 
     const now = new Date().toISOString();
     const session = state.sessions[sessionId] || { armedAt: now, files: {} };
-    const entry = session.files[rel] || { kind, edits: 0 };
+    const known = session.files[rel];
+    const entry = known || { kind, edits: 0 };
     entry.kind = kind;
     entry.edits += 1;
     entry.lastEdit = now;
+    // Запись без источника сделана версией плагина, которая его не вела, — считается точной:
+    // объявить её оценочной значило бы разрешить отказ от файла, который сессия правила сама.
+    entry.source = source === 'shell' && (!known || known.source === 'shell') ? 'shell' : 'tool';
+    if (stamp) entry.stamp = stamp;
+    else delete entry.stamp;
 
     // Правка обесценивает все доказательства по этому файлу. Гейт — требование к ТЕКУЩЕМУ
     // состоянию артефакта, а не отметка «инструмент когда-то запускался»: проверки, сделанные
@@ -232,6 +352,22 @@ export function armGate({ root, filePath, sessionId, ensureConfig = null, readCo
     session.updatedAt = now;
     state.sessions[sessionId] = session;
 
+    // Гонка хуков: команда другой сессии закончилась между записью файла и этим взводом и
+    // получила файл по времени. Отпечаток её записи совпадает с тем, что записал инструмент
+    // этой сессии, — значит, она видела именно эту правку, и файл возвращается владельцу.
+    // Разные отпечатки означают, что та команда меняла файл сама: запись остаётся у обеих.
+    if (source === 'tool' && stamp) {
+      for (const [id, other] of Object.entries(state.sessions)) {
+        if (id === sessionId) continue;
+        const theirKey = Object.keys(other?.files || {}).find((k) => pathKey(k) === pathKey(rel));
+        const theirs = theirKey ? other.files[theirKey] : null;
+        if (theirs?.source !== 'shell' || !sameStamp(theirs.stamp, stamp)) continue;
+        delete other.files[theirKey];
+        reclaimed.push(id);
+        retireEmptySession({ state, sessionId: id, donePath, now });
+      }
+    }
+
     writeFileSync(pendingPath, JSON.stringify(state, null, 2), 'utf8');
 
     // Новая правка обесценивает прошлый прогон ЭТОЙ сессии; чужие отметки не трогаем.
@@ -239,6 +375,12 @@ export function armGate({ root, filePath, sessionId, ensureConfig = null, readCo
       try {
         const done = JSON.parse(readFileSync(donePath, 'utf8'));
         if (done?.sessions) {
+          // Отказы от файлов переживают запись о снятии: это след пропуска, а не прогона.
+          const kept = done.sessions[sessionId]?.disowned;
+          if (kept?.length) {
+            session.disowned = [...kept, ...(session.disowned || [])];
+            writeFileSync(pendingPath, JSON.stringify(state, null, 2), 'utf8');
+          }
           delete done.sessions[sessionId];
           if (Object.keys(done.sessions).length) writeFileSync(donePath, JSON.stringify(done, null, 2), 'utf8');
           else removeFileSync(donePath);
@@ -269,7 +411,22 @@ export function armGate({ root, filePath, sessionId, ensureConfig = null, readCo
     }
   }
 
-  return { kind, rel, created, outside };
+  return { kind, rel, created, outside, reclaimed };
+}
+
+/**
+ * Выход для файла, взведённого по времени изменения: отказ с причиной.
+ * Один текст для подсказки при взводе из оболочки и для сообщения блокировки.
+ */
+export function disownLines({ sessionId, packageRoot }) {
+  const gate = join(packageRoot, 'tools', 'gate.mjs').replace(/\\/g, '/');
+  return [
+    'Хук видит, что файл изменился, пока шла команда, но не видит, кто его записал. Файл, который',
+    'записала не твоя команда (другая сессия, пользователь, выгрузка из конфигуратора), не проверяй —',
+    'сними его с сессии, назвав, кто записал; причина остаётся в журнале снятий:',
+    `  node "${gate}" disown --session ${sessionId} --reason "<кто записал>" <файл или каталог> [...]`,
+    'Файл, который записала твоя команда, остаётся в проверке.',
+  ];
 }
 
 /** Имя плагина из манифеста: с ним Claude Code называет типы субагентов (`<плагин>:<агент>`). */
@@ -455,6 +612,16 @@ export function blockMessage({ sessionId, files, foreign = 0, packageRoot, mode 
     lines.push('', `XML метаданных (${xml.length}):`);
     lines.push(...xml.slice(0, 10).map((f) => `  - ${f}`));
     if (xml.length > 10) lines.push(`  … и ещё ${xml.length - 10}`);
+  }
+
+  // Состав проверки решается до передачи субагенту: чужой файл, ушедший в задание, — это
+  // проверка работы, о которой сессия ничего не знает.
+  const byTime = files.filter(([, v]) => v.source === 'shell').map(([k]) => k);
+  if (byTime.length) {
+    lines.push('', `Из них взведены по времени изменения (${byTime.length}) — командой оболочки, а не инструментом правки:`);
+    lines.push(...byTime.slice(0, 10).map((f) => `  - ${f}`));
+    if (byTime.length > 10) lines.push(`  … и ещё ${byTime.length - 10}`);
+    lines.push(...disownLines({ sessionId, packageRoot }));
   }
 
   lines.push(

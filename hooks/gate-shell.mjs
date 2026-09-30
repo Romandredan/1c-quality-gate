@@ -13,7 +13,7 @@
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readPayload, projectRoot } from './_shared.mjs';
-import { gateHint } from './gate-core.mjs';
+import { gateHint, disownLines } from './gate-core.mjs';
 import { shellBefore, shellAfter, callKey } from './shell-core.mjs';
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -35,9 +35,15 @@ const BACKGROUND_NOTE =
   '[гейт качества 1С] Команда запущена в фоне: файлы 1С, которые она изменит, гейт не увидит — ' +
   'хук срабатывает в момент запуска. Если команда пишет модули или XML метаданных, запусти её не в фоне.';
 
-function report({ armed, blind, relevant, background, sessionId, eventName }) {
+/** Чужие правки в окне команды: пользователю видно, что гейт их заметил и кому оставил. */
+function foreignNote(foreign) {
+  const owners = [...new Set(foreign.map((f) => f.owner))];
+  return `В окно команды попали правки другой сессии (${foreign.length}) — не взведены, владелец: ${owners.join(', ')}`;
+}
+
+function report({ armed, blind, foreign = [], relevant, background, sessionId, eventName }) {
   const warnBackground = background && relevant;
-  if (!armed.length && !blind.length && !warnBackground) return;
+  if (!armed.length && !blind.length && !foreign.length && !warnBackground) return;
   const out = {};
   if (warnBackground && !armed.length) {
     out.hookSpecificOutput = { hookEventName: eventName, additionalContext: BACKGROUND_NOTE };
@@ -54,6 +60,8 @@ function report({ armed, blind, relevant, background, sessionId, eventName }) {
         '[изменено командой оболочки]\n' +
         first +
         (rest.length ? '\nТакже взведены:\n' + rest.join('\n') : '') +
+        '\n\n' +
+        disownLines({ sessionId, packageRoot: PACKAGE_ROOT }).join('\n') +
         (warnBackground ? '\n\n' + BACKGROUND_NOTE : ''),
     };
     const names = armed.slice(0, 10).map((a) => a.rel).join(', ') + (armed.length > 10 ? ` и ещё ${armed.length - 10}` : '');
@@ -64,6 +72,7 @@ function report({ armed, blind, relevant, background, sessionId, eventName }) {
   if (blind.length) {
     out.systemMessage = (out.systemMessage ? out.systemMessage + ' · ' : '') + 'Гейт не смог посмотреть правки оболочки: ' + blind.join('; ');
   }
+  if (foreign.length) out.systemMessage = (out.systemMessage ? out.systemMessage + ' · ' : '') + foreignNote(foreign);
   process.stdout.write(JSON.stringify(out) + '\n');
 }
 

@@ -128,6 +128,13 @@ const R = {
   flow: repo('flow'),
   other: repo('other'),
   outer: repo('outer'),
+  foreignTool: repo('foreign-tool'),
+  race: repo('race'),
+  both: repo('both'),
+  released: repo('released'),
+  disown: repo('disown'),
+  disownDir: repo('disown-dir'),
+  disownLast: repo('disown-last'),
 };
 put(R.revert, MODULE, 'Процедура А() Экспорт\n  // правка до команды\nКонецПроцедуры\n');
 git(R.checkout, 'checkout', '-q', '-b', 'feature');
@@ -143,6 +150,9 @@ mkdirSync(noGit1C, { recursive: true });
 // Гейт собственного потока: модуль уже взведён и изменён, как после правки инструментом.
 put(R.flow, MODULE, 'Процедура А() Экспорт\n  // правка сессии\nКонецПроцедуры\n');
 armGate({ root: R.flow, filePath: join(R.flow, MODULE), sessionId: 's', env: ENV });
+// Отказ от файла: модуль сессия правила инструментом сама — до команды, как в живой работе.
+put(R.disown, MODULE, 'Процедура А() Экспорт\n  // правка сессии\nКонецПроцедуры\n');
+armGate({ root: R.disown, filePath: join(R.disown, MODULE), sessionId: 'a', env: ENV });
 
 await new Promise((r) => setTimeout(r, 2300));
 
@@ -229,6 +239,141 @@ await new Promise((r) => setTimeout(r, 2300));
   check('одно и то же «не смог посмотреть» — раз за сессию', again.blind.length === 0);
 }
 
+// --- Принадлежность правки: что записала другая сессия, этой не приписывается ---
+const GATE = join(ROOT, 'tools', 'gate.mjs');
+const gateIn = (dir, ...args) => spawnSync(process.execPath, [GATE, ...args], { cwd: dir, encoding: 'utf8', env: CLEAN_ENV });
+{
+  const f = pendingOf(R.write)?.sessions?.s?.files?.[MODULE];
+  check('взвод из оболочки помечен источником shell', f?.source === 'shell', JSON.stringify(f));
+  check('взвод хранит отпечаток файла', Number.isFinite(f?.stamp?.mtimeMs) && f?.stamp?.size > 0, JSON.stringify(f));
+  const own = pendingOf(R.disown)?.sessions?.a?.files?.[MODULE];
+  check('взвод инструментом помечен источником tool', own?.source === 'tool', JSON.stringify(own));
+}
+{
+  // Живой случай: сессия b записала модуль инструментом правки, пока у сессии a шла команда.
+  const dir = R.foreignTool;
+  const r = command(
+    dir,
+    () => {
+      appendFileSync(join(dir, MODULE), '// правка сессии b\n');
+      armGate({ root: dir, filePath: join(dir, MODULE), sessionId: 'b', env: ENV });
+    },
+    { session: 'a' }
+  );
+  check('правка инструментом другой сессии в окне команды этой сессии не приписывается', !armedFiles(dir, 'a').includes(MODULE));
+  check('у сессии, записавшей файл, он остаётся', armedFiles(dir, 'b').includes(MODULE));
+  check('пропущенный чужой файл назван вместе с владельцем', (r.foreign || []).some((f) => f.rel === MODULE && f.owner === 'b'), JSON.stringify(r.foreign));
+}
+{
+  // Гонка хуков: снимок сессии a сделан раньше, чем хук сессии b записал её правку.
+  const dir = R.race;
+  command(dir, () => appendFileSync(join(dir, MODULE), '// правка сессии b\n'), { session: 'a' });
+  check('до хука владельца файл взведён по времени', armedFiles(dir, 'a').includes(MODULE));
+  const res = armGate({ root: dir, filePath: join(dir, MODULE), sessionId: 'b', env: ENV });
+  check(
+    'взвод инструментом забирает файл у сессии, получившей его по времени',
+    !armedFiles(dir, 'a').includes(MODULE) && armedFiles(dir, 'b').includes(MODULE)
+  );
+  check('опустевшая сессия удалена из состояния', !pendingOf(dir)?.sessions?.a);
+  check('взвод называет, у кого файл забран', (res?.reclaimed || []).includes('a'), JSON.stringify(res));
+}
+{
+  // Файл меняли обе: команда сессии a записала своё, позже сессия b правила инструментом.
+  const dir = R.both;
+  command(dir, () => appendFileSync(join(dir, MODULE), '// команда сессии a\n'), { session: 'a' });
+  appendFileSync(join(dir, MODULE), '// правка сессии b\n');
+  armGate({ root: dir, filePath: join(dir, MODULE), sessionId: 'b', env: ENV });
+  check('файл, изменённый обеими сессиями, остаётся у обеих', armedFiles(dir, 'a').includes(MODULE) && armedFiles(dir, 'b').includes(MODULE));
+}
+{
+  // Владелец успел снять гейт до конца чужой команды: его правка всё равно его.
+  const dir = R.released;
+  let rel = null;
+  command(
+    dir,
+    () => {
+      appendFileSync(join(dir, MODULE), '// правка сессии b\n');
+      armGate({ root: dir, filePath: join(dir, MODULE), sessionId: 'b', env: ENV });
+      rel = gateIn(dir, 'release', '--session', 'b', '--class', 'C0', '--reason', 'правка комментария');
+    },
+    { session: 'a' }
+  );
+  check('владелец снял гейт', rel?.status === 0, (rel?.stdout || '') + (rel?.stderr || ''));
+  check('правка сессии, уже снявшей гейт, другой сессии не приписывается', !pendingOf(dir)?.sessions?.a, JSON.stringify(pendingOf(dir)));
+}
+
+// --- Отказ от файла: выход для правок, которые записала не команда сессии ---
+{
+  const dir = R.disown;
+  command(dir, () => writeFileSync(join(dir, CATALOG), '<MetaDataObject><Dump/></MetaDataObject>\n', 'utf8'), { session: 'a' });
+  check('подготовка: объект взведён по времени, модуль — инструментом', armedFiles(dir, 'a').length === 2);
+
+  const status = gateIn(dir, 'status');
+  const lineOf = (rel) => status.stdout.split('\n').find((l) => l.includes(rel)) || '';
+  check('status помечает файл, взведённый по времени', /по времени изменения/.test(lineOf(CATALOG)), status.stdout);
+  check('status не помечает файл, правленный инструментом', !/по времени изменения/.test(lineOf(MODULE)), status.stdout);
+
+  const noReason = gateIn(dir, 'disown', '--session', 'a', CATALOG);
+  check('disown без причины — отказ', noReason.status === 2 && armedFiles(dir, 'a').includes(CATALOG), noReason.stdout + noReason.stderr);
+
+  const own = gateIn(dir, 'disown', '--session', 'a', '--reason', 'не моя правка', MODULE);
+  check('disown файла, правленного инструментом сессии, — отказ', own.status === 2 && armedFiles(dir, 'a').includes(MODULE), own.stdout + own.stderr);
+  check('отказ объясняет причину', /инструментом правки/.test(own.stderr), own.stderr);
+
+  const ok = gateIn(dir, 'disown', '--session', 'a', '--reason', 'выгрузку записал пользователь из конфигуратора', CATALOG);
+  check('disown снимает файл, взведённый по времени', ok.status === 0 && !armedFiles(dir, 'a').includes(CATALOG), ok.stdout + ok.stderr);
+  check('остальные файлы сессии на месте', armedFiles(dir, 'a').includes(MODULE));
+  const trace = pendingOf(dir)?.sessions?.a?.disowned || [];
+  check('отказ записан в состоянии сессии с причиной', trace.some((d) => d.file === CATALOG && /конфигуратора/.test(d.reason)), JSON.stringify(trace));
+
+  const miss = gateIn(dir, 'disown', '--session', 'a', '--reason', 'нет такого', 'src/cf/Нет.xml');
+  check('disown файла не из состава сессии — отказ с перечнем', miss.status === 1 && miss.stdout.includes(MODULE), miss.stdout + miss.stderr);
+
+  // Снятие гейта не стирает след отказа: запись о снятии заменяет состояние сессии целиком.
+  const rel = gateIn(dir, 'release', '--session', 'a', '--class', 'C0', '--reason', 'правка комментария');
+  const rec = JSON.parse(readFileSync(join(dir, '.claude', '.state', 'qg-done.json'), 'utf8')).sessions.a;
+  check('снятие гейта переносит отказы в журнал снятий', rel.status === 0 && rec?.disowned?.[0]?.file === CATALOG, rel.stdout + rel.stderr + JSON.stringify(rec));
+
+  // Новая правка той же сессии стирает запись о снятии — отказы обязаны её пережить.
+  armGate({ root: dir, filePath: join(dir, MODULE), sessionId: 'a', env: ENV });
+  check('новая правка сессии сохраняет отказы прошлого снятия', pendingOf(dir)?.sessions?.a?.disowned?.[0]?.file === CATALOG, JSON.stringify(pendingOf(dir)));
+}
+{
+  // Каталог вместо перечня файлов: выгрузка расширения — это десятки путей.
+  const dir = R.disownDir;
+  command(
+    dir,
+    () => {
+      writeFileSync(join(dir, CATALOG), '<MetaDataObject><Dump/></MetaDataObject>\n', 'utf8');
+      put(dir, 'src/cf/Catalogs/Склады.xml', '<MetaDataObject/>\n');
+      appendFileSync(join(dir, MODULE), '// записано командой\n');
+    },
+    { session: 'a' }
+  );
+  const r = gateIn(dir, 'disown', '--session', 'a', '--reason', 'выгрузку записал пользователь', 'src/cf/Catalogs');
+  const left = armedFiles(dir, 'a');
+  check(
+    'disown каталога снимает все взведённые по времени файлы под ним',
+    r.status === 0 && left.length === 1 && left[0] === MODULE,
+    r.stdout + r.stderr + JSON.stringify(left)
+  );
+}
+{
+  // Последний файл: сессия уходит из состояния, а след отказа остаётся в журнале снятий.
+  const dir = R.disownLast;
+  command(dir, () => writeFileSync(join(dir, CATALOG), '<MetaDataObject><Dump/></MetaDataObject>\n', 'utf8'), { session: 'a' });
+  const r = gateIn(dir, 'disown', '--session', 'a', '--reason', 'выгрузку записала соседняя сессия', CATALOG);
+  check('disown последнего файла снимает сессию с гейта', r.status === 0 && !pendingOf(dir), r.stdout + r.stderr);
+  const donePath = join(dir, '.claude', '.state', 'qg-done.json');
+  const done = existsSync(donePath) ? JSON.parse(readFileSync(donePath, 'utf8')) : null;
+  const rec = done?.sessions?.a;
+  check(
+    'след отказа остаётся в журнале снятий',
+    rec?.mode === 'disowned' && rec?.disowned?.length === 1 && /соседняя/.test(rec.disowned[0].reason),
+    JSON.stringify(rec)
+  );
+}
+
 // --- Хук целиком: команда упала после записи (PostToolUseFailure) ---
 {
   const hook = join(ROOT, 'hooks', 'gate-shell.mjs');
@@ -256,6 +401,10 @@ await new Promise((r) => setTimeout(r, 2300));
   check('хук: событие в ответе — PostToolUseFailure', out?.hookSpecificOutput?.hookEventName === 'PostToolUseFailure');
   check('хук: модель получает подсказку о взводе', /изменено командой оболочки/.test(out?.hookSpecificOutput?.additionalContext || ''));
   check('хук: код возврата 0', post.status === 0);
+  check(
+    'хук: подсказка называет выход для правок, записанных не командой',
+    /gate\.mjs" disown --session hook-s/.test(out?.hookSpecificOutput?.additionalContext || '')
+  );
 
   // Фоновая команда: хук «после» срабатывает при запуске — модель предупреждается, но только в
   // проекте 1С (у R.failure уже есть состояние гейта); в чужом проекте хук молчит.
