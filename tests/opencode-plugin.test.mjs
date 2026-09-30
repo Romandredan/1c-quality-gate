@@ -270,6 +270,8 @@ check('ошибка клиента гасится', survived);
   const shFiles = existsSync(shPending) ? Object.keys(JSON.parse(readFileSync(shPending, 'utf8')).sessions?.sb?.files || {}) : [];
   check('bash: записанный модуль взводит гейт в .opencode/.state', shFiles.includes('CommonModules/Генератор/Module.bsl'));
   check('bash: подсказка о взводе в результате команды', shOut.output.startsWith('готово') && shOut.output.includes('изменено командой оболочки'));
+  // Взвод по времени не знает, кто записал файл: выход для чужой правки назван там же, где взвод.
+  check('bash: подсказка называет отказ от файла, записанного не командой', /gate\.mjs" disown --session sb --reason/.test(shOut.output));
   check('bash: отметки старта не сорят в проекте',
     !existsSync(join(shRoot, '.claude', '.state', 'qg-shell')) && !existsSync(join(shRoot, '.opencode', '.state', 'qg-shell')));
 

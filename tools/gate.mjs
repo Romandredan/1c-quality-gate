@@ -10,6 +10,7 @@
  *   node gate.mjs status
  *   node gate.mjs plan [--files <f>...] [--json] [--no-analyzer]  # план прогона для модели
  *   node gate.mjs verify --layer <code|arch|xml|hygiene> <файл>
+ *   node gate.mjs disown --reason "<кто записал>" <файл или каталог>  # снять с сессии чужой файл
  *   node gate.mjs release --evidence <файл>            # снять по результатам прогона
  *   node gate.mjs release --class C0 --reason "<...>"  # снять как не требующий проверки
  */
@@ -30,7 +31,7 @@ import { SCOPES } from './evidence-scopes.mjs';
 import { readCatalog } from './gen-catalog-index.mjs';
 import { expectedExamined } from './catalog.mjs';
 import { validatePatterns, matchesAny } from './path-match.mjs';
-import { handoffLines } from '../hooks/gate-core.mjs';
+import { handoffLines, toProjectRelative, pathKey, retireEmptySession } from '../hooks/gate-core.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -212,8 +213,16 @@ function cmdStatus() {
     const files = Object.entries(s.files || {});
     process.stdout.write(`Сессия ${id} — взведена ${s.armedAt}, файлов: ${files.length}\n`);
     for (const [path, meta] of files) {
-      process.stdout.write(`  ${String(meta.kind).padEnd(13)} ${path}  (правок: ${meta.edits})\n`);
+      const byTime = meta.source === 'shell' ? ', по времени изменения' : '';
+      process.stdout.write(`  ${String(meta.kind).padEnd(13)} ${path}  (правок: ${meta.edits}${byTime})\n`);
     }
+    if (files.some(([, meta]) => meta.source === 'shell')) {
+      process.stdout.write(
+        '  Взведённое по времени изменения нашёл хук команды оболочки: кто записал файл, он не видит.\n' +
+          `  Записала не команда сессии — node gate.mjs disown --session ${id} --reason "<кто записал>" <файл или каталог>\n`
+      );
+    }
+    if (s.disowned?.length) process.stdout.write(`  Снято с сессии отказом: ${s.disowned.length} — причины в состоянии сессии.\n`);
     process.stdout.write('\n');
   }
 
@@ -496,6 +505,7 @@ function cmdRelease(args) {
     reason: reason || null,
     criticalDecision: criticalFindings.length ? criticalDecision : null,
     criticalFindings: criticalFindings.map((x) => x.title),
+    disowned: sessionState.disowned || [],
     warnings: [
       ...warnings.map((w) => ({ line: w.line || null, message: w.message })),
       ...stale.map((s) => ({
@@ -555,6 +565,125 @@ function cmdRelease(args) {
         ? `ПРЕДУПРЕЖДЕНИЕ: отчёт лежит в каталогах проекта (${strayReport}) — копия в архиве есть, исходный файл можно удалить; черновик пиши во временный каталог сессии.\n`
         : '') +
       (rest ?`Остаются взведёнными гейты других сессий: ${rest}. Их не трогаем.\n` : '')
+  );
+  return 0;
+}
+
+/**
+ * Снимает с сессии файлы, которые записала не её команда.
+ *
+ * Взвод по правкам из оболочки знает только время: файл изменился, пока шла команда. Записать
+ * его в это окно могли команда другой сессии, пользователь или выгрузка из конфигуратора, и
+ * проверять такой файл сессия не должна — она не знает ни задачи, ни замысла правки. Прежде
+ * выходов было два, оба плохие: гнать гейт по чужой работе или снять весь гейт отметкой C0.
+ *
+ * Границы отказа:
+ *   - только файлы с источником shell. Файл, который сессия правила инструментом, — её файл:
+ *     свидетельство точное, и отказ от него был бы обходом гейта;
+ *   - причина обязательна и остаётся в журнале снятий: пропуск проверки оставляет след;
+ *   - каталог вместо файла снимает всё взведённое по времени под ним — выгрузка расширения
+ *     даёт десятки путей; правленное инструментом под тем же каталогом остаётся в проверке.
+ */
+function cmdDisown(args) {
+  const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
+  const targets = (args._ || []).map(String);
+  if (!reason || targets.length === 0) {
+    process.stderr.write(
+      'Использование: node gate.mjs disown [--session <id>] --reason "<кто записал файл>" <файл или каталог> [...]\n' +
+        'Причина обязательна: отказ от проверки файла остаётся в журнале снятий.\n'
+    );
+    return 2;
+  }
+
+  const state = readPending();
+  if (!state || state.corrupt || Object.keys(state.sessions || {}).length === 0) {
+    process.stdout.write('Гейт не взведён — снимать нечего.\n' + rootLine());
+    return 0;
+  }
+  const explicit = typeof args.session === 'string' ? args.session : null;
+  const sessionId = pickSession(state, explicit);
+  if (!sessionId) {
+    process.stderr.write(
+      explicit
+        ? `Сессия "${explicit}" в состоянии гейта не найдена. Доступны: ${Object.keys(state.sessions).join(', ')}\n`
+        : ambiguousSessionMessage(state)
+    );
+    return 2;
+  }
+
+  const { dir, pending, done } = paths();
+  const rootDir = root();
+  const wanted = targets.map((t) => pathKey(toProjectRelative(rootDir, t)).replace(/\/+$/, '')).filter(Boolean);
+  const named = (rel) => wanted.includes(pathKey(rel));
+  const covered = (rel) => named(rel) || wanted.some((w) => pathKey(rel).startsWith(w + '/'));
+
+  const outcome = withStateLock(dir, () => {
+    const fresh = readPending();
+    const session = fresh?.sessions?.[sessionId];
+    if (!session) return { gone: true };
+    const all = Object.keys(session.files || {});
+    const hit = all.filter(covered);
+    if (!hit.length) return { none: all };
+    const byTime = (rel) => session.files[rel].source === 'shell';
+    const refused = hit.filter((rel) => named(rel) && !byTime(rel));
+    if (refused.length) return { refused };
+    const given = hit.filter(byTime);
+    const kept = hit.filter((rel) => !byTime(rel));
+    if (!given.length) return { none: all, kept };
+
+    const now = new Date().toISOString();
+    session.disowned = [
+      ...(session.disowned || []),
+      ...given.map((rel) => ({ file: rel, kind: session.files[rel].kind, reason, at: now })),
+    ];
+    for (const rel of given) delete session.files[rel];
+    session.updatedAt = now;
+    const retired = retireEmptySession({ state: fresh, sessionId, donePath: done, now });
+    if (Object.keys(fresh.sessions).length) writeFileSync(pending, JSON.stringify(fresh, null, 2), 'utf8');
+    else if (!removeFileSync(pending)) return { notRemoved: true };
+    return { given, kept, retired, left: all.length - given.length };
+  });
+
+  if (outcome.gone) {
+    process.stderr.write(`Сессия ${sessionId} исчезла из состояния гейта. Проверь: node gate.mjs status\n`);
+    return 2;
+  }
+  if (outcome.notRemoved) {
+    process.stderr.write(`Маркер гейта не удалился — состояние не изменено:\n  ${pending}\n`);
+    return 2;
+  }
+  if (outcome.refused) {
+    process.stderr.write(
+      'Отказ не принят — состояние не изменено. Эти файлы сессия правила инструментом правки, они её:\n' +
+        outcome.refused.map((f) => `  ${f}\n`).join('') +
+        'Отказаться можно только от файла, взведённого по времени изменения (node gate.mjs status).\n' +
+        'Правка не требует проверки — снимай гейт с причиной: node gate.mjs release --class C0 --reason "<почему>"\n'
+    );
+    return 2;
+  }
+  if (outcome.none) {
+    process.stdout.write(
+      (outcome.kept?.length
+        ? 'Под указанными путями нет файлов, взведённых по времени изменения: всё найденное сессия правила инструментом.\n'
+        : `В охвате сессии ${sessionId} нет ни одного из указанных путей.\n`) +
+        'Её состав:\n' +
+        outcome.none.map((f) => `  ${f}`).join('\n') +
+        '\n'
+    );
+    return 1;
+  }
+
+  process.stdout.write(
+    `Снято с сессии ${sessionId}: ${outcome.given.length} файл(ов), взведённых по времени изменения.\n` +
+      outcome.given.map((f) => `  ${f}\n`).join('') +
+      `Причина: ${reason}\n` +
+      'Отказ записан в журнал снятий.\n' +
+      (outcome.kept.length
+        ? 'Остались в проверке — правились инструментом:\n' + outcome.kept.map((f) => `  ${f}\n`).join('')
+        : '') +
+      (outcome.retired
+        ? 'Других файлов у сессии нет — гейт сессии снят.\n'
+        : `Файлов в проверке: ${outcome.left}.\n`)
   );
   return 0;
 }
@@ -1494,6 +1623,8 @@ function main(argv) {
       return cmdHandoff(args);
     case 'verify':
       return cmdVerify(args);
+    case 'disown':
+      return cmdDisown(args);
     case 'release':
       return cmdRelease(args);
     default:
@@ -1504,6 +1635,7 @@ function main(argv) {
           '  node gate.mjs run [--files <f> ...] [--only <инструмент,...>] [--no-analyzer] [--verbose]\n' +
           '  node gate.mjs handoff [--session <id>] [--mode claude|opencode]\n' +
           '  node gate.mjs verify --layer <code|arch|xml|hygiene> <файл> [...]\n' +
+          '  node gate.mjs disown [--session <id>] --reason "<кто записал файл>" <файл или каталог> [...]\n' +
           '  node gate.mjs release --evidence <файл> [--critical-decision "<кто решил и что>"]\n' +
           '  node gate.mjs release --class C0 --reason "<почему>"\n'
       );

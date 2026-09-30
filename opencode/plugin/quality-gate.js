@@ -243,6 +243,7 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
           if (armed.length) {
             notes.push('[изменено командой оболочки]\n' + core.gateHint({ ...armed[0], sessionId, packageRoot, mode: 'opencode' }));
             if (armed.length > 1) notes.push('Также взведены:\n' + armed.slice(1).map((a) => `Файл: ${a.rel}`).join('\n'));
+            notes.push(core.disownLines({ sessionId, packageRoot }).join('\n'));
           }
           if (blind.length) notes.push('Гейт не смог посмотреть правки оболочки: ' + blind.join('; '));
           if (notes.length && output && typeof output.output === 'string') output.output += '\n\n' + notes.join('\n');
