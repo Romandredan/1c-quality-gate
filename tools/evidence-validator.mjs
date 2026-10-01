@@ -336,7 +336,7 @@ const SEVERITY_LABEL =
 // Раздел «Вне правки» — находки в коде, которого правка не касалась: гейт они не держат по
 // решению владельца (спецификация 2026-10-01); «Нужно решение» — то, что субагент оценить не
 // может, уходит пользователю в итоге снятия. Оба раздела разбираются, но из блокирующих исключены.
-const NOT_FINDINGS = /отклон|не\s*провер|непровер|предложени/i;
+const NOT_FINDINGS = /отклон|не\s*провер|непровер|предложени|закрыт|исправлен/i;
 const OUTSIDE_SECTION = /вне\s+правки/i;
 const DECISION_SECTION = /нужно\s+решени/i;
 const FINDING_ID = /qg:[A-Z][A-Z0-9-]*[A-Z0-9]|#?std\d{3,4}|bslls:[A-Za-z][\w-]*|acc:\d{3,4}|v8cs:[\w-]+/g;
@@ -445,13 +445,17 @@ function collectFindings(text) {
       return;
     }
 
+    const lead = title.match(SEVERITY_LEAD);
+    const inherited = stack.map((s) => s.markerSev).filter(Boolean).pop();
+    // Заголовок, который сам даёт находку (уровень в начале либо унаследован от маркера раздела),
+    // разделом не бывает: «Транзакция открыта вне правки» — находка, а не раздел «Вне правки».
+    const isFinding = Boolean(lead && !SEVERITY_LABEL.test(lead[2])) || Boolean(!lead && inherited);
     const parentSection = stack.map((s) => s.section).filter((x) => x && x !== 'change').pop() || null;
-    const section = OUTSIDE_SECTION.test(title) ? 'outside' : DECISION_SECTION.test(title) ? 'decision' : parentSection || 'change';
-    const entry = { level, section, excluded: stack.some((s) => s.excluded) || (section === 'change' && NOT_FINDINGS.test(title)) };
+    const section =
+      !isFinding && OUTSIDE_SECTION.test(title) ? 'outside' : !isFinding && DECISION_SECTION.test(title) ? 'decision' : parentSection || 'change';
+    const entry = { level, section, excluded: stack.some((s) => s.excluded) || (section === 'change' && !isFinding && NOT_FINDINGS.test(title)) };
     current = null;
     if (!entry.excluded) {
-      const lead = title.match(SEVERITY_LEAD);
-      const inherited = stack.map((s) => s.markerSev).filter(Boolean).pop();
       let sev = null;
       if (lead && SEVERITY_LABEL.test(lead[2])) entry.markerSev = lead[1];
       else sev = lead ? lead[1] : inherited || null;

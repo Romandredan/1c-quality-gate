@@ -4775,6 +4775,20 @@ section('Находка 🔴/🟠 из текста отчёта закрыта 
   check('раздел с «нет» предупреждения не даёт', !warnsListed.some((p) => /Нужно решение/.test(p.message)));
   const okWarns = validate(text, { gate: false }).problems.filter((p) => /без заголовков находок/.test(p.message));
   check('оформленные заголовками разделы предупреждения не дают', okWarns.length === 0, JSON.stringify(okWarns));
+
+  // Обзор ветки (C1): заголовок самой находки со словами «вне правки» или «нужно решение» —
+  // находка, а не раздел. Иначе 🔴 в правке переставала блокировать по совпадению формулировки.
+  const titled = [
+    '# Отчёт', '', '## 🔴 Критические', '', '### Транзакция открыта вне правки и не закрывается — qg:TX', 'Файл: M.bsl:10', '',
+    '## 🟠 Существенные', '', '### Нужно решение о блокировке не принято — qg:LOCK', 'Файл: M.bsl:20', '',
+    '## quality evidence', '',
+  ].join('\n');
+  const sevTitled = severeFindings(titled);
+  check('формулировка находки не превращает её в раздел', sevTitled.length === 2 && sevTitled[0].sev === '🔴' && sevTitled[1].sev === '🟠', JSON.stringify(sevTitled));
+
+  // Обзор ветки (I6): закрытые на прошлом проходе находки под своим разделом не блокируют.
+  const closed = '# Отчёт\n\n## Исправлено с прошлого прохода\n\n### 🔴 Потеря строки — исправлено\nФайл: M.bsl:1\n\n## Закрыто\n\n### 🟠 Запрос в цикле\nубран\n\n## quality evidence\n';
+  check('исправленные и закрытые находки не считаются', severeFindings(closed).length === 0 && reportSections(closed).inChange.length === 0, JSON.stringify(severeFindings(closed)));
 }
 
 // ---------------------------------------------------------------------------
@@ -7981,7 +7995,8 @@ section('gate.mjs run — инструментальная фаза одним �
   hookIn('gate-arm.mjs', { session_id: 'P1', cwd: pr, tool_input: { file_path: join(pr, bsl) } });
   const p = join(pr, '.claude', '.state', 'qg-pending.json');
   const pendingOf = () => JSON.parse(readFileSync(p, 'utf8')).sessions.P1;
-  const runOnce = (extra = []) => run('tools/gate.mjs', ['run', '--session', 'P1', '--no-analyzer', '--only', 'hygiene-check', ...extra], { env });
+  // Полный run (без --only): запуск с --only — продолжение прохода, а не новый проход (ниже).
+  const runOnce = (extra = []) => run('tools/gate.mjs', ['run', '--session', 'P1', '--no-analyzer', ...extra], { env });
 
   const r1 = runOnce();
   check('первый проход назван в выводе run', r1.code === 0 && /^Проход 1 из 3 · база HEAD/m.test(r1.out), r1.out.slice(0, 500));
@@ -8013,10 +8028,17 @@ section('gate.mjs run — инструментальная фаза одним �
   const noSession = run('tools/gate.mjs', ['run', '--files', bsl, '--no-analyzer', '--only', 'hygiene-check'], { env });
   check('run по --files без сессии цикл не ведёт', noSession.code === 0 && !/^Проход /m.test(noSession.out));
 
+  // Обзор ветки (I3): перезапуск упавшего инструмента через --only — не новый проход, а
+  // продолжение последнего; иначе один повтор анализатора съедает проход из трёх.
+  const passesBefore = pendingOf().cycle.passes.length;
+  const only = run('tools/gate.mjs', ['run', '--session', 'P1', '--no-analyzer', '--only', 'hygiene-check'], { env });
+  check('run --only не записывает новый проход', only.code === 0 && pendingOf().cycle.passes.length === passesBefore && /^Проход \d+ из 3/m.test(only.out), only.out.slice(0, 300));
+
   // Принятый валидатором отчёт записывается в последний проход: следующему выпуску нужен путь
   // к прошлому отчёту для прохода по исправлению, а сессии — для списков остатка.
   const okReport = join(WORK, 'passes-accepted.md');
-  writeFileSync(okReport, readFileSync(ev('valid.md'), 'utf8'), 'utf8');
+  // Полный run без анализатора: журнал без его записи, и след обязан это заявить.
+  writeFileSync(okReport, readFileSync(ev('valid.md'), 'utf8') + '[qg not_verified: dimension=static-analysis, reason=not_in_analyzer_report, files=1]\n', 'utf8');
   const v = run('tools/evidence-validator.mjs', [okReport, '--gate', '--session', 'P1'], { env });
   check('валидатор принял след фикстуры', v.code === 0, v.out.slice(0, 400));
   const lastPass = pendingOf().cycle.passes.at(-1);
@@ -8074,10 +8096,40 @@ section('gate.mjs run — инструментальная фаза одним �
   const r = run('tools/gate.mjs', ['run', '--files', bsl, xml, fresh, '--no-analyzer', '--only', 'hygiene-check,bsl-lint'], { env: { QG_PROJECT_DIR: tr } });
   check('run печатает раздел «Задето правкой»', /## Задето правкой[\s\S]*Module\.bsl: Новая\(5[–-]8\)/.test(r.out), r.out.slice(0, 900));
   check('новый файл назван целиком', /Н\/Ext\/Module\.bsl: весь файл \(новый\)/.test(r.out));
-  const { markOutside } = await import(pathToFileURL(join(ROOT, 'tools', 'gate.mjs')).href);
-  check('строка вывода инструмента вне правки помечается', /← вне правки$/.test(markOutside?.(`${bsl}:2 — qg:X что-то`, prof.touched, [bsl, xml, fresh]) || ''));
-  check('строка в правке не помечается', typeof markOutside === 'function' && !/вне правки/.test(markOutside(`${bsl}:6 — qg:X что-то`, prof.touched, [bsl, xml, fresh])));
-  check('строка без адреса не помечается', typeof markOutside === 'function' && !/вне правки/.test(markOutside('итого: 2 находки', prof.touched, [bsl])));
+  // Обзор ветки (I1): инструменты печатают путь файла отдельной строкой, а находку — как
+  // `  · :7 — …` или `  ОШИБКА:12 [...]`; одноимённые модули разных объектов различаются только
+  // полным путём, строка нового файла помечаться не может.
+  const { markOutsideLines } = await import(pathToFileURL(join(ROOT, 'tools', 'gate.mjs')).href);
+  const other = 'src/cf/CommonModules/Другой/Ext/Module.bsl';
+  const touchedTwo = { ...prof.touched, [other]: { kind: 'methods', methods: [{ name: 'Х', start: 100, end: 130 }], ranges: [] } };
+  const marked = markOutsideLines?.(
+    [bsl, '  · :2 — pc:x: в нетронутом методе', '  · :6 — pc:y: в задетом методе', `${other}`, '  ОШИБКА:120 [qg:Z] в задетом методе другого модуля', '  ОШИБКА:5 [qg:Z] вне правки другого модуля', fresh, '  ВНИМАНИЕ:5 [qg:W] новый файл', 'Проверено файлов: 3. Ошибок: 0, предупреждений: 0.', `${bsl}:2 — адрес в строке`],
+    touchedTwo,
+    [bsl, xml, fresh, other]
+  ) || [];
+  check('находка по текущему файлу вне правки помечена', /← вне правки$/.test(marked[1] || ''), JSON.stringify(marked));
+  check('находка по текущему файлу в правке не помечена', marked[2] && !/вне правки/.test(marked[2]));
+  check('одноимённый модуль другого объекта различается по полному пути', marked[4] && !/вне правки/.test(marked[4]) && /← вне правки$/.test(marked[5] || ''), JSON.stringify(marked.slice(3, 6)));
+  check('строка нового файла не помечается', marked[7] && !/вне правки/.test(marked[7]));
+  check('строка без адреса находки не помечается', marked[8] && !/вне правки/.test(marked[8]));
+  check('адрес в самой строке тоже разбирается', /← вне правки$/.test(marked[9] || ''));
+
+  // Обзор ветки (I2): изменённые строки вне методов (аннотации расширения, Перем модуля)
+  // входят в границу правки и при виде «методы».
+  const ar = join(WORK, 'touched-annot');
+  rmSync(ar, { recursive: true, force: true });
+  mkdirSync(join(ar, 'src', 'cfe', 'Р', 'CommonModules', 'М', 'Ext'), { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: ar });
+  const abs = 'src/cfe/Р/CommonModules/М/Ext/Module.bsl';
+  writeFileSync(join(ar, abs), BOM + '&Перед("А")\nПроцедура Р_А()\nКонецПроцедуры\n\nПроцедура Б()\n\tХ = 1;\nКонецПроцедуры\n', 'utf8');
+  execFileSync('git', ['add', '-A'], { cwd: ar });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], { cwd: ar });
+  writeFileSync(join(ar, abs), BOM + '&Вместо("А")\nПроцедура Р_А()\nКонецПроцедуры\n\nПроцедура Б()\n\tХ = 2;\nКонецПроцедуры\n', 'utf8');
+  const profA = computeProfile({ files: [abs], root: ar, config: {}, metrics: {}, configState: null });
+  check('аннотация над методом входит в границу правки вместе с задетым методом',
+    profA.touched?.[abs]?.kind === 'methods' && touchedLine(profA.touched, abs, 1) && touchedLine(profA.touched, abs, 6) && !touchedLine(profA.touched, abs, 3), JSON.stringify(profA.touched));
+  const rA = run('tools/gate.mjs', ['run', '--files', abs, '--no-analyzer', '--only', 'hygiene-check'], { env: { QG_PROJECT_DIR: ar } });
+  check('таблица называет строки вне методов', /Module\.bsl: Б\(5[–-]7\); вне методов: строки 1/.test(rA.out), rA.out.slice(0, 700));
 }
 
 section('План прогона — пути автотестов и подсказка YAxUnit');

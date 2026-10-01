@@ -400,8 +400,8 @@ export function touchedLine(touched, rel, line) {
   if (!t || t.kind === 'whole') return true;
   const n = Number(line);
   if (!Number.isFinite(n)) return true;
-  if (t.kind === 'methods') return t.methods.some((m) => n >= m.start && n <= m.end);
-  return t.ranges.some(([a, b]) => n >= a && n <= b);
+  if (t.kind === 'methods' && t.methods.some((m) => n >= m.start && n <= m.end)) return true;
+  return (t.ranges || []).some(([a, b]) => n >= a && n <= b);
 }
 
 /** Все номера строк 1..n — файл без истории в HEAD «весь добавлен», от первой до последней. */
@@ -566,6 +566,12 @@ function analyzeChangedMethods(diffs, root) {
       } else if (head.signature !== method.signature) {
         signatureChanges.push(method.name);
       }
+    }
+    // Изменённые строки вне методов — аннотации расширения, директивы, переменные модуля —
+    // тоже граница правки: смена `&Перед` на `&Вместо` меняет смысл перехвата.
+    if (touched[d.rel]) {
+      const outside = [...d.changedLines].filter((n) => !currentMethods.some((m) => n >= m.start && n <= m.end));
+      touched[d.rel].ranges = rangesOf(outside);
     }
   }
 

@@ -1457,23 +1457,54 @@ function toolOutcome(r, evidence) {
  * `<файл>(<строка>` по любому файлу сессии (совпадение по хвосту пути, регистр не важен).
  * Приближение заявлено: строка без адреса остаётся как есть.
  */
-export function markOutside(line, touched, files) {
-  for (const rel of files) {
-    const base = String(rel).split(/[\\/]/).pop().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const m = line.match(new RegExp(`${base}[:(](\\d+)`, 'i'));
-    if (!m) continue;
-    return touchedLine(touched, rel, Number(m[1])) ? line : `${line} ← вне правки`;
-  }
-  return line;
+export function markOutsideLines(lines, touched, files) {
+  const norm = (p) => String(p).replace(/\\/g, '/').toLowerCase();
+  const rels = files.map((rel) => ({ rel, key: norm(rel) }));
+  const NOT_BEFORE = /[\p{L}\p{N}_./\\-]/u;
+  const NOT_AFTER = /[\p{L}\p{N}_\\/]/u;
+  let current = null;
+  const mark = (line, rel, n) => (touchedLine(touched, rel, n) ? line : `${line} ← вне правки`);
+  return lines.map((line) => {
+    const low = norm(line);
+    // Файл в строке: самый длинный полный относительный путь, ограниченный с обеих сторон.
+    // Одноимённые модули разных объектов различаются только так.
+    let hit = null;
+    for (const r of rels) {
+      let idx = low.indexOf(r.key);
+      while (idx !== -1) {
+        const before = idx === 0 ? '' : low[idx - 1];
+        const after = low[idx + r.key.length] || '';
+        if (!NOT_BEFORE.test(before) && !NOT_AFTER.test(after)) {
+          if (!hit || r.key.length > hit.key.length) hit = { ...r, end: idx + r.key.length };
+          break;
+        }
+        idx = low.indexOf(r.key, idx + 1);
+      }
+    }
+    if (hit) {
+      current = hit.rel;
+      const m = line.slice(hit.end).match(/^[:(](\d+)/);
+      return m ? mark(line, current, Number(m[1])) : line;
+    }
+    if (!current) return line;
+    // Находка под строкой файла: `  · :7 — …`, `  ОШИБКА:12 [...]`. Двоеточие с цифрой сразу за
+    // ним, перед ним не цифра (время 21:07) и не слэш (адрес порта).
+    const m = line.match(/(?:^|[^\d:/\\]):(\d+)(?!\d)/);
+    return m ? mark(line, current, Number(m[1])) : line;
+  });
 }
 
 /** Строки раздела «Задето правкой»: граница правки по файлам, как её считает профиль. */
 function touchedLines(touched, files) {
+  const ranges = (list) => list.map(([a, b]) => (a === b ? String(a) : `${a}–${b}`)).join(', ');
   return files.map((rel) => {
     const t = touched?.[rel];
     if (!t || t.kind === 'whole') return `${rel}: весь файл (новый)`;
-    if (t.kind === 'methods') return `${rel}: ${t.methods.map((m) => `${m.name}(${m.start}–${m.end})`).join(', ')}`;
-    return `${rel}: строки ${t.ranges.map(([a, b]) => (a === b ? String(a) : `${a}–${b}`)).join(', ')}`;
+    if (t.kind === 'methods') {
+      const methods = t.methods.map((m) => `${m.name}(${m.start}–${m.end})`).join(', ');
+      return `${rel}: ${methods}${t.ranges?.length ? `; вне методов: строки ${ranges(t.ranges)}` : ''}`;
+    }
+    return `${rel}: строки ${ranges(t.ranges)}`;
   });
 }
 
@@ -1514,6 +1545,10 @@ function cmdRun(args) {
       root: rootDir,
       sessionId,
       mutate: (session) => {
+        // Перезапуск инструмента через --only — продолжение последнего прохода, а не новый:
+        // иначе один повтор упавшего анализатора съедает проход из трёх.
+        const last = session.cycle?.passes?.at?.(-1);
+        if (wanted && last) return { pass: last };
         const done = passCount(session);
         if (done >= MAX_PASSES && decision === null) return { refused: done };
         const pass = startPass(session);
@@ -1634,7 +1669,7 @@ function cmdRun(args) {
     w('\n## Вывод инструментов с находками и сбоями\n');
     for (const s of shown) {
       const lines = s.output.split(/\r?\n/).filter((l) => l.trim() !== '' && !EVIDENCE_LINE.test(l) && !/^## quality evidence/.test(l));
-      const cut = (args.verbose === true ? lines : lines.slice(0, RUN_OUTPUT_LINES)).map((l) => markOutside(l, profile.touched, files));
+      const cut = markOutsideLines(args.verbose === true ? lines : lines.slice(0, RUN_OUTPUT_LINES), profile.touched, files);
       w(`### ${s.title}\n${cut.join('\n')}\n`);
       if (cut.length < lines.length) w(`… ещё строк: ${lines.length - cut.length} — полностью: ${relRun}/${s.tag}.log\n`);
       w('\n');

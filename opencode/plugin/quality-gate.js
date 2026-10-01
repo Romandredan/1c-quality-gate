@@ -291,7 +291,9 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
         const note = core.residualNote({ root, sessionId, env: stateEnv });
         if (note) {
           await client.session
-            .prompt({ path: { id: sessionId }, body: { parts: [{ type: 'text', text: `[ГЕЙТ КАЧЕСТВА 1С] ${note}` }] } })
+            // noReply: это уведомление, а не задание — без него модель отвечает ходом и может
+            // взяться за остаток, включая находки вне правки.
+            .prompt({ path: { id: sessionId }, body: { noReply: true, parts: [{ type: 'text', text: `[ГЕЙТ КАЧЕСТВА 1С] ${note}` }] } })
             .catch(() => {});
           return;
         }

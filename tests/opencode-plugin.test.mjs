@@ -297,6 +297,9 @@ check('ошибка клиента гасится', survived);
   const before7 = client.prompts.length;
   await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 's7' } } });
   check('idle после снятия отправляет остаток один раз', client.prompts.length === before7 + 1 && /в правке: 🔴 0, 🟠 0, 🟡 1/.test(JSON.stringify(client.prompts.at(-1))));
+  // Итог — уведомление, а не задание: без noReply модель отвечает на него ходом и может взяться
+  // за остаток, включая находки вне правки.
+  check('итог отправляется без ответа модели (noReply)', client.prompts.at(-1)?.body?.noReply === true);
   await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 's7' } } });
   check('повторный idle остаток не повторяет', client.prompts.length === before7 + 1);
 }
