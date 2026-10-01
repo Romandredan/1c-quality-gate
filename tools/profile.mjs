@@ -379,6 +379,31 @@ function currentLines(absPath) {
   return text === '' ? [] : text.split('\n');
 }
 
+/** Сжатие множества номеров строк в диапазоны [[от, до], …] по возрастанию. */
+function rangesOf(set) {
+  const sorted = [...set].sort((a, b) => a - b);
+  const out = [];
+  for (const n of sorted) {
+    const last = out[out.length - 1];
+    if (last && n === last[1] + 1) last[1] = n;
+    else out.push([n, n]);
+  }
+  return out;
+}
+
+/**
+ * Задето ли строкой то, чего правка касалась. Файл без записи — в правке: пометить «вне
+ * правки» то, чьи границы неизвестны, значило бы спрятать находку.
+ */
+export function touchedLine(touched, rel, line) {
+  const t = touched?.[String(rel).split('\\').join('/')];
+  if (!t || t.kind === 'whole') return true;
+  const n = Number(line);
+  if (!Number.isFinite(n)) return true;
+  if (t.kind === 'methods') return t.methods.some((m) => n >= m.start && n <= m.end);
+  return t.ranges.some(([a, b]) => n >= a && n <= b);
+}
+
 /** Все номера строк 1..n — файл без истории в HEAD «весь добавлен», от первой до последней. */
 function allLineNumbers(count) {
   const set = new Set();
@@ -506,6 +531,7 @@ function analyzeChangedMethods(diffs, root) {
   const touchedBodies = [];
   const newMethods = [];
   const signatureChanges = [];
+  const touched = {};
   let touchedCount = 0;
 
   for (const d of diffs) {
@@ -532,6 +558,7 @@ function analyzeChangedMethods(diffs, root) {
       if (!isTouched) continue;
       touchedCount++;
       touchedBodies.push(lines.slice(method.start - 1, method.end).join('\n'));
+      (touched[d.rel] = touched[d.rel] || { kind: 'methods', methods: [], ranges: [] }).methods.push({ name: method.name, start: method.start, end: method.end });
 
       const head = headByName.get(method.name.toLowerCase());
       if (!head) {
@@ -542,7 +569,7 @@ function analyzeChangedMethods(diffs, root) {
     }
   }
 
-  return { touchedCount, touchedBodies, newMethods, signatureChanges };
+  return { touchedCount, touchedBodies, newMethods, signatureChanges, touched };
 }
 
 /**
@@ -668,6 +695,14 @@ export function computeProfile({ files, root, config, metrics, configState }) {
   // только в добавленных строках диффа).
   const methodAnalysis = analyzeChangedMethods(diffs, root);
   const changedBodiesText = methodAnalysis.touchedBodies.join('\n');
+  // Граница правки по файлам: методы (BSL с историей), диапазоны строк (XML и прочее), весь
+  // файл (новый или без git). По ней run и субагент делят находки на «в правке» и «вне правки».
+  const touched = { ...methodAnalysis.touched };
+  for (const d of diffs) {
+    if (touched[d.rel]) continue;
+    if (d.isNew || d.note === 'no_git') touched[d.rel] = { kind: 'whole', methods: [], ranges: [] };
+    else touched[d.rel] = { kind: 'lines', methods: [], ranges: rangesOf(d.changedLines) };
+  }
 
   // --- ось 2: архетипы --------------------------------------------------------
   const dirsPresent = new Set(diffs.map((d) => normalize(d.rel).toLowerCase()));
@@ -830,6 +865,7 @@ export function computeProfile({ files, root, config, metrics, configState }) {
     driver,
     resolved,
     scopeLine,
+    touched,
   };
   if (noGit) result.note = 'no_git';
   return result;
