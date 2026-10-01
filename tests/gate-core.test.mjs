@@ -277,6 +277,43 @@ check('чужие правки: предупреждение не трогать
   rmSync(tr, { recursive: true, force: true });
 }
 
+// --- Цикл гейта: проходы, решения, сообщение пользователя ---
+{
+  const { MAX_PASSES, passCount, startPass, notePrompt, acceptPass, addDecision, updateSession } = await import('../tools/gate-cycle.mjs');
+  const cr = mkdtempSync(join(tmpdir(), 'qg-core-cycle-'));
+  const f = join(cr, 'src', 'CommonModules', 'Ц', 'Module.bsl');
+  mkdirSync(join(cr, 'src', 'CommonModules', 'Ц'), { recursive: true });
+  writeFileSync(f, 'Процедура Ц() КонецПроцедуры\n', 'utf8');
+  armGate({ root: cr, filePath: f, sessionId: 'c1', env: {} });
+
+  check('потолок проходов — три', MAX_PASSES === 3);
+  const session = { files: {} };
+  check('у новой сессии проходов нет', passCount(session) === 0);
+  const p1 = startPass(session, '2026-10-01T10:00:00.000Z');
+  check('первый проход получает номер 1 и базу HEAD', p1.n === 1 && p1.base === 'HEAD' && session.cycle.passes.length === 1);
+  startPass(session, '2026-10-01T10:30:00.000Z');
+  check('проходы считаются', passCount(session) === 2);
+  notePrompt(session, '2026-10-01T10:40:00.000Z');
+  check('сообщение пользователя сбрасывает счёт, записи остаются', passCount(session) === 0 && session.cycle.passes.length === 2);
+  startPass(session, '2026-10-01T10:50:00.000Z');
+  check('после сообщения считаются только новые проходы', passCount(session) === 1 && session.cycle.passes[2].n === 3);
+  check(
+    'принятый отчёт записывается в последний проход',
+    acceptPass(session, { report: 'C:/t/r.md', now: '2026-10-01T11:00:00.000Z' }) === true && session.cycle.passes[2].report === 'C:/t/r.md'
+  );
+  check('без проходов принимать нечего', acceptPass({ files: {} }, { report: 'x', now: 'n' }) === false);
+  addDecision(session, { text: 'Пользователь: четвёртый проход разрешён', pass: 4, now: '2026-10-01T11:10:00.000Z' });
+  check('решение записано', session.cycle.decisions[0].pass === 4);
+
+  const r = updateSession({ root: cr, sessionId: 'c1', env: {}, mutate: (s) => startPass(s, '2026-10-01T12:00:00.000Z').n });
+  check('updateSession меняет сессию в состоянии под замком', r === 1 && readPendingState(cr, {}).sessions.c1.cycle.passes.length === 1);
+  check(
+    'updateSession чужой сессии ничего не создаёт',
+    updateSession({ root: cr, sessionId: 'нет', env: {}, mutate: () => 'x' }) === null && !readPendingState(cr, {}).sessions['нет']
+  );
+  rmSync(cr, { recursive: true, force: true });
+}
+
 rmSync(outsideDir, { recursive: true, force: true });
 rmSync(root, { recursive: true, force: true });
 rmSync(root2, { recursive: true, force: true });
