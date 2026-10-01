@@ -3723,6 +3723,7 @@ check('верификатор не грузит каталог антипатт�
       ['🔴 в правке никогда не попадает', '🔴 в правке остаётся блокирующим'],
       ['Вне правки:', 'ответ называет число находок вне правки'],
       ['Нужно решение:', 'ответ называет число находок, требующих решения'],
+      ['Каждая находка — заголовок, начинающийся с уровня', 'контракт оформления находки, который читает валидатор'],
     ]) check(`gate-runner: ${label}`, text.includes(needle));
   }
   const stale = readdirSync(join(ROOT, 'agents')).filter((f) => readFileSync(join(ROOT, 'agents', f), 'utf8').includes('rlm-tools-bsl'));
@@ -4756,6 +4757,24 @@ section('Находка 🔴/🟠 из текста отчёта закрыта 
   const legacy = '# Отчёт\n\n## Находки\n\n### 🔴 Одна\nФайл: M.bsl:1\n\n### 🟡 Две\nФайл: M.bsl:2\n\n## quality evidence\n';
   const l = reportSections?.(legacy);
   check('прежний формат — всё в правке', l?.inChange?.length === 2 && l.outside.length === 0 && l.needsDecision.length === 0);
+
+  // Живой случай A/B: субагент оформил находки списком под заголовками разделов, валидатор
+  // разделов ничего не разобрал, и остаток в release вышел нулевым при трёх находках вне правки.
+  // Раздел без разобранных находок, но со строками списка — предупреждение с именем раздела.
+  const { validate } = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+  const listed = [
+    '# Отчёт', '', '## Открыто в правке', '', '### Вопрос 1: Неясность функции', 'Строка 19 — LOGIC-CONTRACT', '',
+    '## Вне правки', '', '3 техдолга:', '- Строка 7: virtual_table_without_filter', '- Строка 6: BSL-QUERY-IN-LOOP', '',
+    '## Нужно решение пользователя', '', 'нет', '',
+    '## quality evidence', '', '[qg scope: volume=C1, files=1, loc=+1/-0, archetypes=[none], driver=volume, resolved=code:L1|arch:skip|xml:n/a|hygiene:full]',
+  ].join('\n');
+  const warnsListed = validate(listed, { gate: false }).problems.filter((p) => p.severity === 'warn' && /без заголовков находок/.test(p.message));
+  check('раздел с находками списком даёт предупреждение по каждому такому разделу',
+    warnsListed.length === 2 && warnsListed.some((p) => /Открыто в правке/.test(p.message)) && warnsListed.some((p) => /Вне правки/.test(p.message)),
+    JSON.stringify(warnsListed.map((p) => p.message)));
+  check('раздел с «нет» предупреждения не даёт', !warnsListed.some((p) => /Нужно решение/.test(p.message)));
+  const okWarns = validate(text, { gate: false }).problems.filter((p) => /без заголовков находок/.test(p.message));
+  check('оформленные заголовками разделы предупреждения не дают', okWarns.length === 0, JSON.stringify(okWarns));
 }
 
 // ---------------------------------------------------------------------------
