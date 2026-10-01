@@ -7747,6 +7747,25 @@ section('Критичная находка не снимается молча');
   arm();
   const majorOnly = run('tools/gate.mjs', ['release', '--evidence', major, '--session', 'K1'], { env });
   check('🟠 без 🔴 решения не требует', majorOnly.code === 0, majorOnly.out.slice(0, 300));
+
+  // Остаток по разделам: находки вне правки и требующие решения гейт не держат, но уходят в
+  // журнал снятий и в вывод release — завершающее сообщение сессии строится по нему.
+  const sectioned = report('sections.md', [
+    '## Вердикт', 'есть замечания: 🟠 1; вне правки 1; нужно решение 1', '',
+    '## Открыто в правке', '', '### 🟠 Запрос в цикле', 'Файл: Module.bsl:40. Правило: qg:BSL-DB-READ-IN-LOOP', '',
+    '## Вне правки', '', '### 🔴 Потеря строки в старом методе', 'Файл: Module.bsl:300. Правило: qg:LOGIC-CASE-LOSS', '',
+    '## Нужно решение пользователя', '', '### 🟡 Срок хранения не согласован', 'Файл: Module.bsl:12', '',
+  ].join('\n'));
+  arm();
+  const relSections = run('tools/gate.mjs', ['release', '--evidence', sectioned, '--session', 'K1'], { env });
+  check('🔴 вне правки гейт не держит', relSections.code === 0, relSections.out.slice(0, 400));
+  check('release печатает остаток по разделам',
+    /Остаток[\s\S]*в правке[\s\S]*🟠 1[\s\S]*вне правки[\s\S]*Потеря строки[\s\S]*нужно решение[\s\S]*Срок хранения/i.test(relSections.out), relSections.out);
+  const recSections = JSON.parse(readFileSync(join(proj, '.claude', '.state', 'qg-done.json'), 'utf8')).sessions.K1;
+  check('остаток записан в журнал снятий',
+    recSections.residual?.inChange?.[0]?.sev === '🟠' && recSections.residual?.outside?.[0]?.title.includes('Потеря строки') && recSections.residual?.needsDecision?.length === 1,
+    JSON.stringify(recSections.residual));
+  check('запись цикла перенесена в журнал', 'cycle' in recSections);
 }
 
 section('gate.mjs run — инструментальная фаза одним вызовом');
