@@ -20,7 +20,7 @@ import { join, dirname, basename, extname, relative, isAbsolute, sep, resolve as
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { validate, severeFindings } from './evidence-validator.mjs';
+import { validate, severeFindings, reportSections } from './evidence-validator.mjs';
 import { resolveProjectRoot } from './project-root.mjs';
 import { readConfig, resolve as resolveConfigState, versionSuffix, pluginVersion } from './config.mjs';
 import { removeFileSync } from './fs-safe.mjs';
@@ -337,6 +337,9 @@ function cmdRelease(args) {
   // оставляли бы гейт снятым без следа именно там, где след и нужен.
   let warnings = [];
   let criticalFindings = [];
+  // Остаток последнего отчёта — открытое в правке, вне правки, требующее решения — уходит в
+  // журнал снятий и в вывод: по нему сессия пишет завершающее сообщение, а Stop-хук — итог.
+  let residual = null;
   const criticalDecision = typeof args['critical-decision'] === 'string' ? args['critical-decision'] : null;
 
   if (evidenceFile) {
@@ -365,6 +368,7 @@ function cmdRelease(args) {
     // взведёт гейт заново) либо записать решение — оно остаётся в журнале снятий. Разбор прозы
     // приближённый, поэтому отказ обходится одним флагом с причиной и гейт не запирает.
     criticalFindings = severeFindings(evidenceText).filter((f) => f.sev === '🔴');
+    residual = reportSections(evidenceText);
     if (criticalFindings.length) {
       const list = criticalFindings.map((f) => `  🔴 ${evidenceFile}:${f.line} — ${f.title}${f.ids.length ? ` [${f.ids.join(', ')}]` : ''}\n`).join('');
       if (criticalDecision === null) {
@@ -510,6 +514,8 @@ function cmdRelease(args) {
     reason: reason || null,
     criticalDecision: criticalFindings.length ? criticalDecision : null,
     criticalFindings: criticalFindings.map((x) => x.title),
+    residual,
+    cycle: sessionState.cycle || null,
     disowned: sessionState.disowned || [],
     warnings: [
       ...warnings.map((w) => ({ line: w.line || null, message: w.message })),
@@ -559,6 +565,16 @@ function cmdRelease(args) {
       );
     }
     process.stdout.write('\n');
+  }
+  if (residual) {
+    const countOf = (list) => ['🔴', '🟠', '🟡'].map((s) => `${s} ${list.filter((f) => f.sev === s).length}`).join(' ');
+    const titles = (list) => list.map((f) => `  ${f.sev} ${f.title}\n`).join('');
+    process.stdout.write(
+      'Остаток — покажи пользователю в завершающем сообщении:\n' +
+        `  в правке: ${countOf(residual.inChange)}\n${titles(residual.inChange)}` +
+        `  вне правки (техдолг, в этом цикле не исправлялось): ${residual.outside.length}\n${titles(residual.outside)}` +
+        `  нужно решение пользователя: ${residual.needsDecision.length}\n${titles(residual.needsDecision)}\n`
+    );
   }
   process.stdout.write(
     (evidenceFile
