@@ -13,7 +13,7 @@
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readPayload, projectRoot } from './_shared.mjs';
-import { gateHint, disownLines } from './gate-core.mjs';
+import { gateHint, disownLines, passesOf } from './gate-core.mjs';
 import { shellBefore, shellAfter, callKey } from './shell-core.mjs';
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -41,7 +41,7 @@ function foreignNote(foreign) {
   return `В окно команды попали правки другой сессии (${foreign.length}) — не взведены, владелец: ${owners.join(', ')}`;
 }
 
-function report({ armed, blind, foreign = [], relevant, background, sessionId, eventName }) {
+function report({ armed, blind, foreign = [], relevant, background, sessionId, eventName, root }) {
   const warnBackground = background && relevant;
   if (!armed.length && !blind.length && !foreign.length && !warnBackground) return;
   const out = {};
@@ -51,7 +51,7 @@ function report({ armed, blind, foreign = [], relevant, background, sessionId, e
   if (armed.length) {
     // Вывод обязан быть JSON с hookSpecificOutput: простой текст из PostToolUse до модели
     // не доходит (см. gate-arm.mjs).
-    const first = gateHint({ ...armed[0], sessionId, packageRoot: PACKAGE_ROOT, mode: 'claude' });
+    const first = gateHint({ ...armed[0], sessionId, packageRoot: PACKAGE_ROOT, mode: 'claude', passes: root ? passesOf({ root, sessionId }) : 0 });
     const rest = armed.slice(1, LIST_MAX + 1).map((a) => `Файл: ${a.rel}`);
     if (armed.length > LIST_MAX + 1) rest.push(`… и ещё ${armed.length - LIST_MAX - 1} — полный список: gate.mjs status`);
     out.hookSpecificOutput = {
@@ -92,7 +92,7 @@ try {
     } else if (process.argv[2] === 'post') {
       const eventName = payload?.hook_event_name === 'PostToolUseFailure' ? 'PostToolUseFailure' : 'PostToolUse';
       const background = payload?.tool_input?.run_in_background === true;
-      report({ ...shellAfter({ ...args, sessionId, ensureConfig, readConfig }), background, sessionId, eventName });
+      report({ ...shellAfter({ ...args, sessionId, ensureConfig, readConfig }), background, sessionId, eventName, root: args.root });
     }
   }
 } catch {

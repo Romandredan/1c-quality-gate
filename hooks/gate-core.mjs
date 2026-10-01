@@ -21,6 +21,7 @@ import { stateDirSegments } from '../tools/state-dir.mjs';
 import { removeFileSync } from '../tools/fs-safe.mjs';
 import { matchesAny } from '../tools/path-match.mjs';
 import { withStateLock } from '../tools/state-lock.mjs';
+import { MAX_PASSES, passCount } from '../tools/gate-cycle.mjs';
 
 export const PENDING = 'qg-pending.json';
 export const DONE = 'qg-done.json';
@@ -458,6 +459,15 @@ export function disownLines({ sessionId, packageRoot }) {
   ];
 }
 
+/** Сколько проходов цикла уже сделано у сессии — для номера следующего в текстах. */
+export function passesOf({ root, sessionId, env = process.env }) {
+  try {
+    return passCount(readPendingState(root, env)?.sessions?.[sessionId] || {});
+  } catch {
+    return 0;
+  }
+}
+
 /** Имя плагина из манифеста: с ним Claude Code называет типы субагентов (`<плагин>:<агент>`). */
 function pluginName(packageRoot) {
   try {
@@ -483,7 +493,7 @@ export function runnerType({ packageRoot, mode = 'claude' }) {
  * пересказ скатывается в «сделал хорошо». Служебные значения подставляет хук — модель их не
  * ищет и не может перепутать сессию.
  */
-export function handoffLines({ sessionId, packageRoot, mode = 'claude' }) {
+export function handoffLines({ sessionId, packageRoot, mode = 'claude', passes = 0 }) {
   const qg = String(packageRoot).split(sep).join('/');
   const tool = mode === 'claude' ? 'Agent' : 'task';
   const fallback =
@@ -507,7 +517,13 @@ export function handoffLines({ sessionId, packageRoot, mode = 'claude' }) {
     '  5. Что проверено вживую — сборки, запуски, данные из базы, с результатом; и что НЕ проверялось.',
     '  6. Сомнения — места, в которых ты не уверен. Пустым пункт не бывает: назови хотя бы слабейшее место.',
     '  7. Пути к спецификации, плану, задаче — если есть.',
+    ...(passes > 0
+      ? ['  8. По каждой находке прошлого отчёта: исправлена — как именно; не исправлена — почему. Субагент проверит причину по коду.']
+      : []),
     'Не оценивай свою работу («код чистый», «проблем нет»): вердикт выносит субагент.',
+    '',
+    `Эта проверка станет проходом ${passes + 1} из ${MAX_PASSES} в цикле. Находки вне правки (раздел отчёта «Вне правки») не исправляй:`,
+    'гейт проверяет правку, а не модуль; они уходят пользователю как техдолг.',
     '',
     'Он вернёт вердикт, находки и путь к отчёту. Находки 🔴/🟠 покажи пользователю в любом случае.',
     'Дальше — по вердикту:',
@@ -521,6 +537,10 @@ export function handoffLines({ sessionId, packageRoot, mode = 'claude' }) {
     '    находка не исправлена и где она показана. Решение сохраняется в журнале снятий.',
     '',
     `Субагент недоступен — тогда и только тогда ${fallback}.`,
+    '',
+    'Заканчивай работу сообщением пользователю с тремя списками: исправлено за цикл; остаток в правке с твоей',
+    'оценкой; вне правки и раздел «Нужно решение» — то, что требует его решения. Остаток печатает release,',
+    'не сокращай его.',
   ];
 }
 
@@ -533,7 +553,7 @@ export function handoffLines({ sessionId, packageRoot, mode = 'claude' }) {
  * не зная, которая своя. А при нескольких сессиях verify и release без `--session`
  * отказывают — выбрать чужую наугад хуже, чем не выбрать.
  */
-export function gateHint({ kind, rel, sessionId = null, created = null, outside = false, packageRoot, mode = 'claude' }) {
+export function gateHint({ kind, rel, sessionId = null, created = null, outside = false, packageRoot, mode = 'claude', passes = 0 }) {
   // Проверку в конце исполнит субагент, которому основная модель обязана описать работу. Сказано
   // при взводе, а не только при блокировке: замысел, отвергнутые варианты и сомнения проще
   // удержать по ходу, чем восстанавливать задним числом из длинной сессии.
@@ -552,6 +572,9 @@ export function gateHint({ kind, rel, sessionId = null, created = null, outside 
   // читается до первого разрешения `$QG` в сессии, а без готового пути модель не знает, что
   // именно она сможет запустить.
   const planLine = packageRoot ? `План прогона: node "${join(packageRoot, 'tools', 'gate.mjs').replace(/\\/g, '/')}" plan` : null;
+  // Правка после прохода — следующий проход цикла; номер и потолок названы при взводе, чтобы
+  // цикл «проход → исправить → проход» был виден модели до того, как она в него войдёт.
+  const passLine = passes > 0 ? [`Проверка после этой правки станет проходом ${passes + 1} из ${MAX_PASSES} в цикле.`] : [];
 
   const lines =
     kind === 'bsl'
@@ -561,6 +584,7 @@ export function gateHint({ kind, rel, sessionId = null, created = null, outside 
           ...(sessionId ? [`Сессия: ${sessionId} — её идентификатор для --session в verify/release.`] : []),
           '',
           call,
+          ...passLine,
           ...(planLine ? [planLine] : []),
           'Он сам определит глубину по трём осям (объём правки, архетипы кода, сложность)',
           'и запустит только нужные контуры. Мелкая правка проверяется за секунды.',
@@ -573,6 +597,7 @@ export function gateHint({ kind, rel, sessionId = null, created = null, outside 
           ...(sessionId ? [`Сессия: ${sessionId} — её идентификатор для --session в verify/release.`] : []),
           '',
           call,
+          ...passLine,
           ...(planLine ? [planLine] : []),
           'Для нового объекта критична проверка регистрации в составе конфигурации',
           '(Configuration.xml выгрузки либо Configuration.mdo в проекте EDT): файл-сирота',
@@ -617,7 +642,7 @@ export function gateHint({ kind, rel, sessionId = null, created = null, outside 
  * mode: 'opencode' — мягкий возврат к работе на session.idle; repeated — номер
  * автоматического возврата из maxReprompts.
  */
-export function blockMessage({ sessionId, files, foreign = 0, packageRoot, mode = 'claude', repeated = 0, maxReprompts = 3 }) {
+export function blockMessage({ sessionId, files, foreign = 0, packageRoot, mode = 'claude', repeated = 0, maxReprompts = 3, passes = 0 }) {
   const bsl = files.filter(([, v]) => v.kind === 'bsl').map(([k]) => k);
   const xml = files.filter(([, v]) => v.kind === 'metadata-xml').map(([k]) => k);
   const toolPath = (name) => join(packageRoot, 'tools', name).replace(/\\/g, '/');
@@ -655,13 +680,21 @@ export function blockMessage({ sessionId, files, foreign = 0, packageRoot, mode 
 
   lines.push(
     '',
-    ...handoffLines({ sessionId, packageRoot, mode }),
+    ...handoffLines({ sessionId, packageRoot, mode, passes }),
     '',
     'Правка действительно не требует проверки (комментарий, опечатка) — сними гейт явно, с причиной:',
     `  node "${toolPath('gate.mjs')}" release --session ${sessionId} --class C0 --reason "<почему>"`,
     'Причина сохраняется в состоянии: пропуск фиксируется, а не замалчивается.',
     ...(mode === 'claude' ? ['', `Сессия: ${sessionId}`] : [])
   );
+
+  if (passes >= MAX_PASSES) {
+    lines.push(
+      '',
+      `Потолок цикла: проходов уже ${passes} из ${MAX_PASSES}. Либо сними гейт по последнему отчёту и отдай остаток пользователю,`,
+      `либо запусти проверку с записанным решением: node "${toolPath('gate.mjs')}" run --session ${sessionId} --decision "<кто решил и что>"`
+    );
+  }
 
   if (foreign > 0) {
     lines.push(
