@@ -32,6 +32,7 @@ import { readCatalog } from './gen-catalog-index.mjs';
 import { expectedExamined } from './catalog.mjs';
 import { validatePatterns, matchesAny } from './path-match.mjs';
 import { handoffLines, toProjectRelative, pathKey, retireEmptySession } from '../hooks/gate-core.mjs';
+import { MAX_PASSES, passCount, startPass, addDecision, updateSession } from './gate-cycle.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -223,6 +224,10 @@ function cmdStatus() {
       );
     }
     if (s.disowned?.length) process.stdout.write(`  Снято с сессии отказом: ${s.disowned.length} — причины в состоянии сессии.\n`);
+    if (s.cycle?.passes?.length) {
+      const decisions = s.cycle.decisions?.length ? `, решений сверх потолка: ${s.cycle.decisions.length}` : '';
+      process.stdout.write(`  проходов в цикле: ${passCount(s)} из ${MAX_PASSES}${decisions}\n`);
+    }
     process.stdout.write('\n');
   }
 
@@ -1452,6 +1457,41 @@ function cmdRun(args) {
   const { files, sessionId, rootDir, profile, bslFiles } = ctx;
   const { resolved, archetypes: archetypeLabels, volume } = profile;
 
+  // Потолок цикла: три прохода без участия пользователя. Четвёртый — только с записанным
+  // решением: цикл «проход → исправить → проход» иначе не кончается (девять подряд на рабочем
+  // проекте). Запись прохода — до инструментов: прерванный прогон тоже проход.
+  let passLine = null;
+  if (sessionId) {
+    const decision = typeof args.decision === 'string' ? args.decision.trim() : null;
+    if (decision !== null && decision.length < 20) {
+      process.stderr.write(
+        'Решение для прохода сверх потолка слишком короткое — назови, кто решил и что: «Пользователь: разрешил четвёртый проход, потому что …».\n'
+      );
+      return 2;
+    }
+    const outcome = updateSession({
+      root: rootDir,
+      sessionId,
+      mutate: (session) => {
+        const done = passCount(session);
+        if (done >= MAX_PASSES && decision === null) return { refused: done };
+        const pass = startPass(session);
+        if (done >= MAX_PASSES) addDecision(session, { text: decision, pass: pass.n });
+        return { pass };
+      },
+    });
+    if (outcome?.refused) {
+      process.stderr.write(
+        `Потолок цикла: три прохода без сообщения пользователя уже сделаны (${outcome.refused}) — четвёртый не запускается.\n` +
+          'Либо сними гейт по последнему отчёту и отдай остаток пользователю, либо запусти с записанным решением:\n' +
+          `  node gate.mjs run --session ${sessionId} --decision "<кто решил и что>"\n` +
+          'Решение остаётся в журнале снятий.\n'
+      );
+      return 2;
+    }
+    if (outcome?.pass) passLine = `Проход ${outcome.pass.n} из ${MAX_PASSES} · база ${outcome.pass.base}`;
+  }
+
   let specs = buildToolSpecs({ files, resolvedCode: resolved.code, archetypeLabels, bslFiles, rootDir });
   if (wanted) {
     const known = new Set([...TOOL_ORDER.map(toolName), ...specs.map((s) => s.name)]);
@@ -1475,6 +1515,7 @@ function cmdRun(args) {
   w(rootLine());
   w(`QG=${qgRoot}\n\n`);
   w('## Профиль\n');
+  if (passLine) w(`${passLine}\n`);
   for (const l of profileLines(ctx)) w(`${l}\n`);
   w('\n## Инструменты\n');
 
@@ -1632,7 +1673,7 @@ function main(argv) {
         'Использование:\n' +
           '  node gate.mjs status\n' +
           '  node gate.mjs plan [--files <f> ...] [--json] [--no-analyzer]\n' +
-          '  node gate.mjs run [--files <f> ...] [--only <инструмент,...>] [--no-analyzer] [--verbose]\n' +
+          '  node gate.mjs run [--files <f> ...] [--only <инструмент,...>] [--no-analyzer] [--verbose] [--decision "<кто решил и что>"]\n' +
           '  node gate.mjs handoff [--session <id>] [--mode claude|opencode]\n' +
           '  node gate.mjs verify --layer <code|arch|xml|hygiene> <файл> [...]\n' +
           '  node gate.mjs disown [--session <id>] --reason "<кто записал файл>" <файл или каталог> [...]\n' +

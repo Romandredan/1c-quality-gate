@@ -7864,6 +7864,65 @@ section('gate.mjs run — инструментальная фаза одним �
   check('неизвестное имя в --only — отказ с перечнем', unknown.code === 2 && /hygiene-check/.test(unknown.out), unknown.out.slice(0, 300));
 }
 
+// Потолок проходов. Девять проходов подряд в одной сессии рабочего проекта — цикл «проход →
+// исправить → проход» без участия пользователя. Три прохода на цикл; четвёртый — только с
+// записанным решением, а сообщение пользователя начинает счёт заново.
+{
+  const pr = join(WORK, 'passes-root');
+  rmSync(pr, { recursive: true, force: true });
+  mkdirSync(join(pr, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: pr });
+  writeFileSync(join(pr, '.1c-quality-gate.json'), '{}', 'utf8');
+  const bsl = 'src/cf/CommonModules/М/Ext/Module.bsl';
+  writeFileSync(join(pr, bsl), BOM + 'Процедура П() Экспорт\n\tА = 1;\nКонецПроцедуры\n', 'utf8');
+  execFileSync('git', ['add', '-A'], { cwd: pr });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], { cwd: pr });
+  writeFileSync(join(pr, bsl), BOM + 'Процедура П() Экспорт\n\tА = 2;\nКонецПроцедуры\n', 'utf8');
+  const env = { CLAUDE_PROJECT_DIR: pr };
+  const hookIn = (script, payload, cwd = pr) => {
+    try {
+      execFileSync(process.execPath, [join(ROOT, 'hooks', script)], { input: JSON.stringify(payload), encoding: 'utf8', stdio: 'pipe', env: { ...process.env, CLAUDE_PROJECT_DIR: cwd } });
+      return 0;
+    } catch (e) {
+      return e.status ?? 1;
+    }
+  };
+  hookIn('gate-arm.mjs', { session_id: 'P1', cwd: pr, tool_input: { file_path: join(pr, bsl) } });
+  const p = join(pr, '.claude', '.state', 'qg-pending.json');
+  const pendingOf = () => JSON.parse(readFileSync(p, 'utf8')).sessions.P1;
+  const runOnce = (extra = []) => run('tools/gate.mjs', ['run', '--session', 'P1', '--no-analyzer', '--only', 'hygiene-check', ...extra], { env });
+
+  const r1 = runOnce();
+  check('первый проход назван в выводе run', r1.code === 0 && /^Проход 1 из 3 · база HEAD/m.test(r1.out), r1.out.slice(0, 500));
+  check('проход записан в цикл сессии', pendingOf().cycle?.passes?.length === 1 && pendingOf().cycle.passes[0].base === 'HEAD');
+  runOnce();
+  const r3 = runOnce();
+  check('третий проход ещё разрешён', r3.code === 0 && /^Проход 3 из 3/m.test(r3.out));
+  const st = run('tools/gate.mjs', ['status'], { env });
+  check('status показывает счёт проходов', /проходов в цикле: 3 из 3/.test(st.out), st.out);
+
+  const r4 = runOnce();
+  check('четвёртый проход без решения отказывает', r4.code === 2 && /Потолок цикла/.test(r4.out) && /--decision/.test(r4.out), r4.out.slice(0, 400));
+  check('отказ не записывает проход', pendingOf().cycle?.passes?.length === 3);
+  const short = runOnce(['--decision', 'ок']);
+  check('решение одной отпиской не принимается', short.code === 2 && /кто решил/i.test(short.out), short.out.slice(0, 300));
+  const r4d = runOnce(['--decision', 'Пользователь: разрешил четвёртый проход после разбора находок']);
+  check('четвёртый проход с решением идёт и решение записано',
+    r4d.code === 0 && /^Проход 4 из 3/m.test(r4d.out) && pendingOf().cycle.decisions?.[0]?.pass === 4, r4d.out.slice(0, 300));
+
+  // Сообщение пользователя — счёт заново: отметка на секунду вперёд, потому что проход и
+  // сообщение в тесте укладываются в одну миллисекунду; в живой работе сообщение всегда позже.
+  const state = JSON.parse(readFileSync(p, 'utf8'));
+  state.sessions.P1.cycle = state.sessions.P1.cycle || { passes: [], decisions: [] };
+  state.sessions.P1.cycle.userPromptAt = new Date(Date.now() + 1000).toISOString();
+  writeFileSync(p, JSON.stringify(state, null, 2), 'utf8');
+  const r5 = runOnce();
+  check('после сообщения пользователя проход идёт без решения', r5.code === 0 && /^Проход 5 из 3/m.test(r5.out), r5.out.slice(0, 300));
+
+  const noSession = run('tools/gate.mjs', ['run', '--files', bsl, '--no-analyzer', '--only', 'hygiene-check'], { env });
+  check('run по --files без сессии цикл не ведёт', noSession.code === 0 && !/^Проход /m.test(noSession.out));
+}
+
 section('План прогона — пути автотестов и подсказка YAxUnit');
 
 {
