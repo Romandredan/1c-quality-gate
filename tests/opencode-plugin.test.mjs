@@ -98,6 +98,7 @@ const surrender = existsSync(journalPath)
   : null;
 check('запись сдачи без scope (инертна для валидатора)', surrender && !('scope' in surrender) && surrender.sessionId === 's1');
 
+
 // Новая правка сбрасывает счётчик возвратов.
 writeFileSync(bslPath, 'Процедура Тест2() КонецПроцедуры\n', 'utf8');
 await plugin['tool.execute.after']({ callID: 'c4', sessionID: 's1', tool: 'edit' }, { args: { filePath: bslPath }, output: 'ok' });
@@ -284,6 +285,20 @@ check('ошибка клиента гасится', survived);
   check('bash: команда без записи ничего не дописывает', readOut.output === 'список');
   rmSync(shRoot, { recursive: true, force: true });
   rmSync(roRoot, { recursive: true, force: true });
+}
+
+// Итог после снятия: один раз сообщением в сессию, как systemMessage Stop-хука в Claude Code.
+{
+  const donePath = join(root, '.opencode', '.state', 'qg-done.json');
+  mkdirSync(join(root, '.opencode', '.state'), { recursive: true });
+  writeFileSync(donePath, JSON.stringify({ version: 2, sessions: { s7: { releasedAt: 'now', files: {}, mode: 'evidence', evidenceFile: 'C:/t/r.md', evidenceArchive: null,
+    residual: { inChange: [{ sev: '🟡', title: 'Шапка' }], outside: [], needsDecision: [] } } } }), 'utf8');
+  // Блок последний: он добавляет сообщение в общий счётчик клиента.
+  const before7 = client.prompts.length;
+  await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 's7' } } });
+  check('idle после снятия отправляет остаток один раз', client.prompts.length === before7 + 1 && /в правке: 🔴 0, 🟠 0, 🟡 1/.test(JSON.stringify(client.prompts.at(-1))));
+  await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 's7' } } });
+  check('повторный idle остаток не повторяет', client.prompts.length === before7 + 1);
 }
 
 rmSync(root, { recursive: true, force: true });

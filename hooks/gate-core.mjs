@@ -235,6 +235,35 @@ export function retireEmptySession({ state, sessionId, donePath, now = new Date(
 }
 
 /**
+ * Итог снятого гейта для пользователя — один раз. Основной канал — завершающее сообщение
+ * сессии по тексту передачи; это страховка на случай, когда модель списки сократила.
+ * Возвращает строку и ставит `relayedAt`; нечего сказать или уже сказано — null.
+ */
+export function residualNote({ root, sessionId, env = process.env }) {
+  const stateDir = join(root, ...stateDirSegments(env));
+  const donePath = join(stateDir, DONE);
+  if (!existsSync(donePath)) return null;
+  return withStateLock(stateDir, () => {
+    let done;
+    try {
+      done = JSON.parse(readFileSync(donePath, 'utf8'));
+    } catch {
+      return null;
+    }
+    const rec = done?.sessions?.[sessionId];
+    if (!rec?.residual || rec.relayedAt) return null;
+    const r = rec.residual;
+    const count = (list) => ['🔴', '🟠', '🟡'].map((s) => `${s} ${(list || []).filter((f) => f.sev === s).length}`).join(', ');
+    rec.relayedAt = new Date().toISOString();
+    writeFileSync(donePath, JSON.stringify(done, null, 2), 'utf8');
+    return (
+      `Гейт сессии снят. Остаток в правке: ${count(r.inChange)}; вне правки ${(r.outside || []).length}; ` +
+      `нужно решение ${(r.needsDecision || []).length}. Отчёт: ${rec.evidenceArchive || rec.evidenceFile || '—'}`
+    );
+  });
+}
+
+/**
  * Пути автотестов из настройки. Любая ошибка — пустой список: хук качества не имеет права
  * ломать работу, а неверную настройку показывает `gate.mjs plan` отказом.
  */
