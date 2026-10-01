@@ -7941,6 +7941,45 @@ section('gate.mjs run — инструментальная фаза одним �
   check('hooks.json подписан на UserPromptSubmit', JSON.stringify(hooksJson.hooks.UserPromptSubmit || []).includes('gate-prompt.mjs'));
 }
 
+// Классификация «в правке / вне правки»: гейт проверяет правку, а не модуль. Находка в
+// нетронутом методе не исправляется в этом цикле — она уходит в техдолг. Границу печатает
+// run, чтобы субагент классифицировал модельные находки по той же таблице, а не на глаз.
+{
+  const tr = join(WORK, 'touched-root');
+  rmSync(tr, { recursive: true, force: true });
+  mkdirSync(join(tr, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+  mkdirSync(join(tr, 'src', 'cf', 'Catalogs'), { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: tr });
+  writeFileSync(join(tr, '.1c-quality-gate.json'), '{}', 'utf8');
+  const bsl = 'src/cf/CommonModules/М/Ext/Module.bsl';
+  const xml = 'src/cf/Catalogs/Товары.xml';
+  writeFileSync(join(tr, bsl), BOM + 'Процедура Старая() Экспорт\n\tА = 1;\nКонецПроцедуры\n\nПроцедура Новая() Экспорт\n\tБ = 1;\nКонецПроцедуры\n', 'utf8');
+  writeFileSync(join(tr, xml), '<?xml version="1.0" encoding="UTF-8"?>\n<MetaDataObject>\n<a/>\n<b/>\n</MetaDataObject>\n', 'utf8');
+  execFileSync('git', ['add', '-A'], { cwd: tr });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], { cwd: tr });
+  writeFileSync(join(tr, bsl), BOM + 'Процедура Старая() Экспорт\n\tА = 1;\nКонецПроцедуры\n\nПроцедура Новая() Экспорт\n\tБ = 2;\n\tВ = 3;\nКонецПроцедуры\n', 'utf8');
+  writeFileSync(join(tr, xml), '<?xml version="1.0" encoding="UTF-8"?>\n<MetaDataObject>\n<a/>\n<c/>\n</MetaDataObject>\n', 'utf8');
+  const fresh = 'src/cf/CommonModules/Н/Ext/Module.bsl';
+  mkdirSync(join(tr, 'src', 'cf', 'CommonModules', 'Н', 'Ext'), { recursive: true });
+  writeFileSync(join(tr, fresh), BOM + 'Процедура Н() Экспорт\nКонецПроцедуры\n', 'utf8');
+
+  const { computeProfile, touchedLine } = await import(pathToFileURL(join(ROOT, 'tools', 'profile.mjs')).href);
+  const prof = computeProfile({ files: [bsl, xml, fresh], root: tr, config: {}, metrics: {}, configState: null });
+  check('профиль называет задетые методы с границами', prof.touched?.[bsl]?.methods?.some((m) => m.name === 'Новая' && m.start === 5), JSON.stringify(prof.touched));
+  check('нетронутый метод в правку не входит', typeof touchedLine === 'function' && !touchedLine(prof.touched, bsl, 2) && touchedLine(prof.touched, bsl, 6));
+  check('XML задет диапазонами строк hunk', prof.touched?.[xml]?.kind === 'lines' && touchedLine?.(prof.touched, xml, 4) && !touchedLine?.(prof.touched, xml, 3), JSON.stringify(prof.touched?.[xml]));
+  check('новый файл задет целиком', prof.touched?.[fresh]?.kind === 'whole' && touchedLine?.(prof.touched, fresh, 1));
+  check('неизвестный файл считается в правке — ошибка в громкую сторону', touchedLine?.(prof.touched, 'нет/такого.bsl', 1) === true);
+
+  const r = run('tools/gate.mjs', ['run', '--files', bsl, xml, fresh, '--no-analyzer', '--only', 'hygiene-check,bsl-lint'], { env: { QG_PROJECT_DIR: tr } });
+  check('run печатает раздел «Задето правкой»', /## Задето правкой[\s\S]*Module\.bsl: Новая\(5[–-]8\)/.test(r.out), r.out.slice(0, 900));
+  check('новый файл назван целиком', /Н\/Ext\/Module\.bsl: весь файл \(новый\)/.test(r.out));
+  const { markOutside } = await import(pathToFileURL(join(ROOT, 'tools', 'gate.mjs')).href);
+  check('строка вывода инструмента вне правки помечается', /← вне правки$/.test(markOutside?.(`${bsl}:2 — qg:X что-то`, prof.touched, [bsl, xml, fresh]) || ''));
+  check('строка в правке не помечается', typeof markOutside === 'function' && !/вне правки/.test(markOutside(`${bsl}:6 — qg:X что-то`, prof.touched, [bsl, xml, fresh])));
+  check('строка без адреса не помечается', typeof markOutside === 'function' && !/вне правки/.test(markOutside('итого: 2 находки', prof.touched, [bsl])));
+}
+
 section('План прогона — пути автотестов и подсказка YAxUnit');
 
 {

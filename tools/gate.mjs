@@ -26,7 +26,7 @@ import { readConfig, resolve as resolveConfigState, versionSuffix, pluginVersion
 import { removeFileSync } from './fs-safe.mjs';
 import { stateDirSegments } from './state-dir.mjs';
 import { withStateLock } from './state-lock.mjs';
-import { computeProfile, ARCHETYPES, BASE_CHECKLIST } from './profile.mjs';
+import { computeProfile, touchedLine, ARCHETYPES, BASE_CHECKLIST } from './profile.mjs';
 import { SCOPES } from './evidence-scopes.mjs';
 import { readCatalog } from './gen-catalog-index.mjs';
 import { expectedExamined } from './catalog.mjs';
@@ -1436,6 +1436,31 @@ function toolOutcome(r, evidence) {
  * не сочиняет ничего — в том числе за упавший инструмент: его строки в черновике просто нет,
  * и валидатор следа это увидит. Сбой прогон не останавливает; код возврата тогда 1.
  */
+/**
+ * Пометка строки вывода инструмента, адрес которой лежит вне правки: `<файл>:<строка>` либо
+ * `<файл>(<строка>` по любому файлу сессии (совпадение по хвосту пути, регистр не важен).
+ * Приближение заявлено: строка без адреса остаётся как есть.
+ */
+export function markOutside(line, touched, files) {
+  for (const rel of files) {
+    const base = String(rel).split(/[\\/]/).pop().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = line.match(new RegExp(`${base}[:(](\\d+)`, 'i'));
+    if (!m) continue;
+    return touchedLine(touched, rel, Number(m[1])) ? line : `${line} ← вне правки`;
+  }
+  return line;
+}
+
+/** Строки раздела «Задето правкой»: граница правки по файлам, как её считает профиль. */
+function touchedLines(touched, files) {
+  return files.map((rel) => {
+    const t = touched?.[rel];
+    if (!t || t.kind === 'whole') return `${rel}: весь файл (новый)`;
+    if (t.kind === 'methods') return `${rel}: ${t.methods.map((m) => `${m.name}(${m.start}–${m.end})`).join(', ')}`;
+    return `${rel}: строки ${t.ranges.map(([a, b]) => (a === b ? String(a) : `${a}–${b}`)).join(', ')}`;
+  });
+}
+
 function cmdRun(args) {
   const wanted = typeof args.only === 'string' ? args.only.split(',').map((s) => s.trim()).filter(Boolean) : null;
   // Анализатор исполняется как инструмент плана — тогда его единственный запуск отдаёт и метрики.
@@ -1517,6 +1542,9 @@ function cmdRun(args) {
   w('## Профиль\n');
   if (passLine) w(`${passLine}\n`);
   for (const l of profileLines(ctx)) w(`${l}\n`);
+  w('\n## Задето правкой\n');
+  w('Граница относительно HEAD: находка по строке вне этих методов и диапазонов — «вне правки», в этом цикле не исправляется и гейт не держит.\n');
+  for (const l of touchedLines(profile.touched, files)) w(`${l}\n`);
   w('\n## Инструменты\n');
 
   const evidenceAll = [];
@@ -1590,7 +1618,7 @@ function cmdRun(args) {
     w('\n## Вывод инструментов с находками и сбоями\n');
     for (const s of shown) {
       const lines = s.output.split(/\r?\n/).filter((l) => l.trim() !== '' && !EVIDENCE_LINE.test(l) && !/^## quality evidence/.test(l));
-      const cut = args.verbose === true ? lines : lines.slice(0, RUN_OUTPUT_LINES);
+      const cut = (args.verbose === true ? lines : lines.slice(0, RUN_OUTPUT_LINES)).map((l) => markOutside(l, profile.touched, files));
       w(`### ${s.title}\n${cut.join('\n')}\n`);
       if (cut.length < lines.length) w(`… ещё строк: ${lines.length - cut.length} — полностью: ${relRun}/${s.tag}.log\n`);
       w('\n');
@@ -1684,4 +1712,7 @@ function main(argv) {
   }
 }
 
-process.exit(main(process.argv));
+// Импорт из тестов (`markOutside`) не должен запускать утилиту: как в evidence-validator.mjs.
+if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith('gate.mjs')) {
+  process.exit(main(process.argv));
+}
