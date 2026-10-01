@@ -7921,6 +7921,24 @@ section('gate.mjs run — инструментальная фаза одним �
 
   const noSession = run('tools/gate.mjs', ['run', '--files', bsl, '--no-analyzer', '--only', 'hygiene-check'], { env });
   check('run по --files без сессии цикл не ведёт', noSession.code === 0 && !/^Проход /m.test(noSession.out));
+
+  // Хук сообщения пользователя: ставит отметку только взведённой сессии, в чужом проекте и
+  // чужой сессии не делает ничего и не создаёт файлов.
+  const prompt = (cwd, session) => hookIn('gate-prompt.mjs', { session_id: session, cwd, hook_event_name: 'UserPromptSubmit', prompt: 'продолжай' }, cwd);
+  // Отметка выше поставлена на секунду вперёд, поэтому сравнение — на изменение, а не на рост.
+  const before = pendingOf().cycle?.userPromptAt || '';
+  check('хук сообщения пользователя завершается кодом 0', prompt(pr, 'P1') === 0);
+  const after = pendingOf().cycle?.userPromptAt || '';
+  check('хук сообщения пользователя ставит отметку сессии', after !== before && Date.parse(after) > 0 && Date.now() - Date.parse(after) < 60000);
+  prompt(pr, 'чужая');
+  check('чужая сессия не появляется в состоянии', !JSON.parse(readFileSync(p, 'utf8')).sessions['чужая']);
+  const empty = join(WORK, 'prompt-empty');
+  rmSync(empty, { recursive: true, force: true });
+  mkdirSync(empty, { recursive: true });
+  prompt(empty, 'P1');
+  check('в проекте без состояния хук ничего не создаёт', !existsSync(join(empty, '.claude')));
+  const hooksJson = JSON.parse(readFileSync(join(ROOT, 'hooks', 'hooks.json'), 'utf8'));
+  check('hooks.json подписан на UserPromptSubmit', JSON.stringify(hooksJson.hooks.UserPromptSubmit || []).includes('gate-prompt.mjs'));
 }
 
 section('План прогона — пути автотестов и подсказка YAxUnit');
