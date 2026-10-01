@@ -4721,6 +4721,31 @@ section('Находка 🔴/🟠 из текста отчёта закрыта 
     !res.problems.some((p) => /LOGIC-CONTRACT/.test(p.message) && /не из реестра/.test(p.message)));
 }
 
+// Разделы отчёта: «Вне правки» и «Нужно решение» — не блокируют снятие, «Открыто в правке» —
+// как раньше. Прежний формат (один список находок) разбирается как «в правке».
+{
+  const { reportSections, severeFindings } = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+  const text = [
+    '# Отчёт', '', '## Вердикт', 'есть замечания: 🟠 1, 🟡 1; вне правки 2; нужно решение 1', '',
+    '## Открыто в правке', '', '### 🟠 Запрос в цикле', 'Файл: M.bsl:40. Правило: qg:BSL-DB-READ-IN-LOOP', '',
+    '### 🟡 Шапка расходится с кодом', 'Файл: M.bsl:12', '',
+    '## Вне правки', '', '### 🔴 Потеря строки выборки в старом методе', 'Файл: M.bsl:300', '', '### 🟡 Магическое число', 'Файл: M.bsl:310', '',
+    '## Нужно решение пользователя', '', '### 🟠 Поведение при пустом ответе сервиса не определено', 'Файл: M.bsl:55', '',
+    '## Отклонённые кандидаты', '', '### 🔴 Ложная TypeMismatch', 'отклонена', '',
+    '## quality evidence', '', '[qg scope: volume=C1, files=1, loc=+1/-0, archetypes=[none], driver=volume, resolved=code:L1|arch:skip|xml:n/a|hygiene:full]',
+  ].join('\n');
+  const s = reportSections?.(text);
+  check('в правке — две находки с уровнями', s?.inChange?.length === 2 && s.inChange[0].sev === '🟠' && s.inChange[1].sev === '🟡', JSON.stringify(s?.inChange));
+  check('вне правки — две, включая 🔴', s?.outside?.length === 2 && s.outside[0].sev === '🔴', JSON.stringify(s?.outside));
+  check('нужно решение — одна', s?.needsDecision?.length === 1 && /пустом ответе/.test(s.needsDecision[0].title));
+  check('отклонённые не считаются', s && !JSON.stringify(s).includes('Ложная TypeMismatch'));
+  const severe = severeFindings(text);
+  check('блокирующие — только из раздела в правке', severe.length === 1 && severe[0].sev === '🟠', JSON.stringify(severe));
+  const legacy = '# Отчёт\n\n## Находки\n\n### 🔴 Одна\nФайл: M.bsl:1\n\n### 🟡 Две\nФайл: M.bsl:2\n\n## quality evidence\n';
+  const l = reportSections?.(legacy);
+  check('прежний формат — всё в правке', l?.inChange?.length === 2 && l.outside.length === 0 && l.needsDecision.length === 0);
+}
+
 // ---------------------------------------------------------------------------
 section('План направляет каждый XML в свой валидатор');
 
@@ -7921,6 +7946,15 @@ section('gate.mjs run — инструментальная фаза одним �
 
   const noSession = run('tools/gate.mjs', ['run', '--files', bsl, '--no-analyzer', '--only', 'hygiene-check'], { env });
   check('run по --files без сессии цикл не ведёт', noSession.code === 0 && !/^Проход /m.test(noSession.out));
+
+  // Принятый валидатором отчёт записывается в последний проход: следующему выпуску нужен путь
+  // к прошлому отчёту для прохода по исправлению, а сессии — для списков остатка.
+  const okReport = join(WORK, 'passes-accepted.md');
+  writeFileSync(okReport, readFileSync(ev('valid.md'), 'utf8'), 'utf8');
+  const v = run('tools/evidence-validator.mjs', [okReport, '--gate', '--session', 'P1'], { env });
+  check('валидатор принял след фикстуры', v.code === 0, v.out.slice(0, 400));
+  const lastPass = pendingOf().cycle.passes.at(-1);
+  check('принятый отчёт записан в последний проход', lastPass.report === okReport && typeof lastPass.acceptedAt === 'string', JSON.stringify(lastPass));
 
   // Хук сообщения пользователя: ставит отметку только взведённой сессии, в чужом проекте и
   // чужой сессии не делает ничего и не создаёт файлов.

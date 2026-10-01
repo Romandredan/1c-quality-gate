@@ -18,7 +18,8 @@
  */
 
 import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
+import { acceptPass, updateSession } from './gate-cycle.mjs';
 import { resolve as resolveConfig, evidenceValue, DEFAULTS as CONFIG_DEFAULTS } from './config.mjs';
 import { SCOPES, TOOL_BACKED, RENAMED, isKnownScope, isKnownQgId } from './evidence-scopes.mjs';
 import { readJournal, coveredFiles, normalizePath } from './run-journal.mjs';
@@ -332,7 +333,12 @@ const SEVERE = ['🔴', '🟠'];
 const SEVERITY_LEAD = /^(🔴|🟠|🟡|🟢|⚪)\s*(.*)$/u;
 const SEVERITY_LABEL =
   /^(critical|major|minor|blocker|блокирующ\S*|критическ\S*|существенн\S*|мелк\S*|второстепенн\S*)?[\s\d().:—–-]*$/i;
+// Раздел «Вне правки» — находки в коде, которого правка не касалась: гейт они не держат по
+// решению владельца (спецификация 2026-10-01); «Нужно решение» — то, что субагент оценить не
+// может, уходит пользователю в итоге снятия. Оба раздела разбираются, но из блокирующих исключены.
 const NOT_FINDINGS = /отклон|не\s*провер|непровер|предложени/i;
+const OUTSIDE_SECTION = /вне\s+правки/i;
+const DECISION_SECTION = /нужно\s+решени/i;
 const FINDING_ID = /qg:[A-Z][A-Z0-9-]*[A-Z0-9]|#?std\d{3,4}|bslls:[A-Za-z][\w-]*|acc:\d{3,4}|v8cs:[\w-]+/g;
 
 const normId = (id) => id.replace(/^#/, '');
@@ -343,10 +349,22 @@ const normId = (id) => id.replace(/^#/, '');
  * при 🔴 без записанного решения. Приближение то же и заявлено там же, где используется.
  */
 export function severeFindings(text) {
-  return collectSevere(text).map((f) => ({
-    title: f.title, sev: f.sev, line: f.line,
-    ids: [...new Set(([f.title, ...f.body].join('\n').match(FINDING_ID) || []).map(normId))],
-  }));
+  return collectFindings(text)
+    .filter((f) => f.section === 'change' && SEVERE.includes(f.sev))
+    .map((f) => ({
+      title: f.title, sev: f.sev, line: f.line,
+      ids: [...new Set(([f.title, ...f.body].join('\n').match(FINDING_ID) || []).map(normId))],
+    }));
+}
+
+/** Находки прозы по разделам: в правке, вне правки, нужно решение. Все уровни. */
+export function reportSections(text) {
+  const all = collectFindings(text).map((f) => ({ sev: f.sev, title: f.title, line: f.line, section: f.section }));
+  return {
+    inChange: all.filter((f) => f.section === 'change'),
+    outside: all.filter((f) => f.section === 'outside'),
+    needsDecision: all.filter((f) => f.section === 'decision'),
+  };
 }
 
 /** Находки 🔴/🟠 из прозы отчёта, ни один идентификатор которых не стоит в verdict=violation. */
@@ -359,12 +377,16 @@ export function uncoveredFindings(text, records) {
   return severeFindings(text).filter((f) => !f.ids.some((id) => violated.has(id)));
 }
 
-/** Разбор прозы отчёта до секции следа: заголовки с важностью 🔴/🟠 и их тела. */
-function collectSevere(text) {
+/**
+ * Разбор прозы отчёта до секции следа: заголовки с важностью и их тела, с разделом —
+ * `change` (в правке), `outside` (вне правки), `decision` (нужно решение пользователя).
+ * Разделы отклонённого, непроверенного и предложений исключены, как раньше.
+ */
+function collectFindings(text) {
   const at = text.indexOf(SECTION);
   const lines = (at === -1 ? text : text.slice(0, at)).split(/\r?\n/);
   const findings = [];
-  const stack = []; // { level, excluded, markerSev, finding }
+  const stack = []; // { level, section, excluded, markerSev, finding }
   let current = null;
   let fence = false;
   lines.forEach((line, i) => {
@@ -387,7 +409,9 @@ function collectSevere(text) {
       return;
     }
 
-    const entry = { level, excluded: stack.some((s) => s.excluded) || NOT_FINDINGS.test(title) };
+    const parentSection = stack.map((s) => s.section).filter((x) => x && x !== 'change').pop() || null;
+    const section = OUTSIDE_SECTION.test(title) ? 'outside' : DECISION_SECTION.test(title) ? 'decision' : parentSection || 'change';
+    const entry = { level, section, excluded: stack.some((s) => s.excluded) || (section === 'change' && NOT_FINDINGS.test(title)) };
     current = null;
     if (!entry.excluded) {
       const lead = title.match(SEVERITY_LEAD);
@@ -396,9 +420,9 @@ function collectSevere(text) {
       if (lead && SEVERITY_LABEL.test(lead[2])) entry.markerSev = lead[1];
       else sev = lead ? lead[1] : inherited || null;
       if (sev) {
-        entry.finding = { title: lead ? lead[2] : title, sev, line: i + 1, body: [] };
+        entry.finding = { title: lead ? lead[2] : title, sev, line: i + 1, body: [], section };
         current = entry.finding;
-        if (SEVERE.includes(sev)) findings.push(entry.finding);
+        findings.push(entry.finding);
       }
     }
     stack.push(entry);
@@ -973,6 +997,15 @@ function main(argv) {
   process.stdout.write(
     `\nЗаписей: ${records.length}. Ошибок: ${errors}, предупреждений: ${warns}. Режим: ${gate ? 'gate' : 'lint'}.\n`
   );
+  // Принятый отчёт — часть записи прохода: по нему следующий проход проверяет закрытие находок,
+  // а снятие печатает остаток. Пишется только в режиме гейта и только по названной сессии.
+  if (gate && session && exitCode === 0) {
+    try {
+      updateSession({ root: root || projectRoot(), sessionId: session, mutate: (s) => acceptPass(s, { report: resolvePath(file) }) });
+    } catch {
+      /* запись прохода — удобство следующего прохода, не условие приёмки следа */
+    }
+  }
   return exitCode;
 }
 
