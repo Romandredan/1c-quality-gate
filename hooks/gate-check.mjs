@@ -15,7 +15,7 @@
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readPayload, projectRoot } from './_shared.mjs';
-import { readPendingState, blockMessage } from './gate-core.mjs';
+import { readPendingState, blockMessage, residualNote } from './gate-core.mjs';
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -28,9 +28,19 @@ function main() {
   // построению: выход из блока всегда доступен (прогон навыка либо явное снятие с
   // указанием причины), а на повторной попытке сообщение дополняется прямым путём.
   const repeated = Boolean(payload?.stop_hook_active);
+  const root = projectRoot(payload);
+  const sessionId = String(payload?.session_id || 'unknown-session');
 
-  const state = readPendingState(projectRoot(payload));
-  if (!state) return 0;
+  // Итог снятого гейта — один раз, независимо от того, что написала модель. Считается до
+  // чтения состояния: после снятия последней сессии файла состояния может уже не быть.
+  const note = residualNote({ root, sessionId });
+  const relay = () => {
+    if (note) process.stdout.write(JSON.stringify({ systemMessage: note }) + '\n');
+    return 0;
+  };
+
+  const state = readPendingState(root);
+  if (!state) return relay();
 
   if (state.corrupt) {
     // Повреждённый маркер — блокируем: неизвестное состояние безопаснее считать непроверенным.
@@ -44,7 +54,6 @@ function main() {
 
   // Блокируем ТОЛЬКО за правки этой сессии. Чужие остаются в состоянии нетронутыми:
   // параллельная сессия отвечает за свой гейт сама, а перехватывать её работу нельзя.
-  const sessionId = String(payload?.session_id || 'unknown-session');
   const sessions = state.sessions || {};
   const mine = sessions[sessionId]?.files || {};
   const files = Object.entries(mine);
@@ -62,7 +71,7 @@ function main() {
           'Эта сессия их не касалась — завершение не блокируется.\n'
       );
     }
-    return 0;
+    return relay();
   }
 
   process.stderr.write(

@@ -7766,6 +7766,22 @@ section('Критичная находка не снимается молча');
     recSections.residual?.inChange?.[0]?.sev === '🟠' && recSections.residual?.outside?.[0]?.title.includes('Потеря строки') && recSections.residual?.needsDecision?.length === 1,
     JSON.stringify(recSections.residual));
   check('запись цикла перенесена в журнал', 'cycle' in recSections);
+
+  // Итог доходит до пользователя независимо от текста модели: первое завершение после снятия
+  // печатает служебное сообщение со счётом остатка; второе — уже нет.
+  const stopOut = (session) => {
+    try {
+      return execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-check.mjs')], { input: JSON.stringify({ session_id: session, cwd: proj }), encoding: 'utf8', stdio: 'pipe', env: { ...process.env, ...env } });
+    } catch (e) {
+      return `EXIT ${e.status}: ${e.stdout || ''}${e.stderr || ''}`;
+    }
+  };
+  const first = stopOut('K1');
+  check('Stop после снятия печатает остаток пользователю',
+    /"systemMessage"/.test(first) && /в правке: 🔴 0, 🟠 1, 🟡 0/.test(first) && /вне правки 1/.test(first) && /нужно решение 1/.test(first) && /sections\.md/.test(first), first.slice(0, 500));
+  const second = stopOut('K1');
+  check('повторное завершение остаток не повторяет', !/systemMessage/.test(second), second.slice(0, 300));
+  check('чужая сессия чужой остаток не видит', !/systemMessage/.test(stopOut('K9')));
 }
 
 section('gate.mjs run — инструментальная фаза одним вызовом');

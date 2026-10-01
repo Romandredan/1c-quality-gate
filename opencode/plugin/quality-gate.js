@@ -287,6 +287,15 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
         const sessionId = String(event?.properties?.sessionID || '');
         if (!sessionId) return;
 
+        // Итог снятого гейта — один раз: аналог systemMessage Stop-хука Claude Code.
+        const note = core.residualNote({ root, sessionId, env: stateEnv });
+        if (note) {
+          await client.session
+            .prompt({ path: { id: sessionId }, body: { parts: [{ type: 'text', text: `[ГЕЙТ КАЧЕСТВА 1С] ${note}` }] } })
+            .catch(() => {});
+          return;
+        }
+
         const state = core.readPendingState(root, stateEnv);
         if (!state) return;
 
