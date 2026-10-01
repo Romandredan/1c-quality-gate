@@ -16,6 +16,7 @@ import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readPayload, projectRoot } from './_shared.mjs';
 import { readPendingState, blockMessage, residualNote } from './gate-core.mjs';
+import { passCount } from '../tools/gate-cycle.mjs';
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -75,7 +76,7 @@ function main() {
   }
 
   process.stderr.write(
-    blockMessage({ sessionId, files, foreign, packageRoot: PACKAGE_ROOT, mode: 'claude', repeated }) + '\n'
+    blockMessage({ sessionId, files, foreign, packageRoot: PACKAGE_ROOT, mode: 'claude', repeated, passes: passCount(sessions[sessionId]) }) + '\n'
   );
   return 2;
 }

@@ -194,6 +194,22 @@ for (const [mode, bm] of [['claude', bmC], ['opencode', bmO]]) {
   check(`${mode}: согласие отсутствующего пользователя не выдумывается`, /не выдумывай его согласие/.test(bm));
   check(`${mode}: находки 🔴/🟠 показываются пользователю всегда`, /покажи пользователю в любом случае/.test(bm));
 }
+// Цикл проходов в текстах: номер прохода и потолок, правило о находках вне правки, три списка
+// в завершающем сообщении — сессия узнаёт их из текста передачи, другого канала к ней нет.
+{
+  const bm2 = blockMessage({ sessionId: 's1', files, packageRoot: root, mode: 'claude', passes: 2 });
+  check('блокировка называет номер прохода и потолок', /проходом 3 из 3/.test(bm2));
+  check('передача на повторном проходе требует отчёт по прошлым находкам', /8\. По каждой находке прошлого отчёта/.test(bm2));
+  check('первый проход пункта 8 не требует', !/8\. По каждой/.test(bmC));
+  for (const bm of [bmC, bm2]) {
+    check('правило о находках вне правки', /вне правки[^\n]*не исправляй/i.test(bm));
+    check('три списка в завершающем сообщении', /исправлено за цикл/i.test(bm) && /вне правки/i.test(bm) && /нужно решение/i.test(bm));
+  }
+  const bmCap = blockMessage({ sessionId: 's1', files, packageRoot: root, mode: 'claude', passes: 3 });
+  check('после потолка названы два выхода', /потолок цикла/i.test(bmCap) && /--decision/.test(bmCap));
+  const hint2 = gateHint({ kind: 'bsl', rel: 'a.bsl', sessionId: 'sess-1', packageRoot: root, mode: 'claude', passes: 1 });
+  check('подсказка при взводе называет следующий проход', /проходом 2 из 3/.test(hint2));
+}
 check('claude: тип субагента с именем плагина', /`[a-z0-9-]+:gate-runner`/.test(bmC));
 check('opencode: тип субагента без префикса, инструмент task', /`gate-runner`/.test(bmO) && /task/.test(bmO));
 const hintRunner = gateHint({ kind: 'bsl', rel: 'a.bsl', sessionId: 'sess-1', packageRoot: root, mode: 'claude' });

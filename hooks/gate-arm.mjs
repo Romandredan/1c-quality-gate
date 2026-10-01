@@ -11,7 +11,7 @@
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readPayload, projectRoot } from './_shared.mjs';
-import { armGate, gateHint } from './gate-core.mjs';
+import { armGate, gateHint, passesOf } from './gate-core.mjs';
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -39,7 +39,7 @@ function main() {
   // Вывод обязан быть JSON с hookSpecificOutput: простой текст из PostToolUse до модели
   // НЕ доходит — маркер при этом пишется, и получается гейт, о котором модель узнаёт только
   // при попытке завершить работу. Проверено на живой сессии.
-  const hint = gateHint({ ...armed, sessionId, packageRoot: PACKAGE_ROOT, mode: 'claude' });
+  const hint = gateHint({ ...armed, sessionId, packageRoot: PACKAGE_ROOT, mode: 'claude', passes: passesOf({ root, sessionId }) });
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: {

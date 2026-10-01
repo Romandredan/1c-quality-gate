@@ -1689,7 +1689,7 @@ function cmdHandoff(args) {
   }
   // Каталог состояния OpenCode задаёт его плагин через окружение оболочки — по нему и режим.
   const mode = args.mode === 'opencode' || (args.mode !== 'claude' && process.env.QG_STATE_DIR) ? 'opencode' : 'claude';
-  process.stdout.write(handoffLines({ sessionId, packageRoot: dirname(HERE), mode }).join('\n') + '\n');
+  process.stdout.write(handoffLines({ sessionId, packageRoot: dirname(HERE), mode, passes: passCount(state.sessions[sessionId]) }).join('\n') + '\n');
   return 0;
 }
 

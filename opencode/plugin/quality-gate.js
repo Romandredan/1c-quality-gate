@@ -241,7 +241,7 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
           const { armed, blind } = shell.shellAfter({ root, ...call, sessionId, ensureConfig, readConfig, env: stateEnv });
           const notes = [];
           if (armed.length) {
-            notes.push('[изменено командой оболочки]\n' + core.gateHint({ ...armed[0], sessionId, packageRoot, mode: 'opencode' }));
+            notes.push('[изменено командой оболочки]\n' + core.gateHint({ ...armed[0], sessionId, packageRoot, mode: 'opencode', passes: core.passesOf({ root, sessionId, env: stateEnv }) }));
             if (armed.length > 1) notes.push('Также взведены:\n' + armed.slice(1).map((a) => `Файл: ${a.rel}`).join('\n'));
             notes.push(core.disownLines({ sessionId, packageRoot }).join('\n'));
           }
@@ -270,7 +270,7 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
         });
         if (!armed) return;
 
-        const hint = core.gateHint({ ...armed, sessionId, packageRoot, mode: 'opencode' });
+        const hint = core.gateHint({ ...armed, sessionId, packageRoot, mode: 'opencode', passes: core.passesOf({ root, sessionId, env: stateEnv }) });
         // Аналог additionalContext хука Claude Code: подсказка уходит модели вместе
         // с результатом инструмента — о взводе узнают немедленно, а не на паузе.
         if (output && typeof output.output === 'string') {
@@ -367,6 +367,7 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
                     mode: 'opencode',
                     repeated: entry.count,
                     maxReprompts: MAX_REPROMPTS,
+                    passes: core.passesOf({ root, sessionId, env: stateEnv }),
                   }),
                 },
               ],
