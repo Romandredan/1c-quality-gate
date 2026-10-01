@@ -357,6 +357,42 @@ export function severeFindings(text) {
     }));
 }
 
+/**
+ * Разделы находок, в которых ни одной находки не разобрано, хотя в теле есть строки списка.
+ * Живой случай: субагент оформил находки списком под `## Вне правки`, разбор дал ноль, и
+ * остаток в `release` вышел пустым при трёх находках. Контракт — заголовок на находку,
+ * начинающийся с уровня; раздел, где он нарушен, называется по имени.
+ */
+const FINDING_SECTIONS = [/открыто\s+в\s+правке/i, OUTSIDE_SECTION, DECISION_SECTION];
+const LIST_LINE = /^\s*(?:[-*•]|\d+[.)])\s+\S/;
+
+export function unparsedSections(text) {
+  const at = text.indexOf(SECTION);
+  const lines = (at === -1 ? text : text.slice(0, at)).split(/\r?\n/);
+  const parsed = new Set(collectFindings(text).map((f) => f.line));
+  const out = [];
+  let fence = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*(```|~~~)/.test(lines[i])) fence = !fence;
+    const h = fence ? null : lines[i].match(/^(#{1,6})\s+(.*)$/);
+    if (!h || !FINDING_SECTIONS.some((re) => re.test(h[2]))) continue;
+    const level = h[1].length;
+    let hasFinding = false;
+    let hasList = false;
+    let inFence = false;
+    for (let j = i + 1; j < lines.length; j++) {
+      if (/^\s*(```|~~~)/.test(lines[j])) inFence = !inFence;
+      const hh = inFence ? null : lines[j].match(/^(#{1,6})\s+/);
+      if (hh && hh[1].length <= level) break;
+      if (parsed.has(j + 1)) hasFinding = true;
+      // Подзаголовок без уровня («### Вопрос 1: …») — та же потеря: находка есть, разбора нет.
+      else if (hh || (!inFence && LIST_LINE.test(lines[j]))) hasList = true;
+    }
+    if (!hasFinding && hasList) out.push({ title: h[2].trim(), line: i + 1 });
+  }
+  return out;
+}
+
 /** Находки прозы по разделам: в правке, вне правки, нужно решение. Все уровни. */
 export function reportSections(text) {
   const all = collectFindings(text).map((f) => ({ sev: f.sev, title: f.title, line: f.line, section: f.section }));
@@ -437,6 +473,17 @@ export function validate(text, { gate = false, root = null, session = null } = {
   const add = (severity, line, message) => problems.push({ severity, line, message });
 
   const records = extractRecords(text);
+
+  // Находки списком валидатор не читает: раздел с такими строками и без единого заголовка
+  // находки — предупреждение, иначе остаток в release и блокирующая 🔴 теряются молча.
+  for (const s of unparsedSections(text)) {
+    add(
+      'warn',
+      s.line,
+      `раздел «${s.title}» без заголовков находок: находки списком валидатор не читает — каждая находка ` +
+        'оформляется заголовком «### 🔴|🟠|🟡 <суть>», иначе остаток в release и блокирующая 🔴 теряются'
+    );
+  }
 
   for (const rec of records) {
     if (rec.type === '__malformed__') {
