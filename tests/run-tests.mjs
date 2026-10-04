@@ -8204,6 +8204,69 @@ section('gate.mjs run — инструментальная фаза одним �
   check('без изменений со снимка — C0 с причиной', p4.volume === 'C0' && p4.volumeReason === 'unchanged-since-base', JSON.stringify({ v: p4.volume, r: p4.volumeReason }));
 }
 
+// Проход по исправлению в run: снимок на старте, база от проверенного, прошлый отчёт и его
+// находки в выводе, fix.diff для модельных слоёв. change.diff остаётся от HEAD — его сверяет attest.
+{
+  const fr = join(WORK, 'fixpass-root');
+  rmSync(fr, { recursive: true, force: true });
+  mkdirSync(join(fr, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: fr });
+  writeFileSync(join(fr, '.1c-quality-gate.json'), '{}', 'utf8');
+  const bsl = 'src/cf/CommonModules/М/Ext/Module.bsl';
+  writeFileSync(join(fr, bsl), BOM + 'Процедура П() Экспорт\n\tА = 1;\nКонецПроцедуры\n', 'utf8');
+  execFileSync('git', ['add', '-A'], { cwd: fr });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], { cwd: fr });
+  writeFileSync(join(fr, bsl), BOM + 'Процедура П() Экспорт\n\tА = 2;\nКонецПроцедуры\n', 'utf8');
+  const env = { CLAUDE_PROJECT_DIR: fr };
+  execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-arm.mjs')], { input: JSON.stringify({ session_id: 'F1', cwd: fr, tool_input: { file_path: join(fr, bsl) } }), env: { ...process.env, CLAUDE_PROJECT_DIR: fr } });
+  const p = join(fr, '.claude', '.state', 'qg-pending.json');
+  const sess = () => JSON.parse(readFileSync(p, 'utf8')).sessions.F1;
+
+  const r1 = run('tools/gate.mjs', ['run', '--session', 'F1', '--no-analyzer'], { env });
+  check('проход 1 записывает снимок', r1.code === 0 && /^[0-9a-f]{40}$/.test(sess().cycle.passes[0].blobs?.[bsl] || ''), JSON.stringify(sess().cycle));
+
+  // Приёмку отчёта имитируем записью состояния: валидатор (Task 4) делает то же.
+  const report1 = join(WORK, 'fixpass-r1.md');
+  writeFileSync(report1, '# Отчёт\n\n## Открыто в правке\n\n### 🟡 Магическое число\n\nФайл: ' + bsl + ':2, qg:MAGIC-NUMBER\n\n## Вне правки\n\n### 🟠 Запрос в цикле\n\nФайл: ' + bsl + ':9, qg:DB-READ-IN-LOOP\n', 'utf8');
+  const st = JSON.parse(readFileSync(p, 'utf8'));
+  const pass1 = st.sessions.F1.cycle.passes[0];
+  pass1.report = report1;
+  pass1.acceptedAt = new Date().toISOString();
+  st.sessions.F1.files[bsl].checked = { blob: pass1.blobs[bsl], pass: 1 };
+  writeFileSync(p, JSON.stringify(st, null, 2), 'utf8');
+
+  writeFileSync(join(fr, bsl), BOM + 'Процедура П() Экспорт\n\tА = 3;\nКонецПроцедуры\n', 'utf8');
+  execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-arm.mjs')], { input: JSON.stringify({ session_id: 'F1', cwd: fr, tool_input: { file_path: join(fr, bsl) } }), env: { ...process.env, CLAUDE_PROJECT_DIR: fr } });
+  check('взвод не стирает отметку проверки', sess().files[bsl].checked?.pass === 1);
+  const r2 = run('tools/gate.mjs', ['run', '--session', 'F1', '--no-analyzer'], { env });
+  check('проход 2 идёт от снимка прохода 1', r2.code === 0 && /^Проход 2 из 3 · база pass:1/m.test(r2.out), r2.out.slice(0, 600));
+  check('проход 2 называет прошлый отчёт', r2.out.includes(`Прошлый отчёт: ${report1}`));
+  check('проход 2 перечисляет находки прошлого отчёта по разделам',
+    /## Находки прошлого отчёта[\s\S]*Открыто в правке[\s\S]*Магическое число[\s\S]*Вне правки[\s\S]*Запрос в цикле/.test(r2.out), r2.out);
+  check('находки прошлого отчёта печатаются с идентификаторами',
+    /Магическое число \[qg:MAGIC-NUMBER\]/.test(r2.out) && /Запрос в цикле \[qg:DB-READ-IN-LOOP\]/.test(r2.out), r2.out);
+  const runDir = join(fr, '.claude', '.state', 'qg-run-F1');
+  const fix = readFileSync(join(runDir, 'fix.diff'), 'utf8');
+  check('fix.diff — разница от снимка с путём файла', fix.includes(`+++ b/${bsl}`) && /-\tА = 2;/.test(fix) && /\+\tА = 3;/.test(fix), fix);
+  check('строка scope в черновике несёт base=pass:1', /\[qg scope: .*base=pass:1/.test(r2.out), (r2.out.match(/^\[qg scope: .*$/m) || [''])[0]);
+  check('запись прохода 2 хранит базы', sess().cycle.passes[1].base === 'pass:1' && sess().cycle.passes[1].bases?.[bsl]?.pass === 1);
+
+  // --only продолжает проход: те же базы, без нового снимка.
+  const only = run('tools/gate.mjs', ['run', '--session', 'F1', '--no-analyzer', '--only', 'hygiene-check'], { env });
+  check('run --only продолжает проход с теми же базами', only.code === 0 && sess().cycle.passes.length === 2 && /база pass:1/.test(only.out), only.out.slice(0, 400));
+
+  // plan --session показывает базу предстоящего прохода, не записывая проход.
+  const pl = run('tools/gate.mjs', ['plan', '--session', 'F1', '--no-analyzer'], { env });
+  check('plan печатает scope с базой и не пишет проход', /base=pass:1/.test(pl.out) && sess().cycle.passes.length === 2, pl.out.slice(0, 600));
+
+  // Прошлый проход без принятого отчёта — база HEAD у файлов без отметки, причина названа.
+  const st2 = JSON.parse(readFileSync(p, 'utf8'));
+  delete st2.sessions.F1.files[bsl].checked;
+  writeFileSync(p, JSON.stringify(st2, null, 2), 'utf8');
+  const r3 = run('tools/gate.mjs', ['run', '--session', 'F1', '--no-analyzer'], { env });
+  check('без отметки проверки проход полный и причина названа', /^Проход 3 из 3 · база HEAD/m.test(r3.out) && /Module\.bsl: от HEAD — нет принятого отчёта/.test(r3.out), r3.out.slice(0, 800));
+}
+
 section('План прогона — пути автотестов и подсказка YAxUnit');
 
 {

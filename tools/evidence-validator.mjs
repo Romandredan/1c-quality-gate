@@ -395,7 +395,11 @@ export function unparsedSections(text) {
 
 /** Находки прозы по разделам: в правке, вне правки, нужно решение. Все уровни. */
 export function reportSections(text) {
-  const all = collectFindings(text).map((f) => ({ sev: f.sev, title: f.title, line: f.line, section: f.section }));
+  // Идентификаторы — ключ сверки находок между проходами: строки сдвигаются, идентификатор нет.
+  const all = collectFindings(text).map((f) => ({
+    sev: f.sev, title: f.title, line: f.line, section: f.section,
+    ids: [...new Set(([f.title, ...f.body].join('\n').match(FINDING_ID) || []).map(normId))].sort(),
+  }));
   return {
     inChange: all.filter((f) => f.section === 'change'),
     outside: all.filter((f) => f.section === 'outside'),
