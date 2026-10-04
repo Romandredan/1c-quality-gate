@@ -8154,6 +8154,56 @@ section('gate.mjs run — инструментальная фаза одним �
   check('таблица называет строки вне методов', /Module\.bsl: Б\(5[–-]7\); вне методов: строки 1/.test(rA.out), rA.out.slice(0, 700));
 }
 
+// Профиль от базы прохода (v3.17.0): объём и архетипы — по разнице со снимком, граница правки —
+// от HEAD. Иначе метод, добавленный на проходе 1, держал бы C2 на каждом следующем проходе,
+// а новый модуль требовал бы холодного читателя при каждой правке строки.
+{
+  const br = join(WORK, 'base-profile-root');
+  rmSync(br, { recursive: true, force: true });
+  mkdirSync(join(br, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: br });
+  writeFileSync(join(br, '.1c-quality-gate.json'), '{}', 'utf8');
+  const bsl = 'src/cf/CommonModules/М/Ext/Module.bsl';
+  writeFileSync(join(br, bsl), BOM + 'Процедура Старая() Экспорт\n\tА = 1;\nКонецПроцедуры\n', 'utf8');
+  execFileSync('git', ['add', '-A'], { cwd: br });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], { cwd: br });
+  // Проход 1: добавлен новый метод и новый общий модуль.
+  writeFileSync(join(br, bsl), BOM + 'Процедура Старая() Экспорт\n\tА = 1;\nКонецПроцедуры\n\nПроцедура Новая() Экспорт\n\tБ = 1;\nКонецПроцедуры\n', 'utf8');
+  const fresh = 'src/cf/CommonModules/Н/Ext/Module.bsl';
+  mkdirSync(join(br, 'src', 'cf', 'CommonModules', 'Н', 'Ext'), { recursive: true });
+  writeFileSync(join(br, fresh), BOM + 'Процедура Н() Экспорт\nКонецПроцедуры\n', 'utf8');
+  // Декларация объекта: без неё архетип нового общего модуля не срабатывает и на проходе 1.
+  const decl = 'src/cf/CommonModules/Н.xml';
+  writeFileSync(join(br, decl), '<?xml version="1.0" encoding="UTF-8"?>\n<MetaDataObject>\n<CommonModule/>\n</MetaDataObject>\n', 'utf8');
+  const { snapshotBlobs } = await import(pathToFileURL(join(ROOT, 'tools', 'gate-cycle.mjs')).href);
+  const { computeProfile, touchedLine, SCOPE_BASE, baseLabel } = await import(pathToFileURL(join(ROOT, 'tools', 'profile.mjs')).href);
+  const snap1 = snapshotBlobs(br, [bsl, fresh, decl]);
+  const p1 = computeProfile({ files: [bsl, fresh, decl], root: br, config: {}, metrics: {}, configState: null });
+  check('проход 1 от HEAD: новый модуль даёт C3 и архетип', p1.volume === 'C3' && p1.archetypes.includes('new-common-module') && p1.base === 'HEAD' && /, base=HEAD, config=/.test(p1.scopeLine), p1.scopeLine);
+
+  // Исправление: одна строка внутри нового метода; новый модуль не менялся.
+  writeFileSync(join(br, bsl), BOM + 'Процедура Старая() Экспорт\n\tА = 1;\nКонецПроцедуры\n\nПроцедура Новая() Экспорт\n\tБ = 2;\nКонецПроцедуры\n', 'utf8');
+  const bases = { [bsl]: { pass: 1, blob: snap1[bsl] }, [fresh]: { pass: 1, blob: snap1[fresh] }, [decl]: { pass: 1, blob: snap1[decl] } };
+  const p2 = computeProfile({ files: [bsl, fresh, decl], root: br, config: {}, metrics: {}, configState: null, bases });
+  check('проход 2: объём по разнице со снимком — C1', p2.volume === 'C1' && p2.loc.added === 1 && p2.loc.removed === 1, JSON.stringify({ v: p2.volume, r: p2.volumeReason, loc: p2.loc }));
+  check('проход 2: новый модуль, не менявшийся со снимка, архетип не включает', !p2.archetypes.includes('new-common-module'), p2.archetypes.join(','));
+  check('проход 2: неизменённые файлы названы', p2.unchangedSinceBase.includes(fresh) && p2.unchangedSinceBase.includes(decl) && !p2.unchangedSinceBase.includes(bsl));
+  check('проход 2: граница правки по-прежнему от HEAD', touchedLine(p2.touched, bsl, 6) && !touchedLine(p2.touched, bsl, 2) && p2.touched[fresh]?.kind === 'whole', JSON.stringify(p2.touched));
+  check('проход 2: метка базы в scope', p2.base === 'pass:1' && /, base=pass:1, config=/.test(p2.scopeLine) && SCOPE_BASE.test(p2.base), p2.scopeLine);
+  check('метка базы — максимум проходов', baseLabel({ a: 'HEAD', b: { pass: 2, blob: 'x' }, c: { pass: 1, blob: 'y' } }) === 'pass:2' && baseLabel({ a: 'HEAD' }) === 'HEAD');
+
+  // Пропавший снимок: база HEAD с пометкой, профиль считается, ничего не падает.
+  const lost = { [bsl]: { pass: 1, blob: '0123456789012345678901234567890123456789' }, [fresh]: 'HEAD', [decl]: 'HEAD' };
+  const p3 = computeProfile({ files: [bsl, fresh, decl], root: br, config: {}, metrics: {}, configState: null, bases: lost });
+  check('пропавший снимок — HEAD и base_missing', p3.baseMissing.includes(bsl) && ['C2', 'C3'].includes(p3.volume), JSON.stringify({ m: p3.baseMissing, v: p3.volume }));
+
+  // Ни один файл не менялся со снимка — объём C0, код не проверяется заново.
+  const same = snapshotBlobs(br, [bsl, fresh, decl]);
+  const p4 = computeProfile({ files: [bsl, fresh, decl], root: br, config: {}, metrics: {}, configState: null,
+    bases: { [bsl]: { pass: 2, blob: same[bsl] }, [fresh]: { pass: 2, blob: same[fresh] }, [decl]: { pass: 2, blob: same[decl] } } });
+  check('без изменений со снимка — C0 с причиной', p4.volume === 'C0' && p4.volumeReason === 'unchanged-since-base', JSON.stringify({ v: p4.volume, r: p4.volumeReason }));
+}
+
 section('План прогона — пути автотестов и подсказка YAxUnit');
 
 {
