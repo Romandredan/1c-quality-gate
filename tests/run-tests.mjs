@@ -3734,6 +3734,7 @@ check('верификатор не грузит каталог антипатт�
       // A/B v3.17.0 (Claude Code 2.1.286): Agent по умолчанию запускает субагента в фоне, и
       // оркестратор заканчивал ход раньше читателей — ответ «жду результатов» без отчёта.
       ['run_in_background: false', 'субагенты контуров запускаются синхронно'],
+      ['Отчёт прохода:', 'файл отчёта — по пути из вывода run'],
     ]) check(`gate-runner: ${label}`, text.includes(needle));
   }
   const stale = readdirSync(join(ROOT, 'agents')).filter((f) => readFileSync(join(ROOT, 'agents', f), 'utf8').includes('rlm-tools-bsl'));
@@ -8271,6 +8272,11 @@ section('gate.mjs run — инструментальная фаза одним �
   const r2 = run('tools/gate.mjs', ['run', '--session', 'F1', '--no-analyzer'], { env });
   check('проход 2 идёт от снимка прохода 1', r2.code === 0 && /^Проход 2 из 3 · база pass:1/m.test(r2.out), r2.out.slice(0, 600));
   check('проход 2 называет прошлый отчёт', r2.out.includes(`Прошлый отчёт: ${report1}`));
+  // A/B v3.17.0 (Claude Code 2.1.286): субагенту запрещён Write файлов вида report*.md. Путь
+  // файла следа задаёт run — во временном каталоге, с сессией и номером прохода в имени.
+  const reportLine = (r2.out.match(/^Отчёт прохода: (.+)$/m) || [])[1] || '';
+  check('run называет файл отчёта прохода во временном каталоге',
+    /qg-evidence-F1-pass-2\.md$/.test(reportLine) && !/report/i.test(reportLine) && !reportLine.replace(/\\/g, '/').startsWith(fr.replace(/\\/g, '/')), reportLine);
   check('проход 2 перечисляет находки прошлого отчёта по разделам',
     /## Находки прошлого отчёта[\s\S]*Открыто в правке[\s\S]*Магическое число[\s\S]*Вне правки[\s\S]*Запрос в цикле/.test(r2.out), r2.out);
   check('находки прошлого отчёта печатаются с идентификаторами',
