@@ -342,6 +342,9 @@ const SEVERITY_LABEL =
 // может, уходит пользователю в итоге снятия. Оба раздела разбираются, но из блокирующих исключены.
 const NOT_FINDINGS = /отклон|не\s*провер|непровер|предложени|закрыт|исправлен/i;
 const OUTSIDE_SECTION = /вне\s+правки/i;
+// «Закрыто» — находки прошлого отчёта, закрытие которых проверено на проходе по исправлению
+// (v3.17.0). Разбираются, чтобы сверить перенос, но не блокируют и в остаток не входят.
+const CLOSED_SECTION = /^закрыт/i;
 const DECISION_SECTION = /нужно\s+решени/i;
 const FINDING_ID = /qg:[A-Z][A-Z0-9-]*[A-Z0-9]|#?std\d{3,4}|bslls:[A-Za-z][\w-]*|acc:\d{3,4}|v8cs:[\w-]+/g;
 
@@ -367,7 +370,7 @@ export function severeFindings(text) {
  * остаток в `release` вышел пустым при трёх находках. Контракт — заголовок на находку,
  * начинающийся с уровня; раздел, где он нарушен, называется по имени.
  */
-const FINDING_SECTIONS = [/открыто\s+в\s+правке/i, OUTSIDE_SECTION, DECISION_SECTION];
+const FINDING_SECTIONS = [/открыто\s+в\s+правке/i, OUTSIDE_SECTION, DECISION_SECTION, CLOSED_SECTION];
 const LIST_LINE = /^\s*(?:[-*•]|\d+[.)])\s+\S/;
 
 export function unparsedSections(text) {
@@ -408,7 +411,33 @@ export function reportSections(text) {
     inChange: all.filter((f) => f.section === 'change'),
     outside: all.filter((f) => f.section === 'outside'),
     needsDecision: all.filter((f) => f.section === 'decision'),
+    closed: all.filter((f) => f.section === 'closed'),
   };
+}
+
+const findingKey = (f) => (f.ids.length ? f.ids.join(',') : `title:${f.title.trim().toLowerCase()}`);
+
+/**
+ * Находки прошлого отчёта, которых нет в новом. Ключ — идентификаторы без строки: строки
+ * между проходами сдвигаются. Без идентификаторов ключ — заголовок, и пропажа по нему только
+ * предупреждение: переименованная находка неотличима от исчезнувшей.
+ */
+export function carriedOver(prevText, text) {
+  const prev = reportSections(prevText);
+  const cur = reportSections(text);
+  const pool = new Map();
+  for (const f of [...cur.closed, ...cur.inChange, ...cur.outside, ...cur.needsDecision]) {
+    const k = findingKey(f);
+    pool.set(k, (pool.get(k) || 0) + 1);
+  }
+  const missing = [];
+  const missingById = [];
+  for (const f of [...prev.inChange, ...prev.outside, ...prev.needsDecision]) {
+    const k = findingKey(f);
+    if (pool.get(k)) pool.set(k, pool.get(k) - 1);
+    else (f.ids.length ? missingById : missing).push(f);
+  }
+  return { missing, missingById };
 }
 
 /** Находки 🔴/🟠 из прозы отчёта, ни один идентификатор которых не стоит в verdict=violation. */
@@ -459,8 +488,17 @@ function collectFindings(text) {
     // разделом не бывает: «Транзакция открыта вне правки» — находка, а не раздел «Вне правки».
     const isFinding = Boolean(lead && !SEVERITY_LABEL.test(lead[2])) || Boolean(!lead && inherited);
     const parentSection = stack.map((s) => s.section).filter((x) => x && x !== 'change').pop() || null;
-    const section =
-      !isFinding && OUTSIDE_SECTION.test(title) ? 'outside' : !isFinding && DECISION_SECTION.test(title) ? 'decision' : parentSection || 'change';
+    // «Закрыто» проверяется раньше NOT_FINDINGS: иначе слово «закрыт» исключило бы раздел из
+    // разбора целиком, и перенос находок прошлого отчёта сверить было бы не по чему.
+    const section = isFinding
+      ? parentSection || 'change'
+      : CLOSED_SECTION.test(title)
+        ? 'closed'
+        : OUTSIDE_SECTION.test(title)
+          ? 'outside'
+          : DECISION_SECTION.test(title)
+            ? 'decision'
+            : parentSection || 'change';
     const entry = { level, section, excluded: stack.some((s) => s.excluded) || (section === 'change' && !isFinding && NOT_FINDINGS.test(title)) };
     current = null;
     if (!entry.excluded) {
@@ -900,6 +938,37 @@ export function validate(text, { gate = false, root = null, session = null } = {
       }
     } catch {
       /* профиль не посчитан (нечитаемый файл, сбой git) — сверять не с чем, молчим */
+    }
+  }
+
+  // Перенос находок прошлого отчёта (v3.17.0). Проход по исправлению читает только разницу
+  // от базы, и находка прошлого прохода, не попавшая в новый отчёт, выпала бы из остатка
+  // `release` молча. Каждая обязана быть либо в «Закрыто», либо в своём разделе.
+  if (own?.pass && own.session) {
+    const prev = lastAcceptedReport(own.session, { before: own.pass.n });
+    if (prev) {
+      let prevText = null;
+      try {
+        prevText = readFileSync(prev.report, 'utf8');
+      } catch {
+        /* ниже */
+      }
+      if (prevText === null) {
+        add('warn', 0, `прошлый отчёт прохода ${prev.n} не читается (${prev.report}) — перенос его находок не сверен`);
+      } else {
+        const { missing, missingById } = carriedOver(prevText, text);
+        for (const f of missingById) {
+          add(
+            'error',
+            0,
+            `находка прошлого отчёта (проход ${prev.n}) «${f.sev} ${f.title}» [${f.ids.join(', ')}] отсутствует: ` +
+              'помести её в «Закрыто» с проверкой по коду и тем же идентификатором либо оставь в её разделе'
+          );
+        }
+        for (const f of missing) {
+          add('warn', 0, `находка прошлого отчёта (проход ${prev.n}) «${f.sev} ${f.title}» не найдена по заголовку — проверь, что она перенесена`);
+        }
+      }
     }
   }
 

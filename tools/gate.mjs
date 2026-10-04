@@ -368,7 +368,9 @@ function cmdRelease(args) {
     // взведёт гейт заново) либо записать решение — оно остаётся в журнале снятий. Разбор прозы
     // приближённый, поэтому отказ обходится одним флагом с причиной и гейт не запирает.
     criticalFindings = severeFindings(evidenceText).filter((f) => f.sev === '🔴');
-    residual = reportSections(evidenceText);
+    // Остаток — три раздела; закрытое за цикл в него не входит.
+    const { inChange, outside, needsDecision } = reportSections(evidenceText);
+    residual = { inChange, outside, needsDecision };
     if (criticalFindings.length) {
       const list = criticalFindings.map((f) => `  🔴 ${evidenceFile}:${f.line} — ${f.title}${f.ids.length ? ` [${f.ids.join(', ')}]` : ''}\n`).join('');
       if (criticalDecision === null) {

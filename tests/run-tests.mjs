@@ -8331,6 +8331,66 @@ section('gate.mjs run — инструментальная фаза одним �
   check('отметка проверки осталась от прошлого прохода', JSON.stringify(sess().files[bsl].checked) === JSON.stringify(before));
 }
 
+// Проход по исправлению не теряет находок: каждая открытая находка прошлого отчёта обязана
+// быть в новом — закрытой либо в своём разделе. Иначе остаток release вышел бы урезанным.
+{
+  const { reportSections, carriedOver, severeFindings } = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+  // 🔴 под «Закрыто» — самый жёсткий случай: он не должен держать снятие и не должен попасть в остаток.
+  const prev = [
+    '# Отчёт', '', '## Открыто в правке', '', '### 🔴 Запрос в цикле', 'm.bsl:5, qg:DB-READ-IN-LOOP', '',
+    '### 🟡 Магическое число', 'm.bsl:7, qg:MAGIC-NUMBER', '', '## Вне правки', '', '### 🟡 Длинный метод', 'm.bsl:40', '',
+  ].join('\n');
+  const closedOnly = [
+    '# Отчёт', '', '## Закрыто', '', '### 🔴 Запрос в цикле', 'Исправлено: выборка вынесена из цикла, qg:DB-READ-IN-LOOP', '',
+    '## Вне правки', '', '### 🟡 Длинный метод', 'm.bsl:41', '',
+  ].join('\n');
+  const s = reportSections(closedOnly);
+  check('раздел «Закрыто» разбирается', s.closed?.length === 1 && s.closed[0].ids.includes('qg:DB-READ-IN-LOOP'), JSON.stringify(s.closed));
+  check('находка под «Закрыто» не блокирует', severeFindings(closedOnly).length === 0);
+  check('находка под «Закрыто» не входит в остаток', s.inChange.length === 0);
+  const lost = carriedOver(prev, closedOnly);
+  check('пропавшая находка с идентификатором названа', lost.missingById.length === 1 && /Магическое число/.test(lost.missingById[0].title), JSON.stringify(lost));
+  const full = closedOnly.replace('## Вне правки', '## Открыто в правке\n\n### 🟡 Магическое число\nm.bsl:8, qg:MAGIC-NUMBER\n\n## Вне правки');
+  check('все находки на месте — пропавших нет', carriedOver(prev, full).missingById.length === 0 && carriedOver(prev, full).missing.length === 0);
+  const renamed = full.replace('Длинный метод', 'Метод на 120 строк');
+  check('находка без идентификатора с новым заголовком — только предупреждение', carriedOver(prev, renamed).missing.length === 1 && carriedOver(prev, renamed).missingById.length === 0);
+
+  // В режиме гейта по сессии: прошлый принятый отчёт берётся из записи прохода.
+  const fr = join(WORK, 'fixpass-root');
+  const env = { CLAUDE_PROJECT_DIR: fr };
+  const p = join(fr, '.claude', '.state', 'qg-pending.json');
+  const st = JSON.parse(readFileSync(p, 'utf8'));
+  const passes = st.sessions.F1.cycle.passes;
+  const prevPath = join(WORK, 'carry-prev.md');
+  writeFileSync(prevPath, prev, 'utf8');
+  passes[passes.length - 2].report = prevPath;
+  passes[passes.length - 2].acceptedAt = new Date().toISOString();
+  delete passes[passes.length - 1].report;
+  delete passes[passes.length - 1].acceptedAt;
+  writeFileSync(p, JSON.stringify(st, null, 2), 'utf8');
+  // Последний проход стенда — третий, от pass:2: строка scope берётся из его отчёта (Task 4).
+  const scope = (readFileSync(join(WORK, 'fixpass-v3.md'), 'utf8').match(/^\[qg scope: .*\]$/m) || [''])[0];
+  const body = (prose) => prose + '\n\n' + readFileSync(ev('valid.md'), 'utf8').slice(readFileSync(ev('valid.md'), 'utf8').indexOf('## quality evidence')).replace(/^\[qg scope: .*\]$/m, scope) +
+    '[qg not_verified: dimension=static-analysis, reason=not_in_analyzer_report, files=1]\n';
+  const lostRep = join(WORK, 'carry-lost.md');
+  writeFileSync(lostRep, body(closedOnly), 'utf8');
+  const vl = run('tools/evidence-validator.mjs', [lostRep, '--gate', '--session', 'F1'], { env });
+  check('валидатор отказывает, если находка прошлого отчёта пропала', vl.code !== 0 && /Магическое число/.test(vl.out) && /прошлого отчёта/.test(vl.out), vl.out.slice(0, 800));
+  const okRep = join(WORK, 'carry-ok.md');
+  writeFileSync(okRep, body(full), 'utf8');
+  const vo = run('tools/evidence-validator.mjs', [okRep, '--gate', '--session', 'F1'], { env });
+  check('все находки перенесены — отчёт принят', vo.code === 0, vo.out.slice(0, 800));
+
+  // Снятие по отчёту прохода по исправлению: release вызывает validate с сессией, то есть та
+  // же сверка базы и переноса работает и здесь; 🔴 под «Закрыто» снятие не держит.
+  const rel = run('tools/gate.mjs', ['release', '--session', 'F1', '--evidence', okRep], { env });
+  check('гейт снимается по отчёту прохода по исправлению', rel.code === 0, rel.out.slice(0, 800));
+  const doneRec = JSON.parse(readFileSync(join(fr, '.claude', '.state', 'qg-done.json'), 'utf8')).sessions.F1;
+  check('закрытые находки в остаток не входят',
+    doneRec?.residual && !('closed' in doneRec.residual) && !JSON.stringify(doneRec.residual).includes('Запрос в цикле')
+      && doneRec.residual.inChange.some((f) => /Магическое число/.test(f.title)), JSON.stringify(doneRec?.residual));
+}
+
 section('План прогона — пути автотестов и подсказка YAxUnit');
 
 {
