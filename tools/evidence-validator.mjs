@@ -744,6 +744,29 @@ export function validate(text, { gate = false, root = null, session = null } = {
   if (scopes.length === 0) add('error', 0, 'нет записи scope: неизвестно, как выбиралась глубина проверки');
   if (scopes.length > 1) add('error', scopes[1].line, 'записей scope больше одной: профиль изменения определяется один раз');
 
+  // Контур arch, назначенный на уровне, отчитывается по каждой своей проверке. A/B v3.17.0:
+  // назначенный уровень 3 закрыли одной самодельной записью («правка маленькая, сверил сам»),
+  // и повторная проверка архитектуры после исправления на деле не шла. Список проверок — из
+  // реестра (SCOPES, layer=arch), своей копии нет. Пропуск всего контура записью без scope —
+  // тоже отчёт: причина названа. Переходное окно (docs/RELEASING.md): сейчас предупреждение.
+  const archLevel = scopes.length === 1 ? (String(scopes[0].fields.resolved || '').match(/(?:^|\|)arch:(\d+)/) || [])[1] : null;
+  const archWhollySkipped = records.some((r) => r.type === 'skipped' && r.fields.layer === 'arch' && !r.fields.scope);
+  if (archLevel && !archWhollySkipped) {
+    const closedArch = new Set(
+      records.filter((r) => (r.type === 'applied' || r.type === 'skipped') && r.fields.layer === 'arch' && r.fields.scope).map((r) => String(r.fields.scope).trim())
+    );
+    const missingArch = Object.keys(SCOPES).filter((s) => SCOPES[s].layer === 'arch' && !closedArch.has(s));
+    if (missingArch.length) {
+      add(
+        'warn',
+        scopes[0].line,
+        `контур arch назначен на уровне ${archLevel}, но о проверках ${missingArch.join(', ')} не заявлено: нужна запись ` +
+          '[qg applied: layer=arch, scope=<проверка>, ...] либо [qg skipped: layer=arch, scope=<проверка>, reason=...] — их пишет ' +
+          'навык bsl-architecture-review. Со следующего выпуска это станет ошибкой'
+      );
+    }
+  }
+
   // Настройка проекта меняет пороги, по которым выбран класс. Без этой отметки «C1» в одном
   // отчёте не означает того же, что «C1» в другом, а прогон, не заглянувший в настройку,
   // неотличим от прогона, который её учёл.
