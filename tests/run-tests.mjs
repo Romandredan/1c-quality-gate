@@ -3735,6 +3735,7 @@ check('верификатор не грузит каталог антипатт�
       // оркестратор заканчивал ход раньше читателей — ответ «жду результатов» без отчёта.
       ['run_in_background: false', 'субагенты контуров запускаются синхронно'],
       ['Отчёт прохода:', 'файл отчёта — по пути из вывода run'],
+      ['не понижай сам', 'назначенная run глубина контура не понижается субагентом'],
       ['сохранена от прохода', 'исправление значительнее одного метода проверяется на глубине прошлого прохода и по всей правке'],
     ]) check(`gate-runner: ${label}`, text.includes(needle));
   }
@@ -8301,6 +8302,31 @@ section('gate.mjs run — инструментальная фаза одним �
   check('контуру arch и слою 2 даётся и вся правка', /change\.diff[^\n]*общ/.test(r2.out), (r2.out.match(/^- контур arch:.*$/m) || [''])[0]);
   const pl = run('tools/gate.mjs', ['plan', '--session', 'L1', '--no-analyzer'], { env });
   check('plan показывает ту же сохранённую глубину', /resolved: code=L2 arch=3/.test(pl.out), (pl.out.match(/^resolved:.*$/m) || [''])[0]);
+}
+
+// Контур arch отчитывается по каждой своей проверке. A/B v3.17.0: назначенный run уровень 3
+// субагент закрыл одной самодельной записью («правка маленькая, сверил сам»), и валидатор её
+// пропустил — повторная проверка архитектуры после исправления на деле не шла. Переходное окно
+// (docs/RELEASING.md): в этом выпуске — предупреждение, со следующего — ошибка.
+{
+  const { validate } = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+  const { SCOPES } = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-scopes.mjs')).href);
+  const archScopes = Object.keys(SCOPES).filter((s) => SCOPES[s].layer === 'arch');
+  const empty = join(WORK, 'arch-empty');
+  rmSync(empty, { recursive: true, force: true });
+  mkdirSync(empty, { recursive: true });
+  const base = readFileSync(ev('valid.md'), 'utf8').replace('arch:skip', 'arch:3').replace('[qg skipped: layer=arch, reason=volume_below_threshold]\n', '');
+  const one = base + '[qg applied: layer=arch, scope=module-responsibility, ids=[qg:ARCH-A1], verdict=clean]\n';
+  const w1 = validate(one, { gate: true, root: empty }).problems.filter((p) => /контур arch/.test(p.message));
+  check('контур arch с одной записью из трёх — предупреждение с именами пропущенных проверок',
+    w1.length === 1 && w1[0].severity === 'warn' && /branching-dispatch/.test(w1[0].message) && /call-graph-signs/.test(w1[0].message) && /станет ошибкой/.test(w1[0].message),
+    JSON.stringify(w1));
+  const all = base + archScopes.map((s, i) => (i === archScopes.length - 1
+    ? `[qg skipped: layer=arch, scope=${s}, reason=stale_or_unavailable_index]\n`
+    : `[qg applied: layer=arch, scope=${s}, ids=[qg:ARCH-A1], verdict=clean]\n`)).join('');
+  check('контур arch закрыт по всем проверкам — предупреждения нет', validate(all, { gate: true, root: empty }).problems.every((p) => !/контур arch/.test(p.message)));
+  const skipped = readFileSync(ev('valid.md'), 'utf8');
+  check('контур arch не назначен — требования нет', validate(skipped, { gate: true, root: empty }).problems.every((p) => !/контур arch/.test(p.message)));
 }
 
 // Проход по исправлению в run: снимок на старте, база от проверенного, прошлый отчёт и его
