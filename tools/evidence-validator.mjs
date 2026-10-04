@@ -19,13 +19,13 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
-import { acceptPass, updateSession } from './gate-cycle.mjs';
+import { acceptPass, updateSession, snapshotBlobs, markChecked, lastAcceptedReport } from './gate-cycle.mjs';
 import { resolve as resolveConfig, evidenceValue, DEFAULTS as CONFIG_DEFAULTS } from './config.mjs';
 import { SCOPES, TOOL_BACKED, RENAMED, isKnownScope, isKnownQgId } from './evidence-scopes.mjs';
 import { readJournal, coveredFiles, normalizePath } from './run-journal.mjs';
 import { projectRoot } from './project-root.mjs';
 import { stateDirSegments } from './state-dir.mjs';
-import { computeProfile } from './profile.mjs';
+import { computeProfile, SCOPE_BASE } from './profile.mjs';
 
 export const SECTION = '## quality evidence';
 
@@ -293,6 +293,10 @@ function ownSession(root, sessionId = null) {
       // это чтение регистром/разделителем — нужен путь ровно в том виде, в каком его
       // записал `armGate` (тот же вид, что `gate.mjs status` печатает наружу).
       rawFiles: Object.keys(s.files || {}),
+      // Последний проход цикла: по его базам пересчитывается профиль, по его номеру ищется
+      // прошлый принятый отчёт. Не `files[rel].checked` — его переписывает сама приёмка.
+      pass: s.cycle?.passes?.at?.(-1) || null,
+      session: s,
     };
   } catch {
     return null;
@@ -516,6 +520,9 @@ export function validate(text, { gate = false, root = null, session = null } = {
     }
     if (rec.type === 'scope' && rec.fields.volume && !VOLUMES.includes(rec.fields.volume)) {
       add('error', rec.line, `volume="${rec.fields.volume}" вне списка ${VOLUMES.join('|')}`);
+    }
+    if (rec.type === 'scope' && rec.fields.base !== undefined && !SCOPE_BASE.test(String(rec.fields.base))) {
+      add('error', rec.line, `base="${rec.fields.base}" в записи scope: допустимо HEAD либо pass:<номер> — строку печатает gate.mjs run`);
     }
     if (rec.type === 'scope' && rec.fields.config && !CONFIG_PATTERN.test(String(rec.fields.config))) {
       add(
@@ -830,7 +837,30 @@ export function validate(text, { gate = false, root = null, session = null } = {
   // `volume` и `archetypes` не зависят от метрик анализатора, и `gate.mjs plan` считает их
   // той же функцией по тем же файлам сессии. Расхождение значит, что после плана файлы
   // сессии изменились, — тогда план печатается заново.
-  if (scopes.length === 1 && own?.rawFiles?.length) {
+  //
+  // База прохода (v3.17.0). Проход по исправлению считает профиль от снимка прошлого прохода,
+  // и пересчёт идёт от той же базы — из записи прохода, а не из `checked`, которую переписывает
+  // приёмка. Заявить HEAD вправе всегда (проверка полнее), чужой номер прохода — нет. Поле
+  // необязательно: его отсутствие — HEAD, прежние отчёты проходят без правки.
+  const declaredBase = scopes.length === 1 ? String(scopes[0].fields.base || 'HEAD') : 'HEAD';
+  const passBase = own?.pass?.base || 'HEAD';
+  if (scopes.length === 1 && declaredBase !== 'HEAD' && SCOPE_BASE.test(declaredBase)) {
+    if (!own?.pass) {
+      add(
+        'warn',
+        scopes[0].line,
+        `base=${declaredBase}: базу сверить не по чему — сессия не названа (--session) либо прохода нет; объём сверен не будет`
+      );
+    } else if (declaredBase !== passBase) {
+      add(
+        'error',
+        scopes[0].line,
+        `base=${declaredBase} в записи scope, а проход ${own.pass.n} идёт от ${passBase} — перенеси строку scope из вывода run`
+      );
+    }
+  }
+  const recomputeBases = declaredBase === 'HEAD' ? null : own?.pass?.bases || null;
+  if (scopes.length === 1 && own?.rawFiles?.length && (declaredBase === 'HEAD' || recomputeBases)) {
     try {
       const computed = computeProfile({
         files: own.rawFiles,
@@ -838,6 +868,7 @@ export function validate(text, { gate = false, root = null, session = null } = {
         config: project?.values,
         metrics: {},
         configState: project,
+        bases: recomputeBases,
       });
       if (computed.note !== 'no_git') {
         const scopeRec = scopes[0];
@@ -851,7 +882,7 @@ export function validate(text, { gate = false, root = null, session = null } = {
             scopeRec.line,
             `volume="${declaredVolume}" в записи scope ниже расчётного: computeProfile по файлам сессии ` +
               `даёт ${computed.volume}. Модель вправе поднять глубину, но не понизить — перенеси строку ` +
-              'scope из gate.mjs plan (файлы сессии менялись после плана — напечатай его заново)'
+              'scope из вывода run (черновик следа) либо gate.mjs plan — файлы сессии менялись после них, напечатай заново'
           );
         }
         const declaredArchetypes = Array.isArray(scopeRec.fields.archetypes) ? scopeRec.fields.archetypes : [];
@@ -862,8 +893,8 @@ export function validate(text, { gate = false, root = null, session = null } = {
             scopeRec.line,
             `архетипы расчётного профиля (computeProfile) — ${missing.join(', ')} — отсутствуют в ` +
               `archetypes=[${declaredArchetypes.join(',') || 'none'}] записи scope. Модель вправе расширить ` +
-              'список, но не сузить — перенеси строку scope из gate.mjs plan (файлы сессии менялись после ' +
-              'плана — напечатай его заново)'
+              'список, но не сузить — перенеси строку scope из вывода run (черновик следа) либо gate.mjs plan — ' +
+              'файлы сессии менялись после них, напечатай заново'
           );
         }
       }
@@ -1054,9 +1085,27 @@ function main(argv) {
   );
   // Принятый отчёт — часть записи прохода: по нему следующий проход проверяет закрытие находок,
   // а снятие печатает остаток. Пишется только в режиме гейта и только по названной сессии.
+  // Приёмка ставит файлам отметку «проверено» по снимку прохода: от неё следующий проход
+  // считает разницу. Файл, изменённый во время прохода, отметки не получает — отчёт его
+  // текущее содержимое не видел.
   if (gate && session && exitCode === 0) {
     try {
-      updateSession({ root: root || projectRoot(), sessionId: session, mutate: (s) => acceptPass(s, { report: resolvePath(file) }) });
+      const rootDir = root || projectRoot();
+      const marked = updateSession({
+        root: rootDir,
+        sessionId: session,
+        mutate: (s) => {
+          acceptPass(s, { report: resolvePath(file) });
+          const pass = s.cycle?.passes?.at?.(-1);
+          return markChecked(s, snapshotBlobs(rootDir, Object.keys(pass?.blobs || {})));
+        },
+      });
+      if (marked?.changed?.length) {
+        process.stdout.write(
+          `ПРЕДУПРЕЖДЕНИЕ — файлы менялись во время прохода: ${marked.changed.join(', ')}; отметка проверки им не поставлена, ` +
+            'следующий проход посчитает их от прошлой базы.\n'
+        );
+      }
     } catch {
       /* запись прохода — удобство следующего прохода, не условие приёмки следа */
     }

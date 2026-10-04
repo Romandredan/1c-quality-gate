@@ -8267,6 +8267,70 @@ section('gate.mjs run — инструментальная фаза одним �
   check('без отметки проверки проход полный и причина названа', /^Проход 3 из 3 · база HEAD/m.test(r3.out) && /Module\.bsl: от HEAD — нет принятого отчёта/.test(r3.out), r3.out.slice(0, 800));
 }
 
+// Валидатор и база прохода: приёмка ставит отметки, заявленная база сверяется с проходом,
+// пересчёт объёма идёт от той же базы. Сквозная граница: строка scope из run → валидатор.
+{
+  const fr = join(WORK, 'fixpass-root');
+  const env = { CLAUDE_PROJECT_DIR: fr };
+  const bsl = 'src/cf/CommonModules/М/Ext/Module.bsl';
+  const p = join(fr, '.claude', '.state', 'qg-pending.json');
+  const sess = () => JSON.parse(readFileSync(p, 'utf8')).sessions.F1;
+  // Новый цикл на том же стенде: проход 1 → приёмка валидатором → правка → проход 2.
+  const st = JSON.parse(readFileSync(p, 'utf8'));
+  st.sessions.F1.cycle = { passes: [], decisions: [] };
+  delete st.sessions.F1.files[bsl].checked;
+  writeFileSync(p, JSON.stringify(st, null, 2), 'utf8');
+  const r1 = run('tools/gate.mjs', ['run', '--session', 'F1', '--no-analyzer'], { env });
+  const scope1 = (r1.out.match(/^\[qg scope: .*\]$/m) || [''])[0];
+  const draft = (scope) => readFileSync(ev('valid.md'), 'utf8').replace(/^\[qg scope: .*\]$/m, scope) +
+    '[qg not_verified: dimension=static-analysis, reason=not_in_analyzer_report, files=1]\n';
+  const rep1 = join(WORK, 'fixpass-v1.md');
+  writeFileSync(rep1, draft(scope1), 'utf8');
+  const v1 = run('tools/evidence-validator.mjs', [rep1, '--gate', '--session', 'F1'], { env });
+  check('валидатор принимает след прохода 1 со строкой scope из run', v1.code === 0, v1.out.slice(0, 600));
+  check('приёмка ставит отметку проверки по снимку', sess().files[bsl].checked?.pass === 1 && sess().files[bsl].checked.blob === sess().cycle.passes[0].blobs[bsl]);
+
+  writeFileSync(join(fr, bsl), BOM + 'Процедура П() Экспорт\n\tА = 4;\nКонецПроцедуры\n', 'utf8');
+  const r2 = run('tools/gate.mjs', ['run', '--session', 'F1', '--no-analyzer'], { env });
+  const scope2 = (r2.out.match(/^\[qg scope: .*\]$/m) || [''])[0];
+  check('строка scope прохода 2 несёт base=pass:1', /base=pass:1/.test(scope2), scope2);
+  const rep2 = join(WORK, 'fixpass-v2.md');
+  writeFileSync(rep2, draft(scope2), 'utf8');
+  const v2 = run('tools/evidence-validator.mjs', [rep2, '--gate', '--session', 'F1'], { env });
+  check('сквозная граница: scope с base=pass:1 из run принимается', v2.code === 0, v2.out.slice(0, 600));
+
+  const wrong = join(WORK, 'fixpass-wrong.md');
+  writeFileSync(wrong, draft(scope2.replace('base=pass:1', 'base=pass:7')), 'utf8');
+  const vw = run('tools/evidence-validator.mjs', [wrong, '--gate', '--session', 'F1'], { env });
+  check('чужая база отклоняется с названием прохода', vw.code !== 0 && /base=pass:7/.test(vw.out) && /pass:1/.test(vw.out), vw.out.slice(0, 600));
+  const bad = join(WORK, 'fixpass-bad.md');
+  writeFileSync(bad, draft(scope2.replace('base=pass:1', 'base=снимок')), 'utf8');
+  check('метка базы вне шаблона — ошибка', run('tools/evidence-validator.mjs', [bad, '--gate', '--session', 'F1'], { env }).code !== 0);
+  const full = join(WORK, 'fixpass-full.md');
+  writeFileSync(full, draft(scope2.replace('base=pass:1', 'base=HEAD')), 'utf8');
+  const vf = run('tools/evidence-validator.mjs', [full, '--gate', '--session', 'F1'], { env });
+  check('заявленная база HEAD на проходе 2 допустима — проверка полнее', vf.code === 0, vf.out.slice(0, 600));
+  const emptyRoot = join(WORK, 'fixpass-empty');
+  rmSync(emptyRoot, { recursive: true, force: true });
+  mkdirSync(emptyRoot, { recursive: true });
+  // Режим lint проверок гейта не делает вовсе; базу без сессии сверить не по чему в режиме гейта.
+  const lint = run('tools/evidence-validator.mjs', [rep2, '--gate', '--root', emptyRoot]);
+  check('без сессии база pass:N — предупреждение, не ошибка', /ПРЕДУПРЕЖДЕНИЕ[^\n]*базу сверить не по чему/.test(lint.out), lint.out.slice(0, 600));
+
+  // Файл изменён между run и валидатором — отчёт принят, отметки нет, предупреждение.
+  const before = sess().files[bsl].checked;
+  // Правка до прохода 3: иначе он начинается без изменений со снимка (C0), и любая правка
+  // после run законно отклоняется как понижение объёма, а не доходит до приёмки.
+  writeFileSync(join(fr, bsl), BOM + 'Процедура П() Экспорт\n\tА = 6;\nКонецПроцедуры\n', 'utf8');
+  const r3 = run('tools/gate.mjs', ['run', '--session', 'F1', '--no-analyzer'], { env });
+  writeFileSync(join(fr, bsl), BOM + 'Процедура П() Экспорт\n\tА = 5;\nКонецПроцедуры\n', 'utf8');
+  const rep3 = join(WORK, 'fixpass-v3.md');
+  writeFileSync(rep3, draft((r3.out.match(/^\[qg scope: .*\]$/m) || [''])[0]), 'utf8');
+  const v3 = run('tools/evidence-validator.mjs', [rep3, '--gate', '--session', 'F1'], { env });
+  check('изменённый во время прохода файл назван в предупреждении', /менялись во время прохода[^\n]*Module\.bsl/.test(v3.out), v3.out.slice(-600));
+  check('отметка проверки осталась от прошлого прохода', JSON.stringify(sess().files[bsl].checked) === JSON.stringify(before));
+}
+
 section('План прогона — пути автотестов и подсказка YAxUnit');
 
 {
