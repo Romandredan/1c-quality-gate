@@ -542,6 +542,9 @@ function cmdRelease(args) {
     doneState.sessions[sessionId] = record;
     writeFileSync(done, JSON.stringify(doneState, null, 2), 'utf8');
   });
+  // Копии отчётов проходов нужны только внутри цикла — для сверки переноса находок. Цикл
+  // закрыт; итоговый отчёт сохранён в архиве снятия (evidenceArchive).
+  rmSync(join(dir, 'qg-passes', sessionId), { recursive: true, force: true });
 
   const count = Object.keys(sessionState.files || {}).length;
   const rest = outcome.rest;
@@ -1096,7 +1099,8 @@ function codeModelPasses({ resolvedCode, volume, archetypeLabels, bslFiles, refs
     passes.push(
       `проход по исправлению: субагентам слоёв — ${fixPass.fixDiff}` +
         (fixPass.prevReport ? ` и прошлый отчёт ${fixPass.prevReport}` : '') +
-        '; файлы целиком не читать, кроме строк за пределами разницы, нужных для понимания исправления'
+        '; файлы целиком не читать, кроме строк за пределами разницы, нужных для понимания исправления; ' +
+        'файлы, названные «от HEAD» в разделе «База прохода», читать целиком'
     );
   }
   if (bslFiles.length) {
@@ -1398,25 +1402,30 @@ function prepareBases({ rootDir, files, sessionId, continueLast }) {
  * blob печатает в заголовках хеши, поэтому заголовки заменяются путями файлов.
  */
 function buildBaseDiff(rootDir, files, bases) {
+  const git = (args, input) =>
+    spawnSync('git', args, { cwd: rootDir, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, ...(input !== undefined ? { input } : {}) });
+  const blobDiff = (rel, from, to) =>
+    String(git(['diff', from, to]).stdout || '')
+      .split('\n')
+      .map((l) =>
+        l.startsWith('diff --git ') ? `diff --git a/${rel} b/${rel}` : l.startsWith('--- ') ? `--- a/${rel}` : l.startsWith('+++ ') ? `+++ b/${rel}` : l
+      )
+      .join('\n');
+  let emptyBlob = null;
   const parts = [];
   for (const rel of files) {
     const b = bases?.[rel];
+    const sha = String(git(['hash-object', '-w', rel]).stdout || '').trim();
     if (b && typeof b === 'object') {
-      const cur = spawnSync('git', ['hash-object', '-w', rel], { cwd: rootDir, encoding: 'utf8' });
-      const sha = String(cur.stdout || '').trim();
       if (!sha || sha === b.blob) continue;
-      const d = spawnSync('git', ['diff', b.blob, sha], { cwd: rootDir, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
-      parts.push(
-        String(d.stdout || '')
-          .split('\n')
-          .map((l) =>
-            l.startsWith('diff --git ') ? `diff --git a/${rel} b/${rel}` : l.startsWith('--- ') ? `--- a/${rel}` : l.startsWith('+++ ') ? `+++ b/${rel}` : l
-          )
-          .join('\n')
-      );
+      parts.push(blobDiff(rel, b.blob, sha));
+    } else if (sha && git(['cat-file', '-e', `HEAD:${rel}`]).status !== 0) {
+      // Файла нет в HEAD — новый модуль обычно ещё и не отслеживается, и `git diff HEAD` его не
+      // видит вовсе. Разница с пустым blob даёт файл целиком: слои читают его полностью.
+      emptyBlob = emptyBlob || String(git(['hash-object', '-w', '--stdin'], '').stdout || '').trim();
+      parts.push(blobDiff(rel, emptyBlob, sha));
     } else {
-      const d = spawnSync('git', ['diff', 'HEAD', '--', rel], { cwd: rootDir, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
-      parts.push(String(d.stdout || ''));
+      parts.push(String(git(['diff', 'HEAD', '--', rel]).stdout || ''));
     }
   }
   return parts.filter((s) => s.trim()).join('\n');

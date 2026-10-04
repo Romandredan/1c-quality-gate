@@ -17,7 +17,7 @@
  * Коды выхода: 0 — чисто, 1 — предупреждения, 2 — блокирующие нарушения.
  */
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import { acceptPass, updateSession, snapshotBlobs, markChecked, lastAcceptedReport } from './gate-cycle.mjs';
 import { resolve as resolveConfig, evidenceValue, DEFAULTS as CONFIG_DEFAULTS } from './config.mjs';
@@ -344,7 +344,9 @@ const NOT_FINDINGS = /отклон|не\s*провер|непровер|пред
 const OUTSIDE_SECTION = /вне\s+правки/i;
 // «Закрыто» — находки прошлого отчёта, закрытие которых проверено на проходе по исправлению
 // (v3.17.0). Разбираются, чтобы сверить перенос, но не блокируют и в остаток не входят.
-const CLOSED_SECTION = /^закрыт/i;
+// Ведущие небуквенные символы допустимы: модель украшает заголовки («## ✅ Закрыто»), и без
+// этого раздел ушёл бы в NOT_FINDINGS, а каждая перенесённая находка — в «пропала».
+const CLOSED_SECTION = /^[^\p{L}]*закрыт/iu;
 const DECISION_SECTION = /нужно\s+решени/i;
 const FINDING_ID = /qg:[A-Z][A-Z0-9-]*[A-Z0-9]|#?std\d{3,4}|bslls:[A-Za-z][\w-]*|acc:\d{3,4}|v8cs:[\w-]+/g;
 
@@ -415,26 +417,28 @@ export function reportSections(text) {
   };
 }
 
-const findingKey = (f) => (f.ids.length ? f.ids.join(',') : `title:${f.title.trim().toLowerCase()}`);
+const normTitle = (f) => f.title.trim().toLowerCase();
 
 /**
- * Находки прошлого отчёта, которых нет в новом. Ключ — идентификаторы без строки: строки
- * между проходами сдвигаются. Без идентификаторов ключ — заголовок, и пропажа по нему только
- * предупреждение: переименованная находка неотличима от исчезнувшей.
+ * Находки прошлого отчёта, которых нет в новом. Сопоставление по идентификаторам без строки:
+ * строки между проходами сдвигаются. Достаточно общего идентификатора — запись о закрытии
+ * естественно ссылается ещё и на стандарт, по которому исправлено, и точное совпадение набора
+ * отклоняло бы добросовестный отчёт. Каждая новая находка закрывает не больше одной прошлой:
+ * две находки с одним идентификатором одной записью не закрываются. Без идентификаторов
+ * ключ — заголовок, и пропажа по нему только предупреждение: переименованная находка
+ * неотличима от исчезнувшей.
  */
 export function carriedOver(prevText, text) {
   const prev = reportSections(prevText);
   const cur = reportSections(text);
-  const pool = new Map();
-  for (const f of [...cur.closed, ...cur.inChange, ...cur.outside, ...cur.needsDecision]) {
-    const k = findingKey(f);
-    pool.set(k, (pool.get(k) || 0) + 1);
-  }
+  const pool = [...cur.closed, ...cur.inChange, ...cur.outside, ...cur.needsDecision].map((f) => ({ f, used: false }));
   const missing = [];
   const missingById = [];
   for (const f of [...prev.inChange, ...prev.outside, ...prev.needsDecision]) {
-    const k = findingKey(f);
-    if (pool.get(k)) pool.set(k, pool.get(k) - 1);
+    const hit = f.ids.length
+      ? pool.find((p) => !p.used && p.f.ids.some((id) => f.ids.includes(id)))
+      : pool.find((p) => !p.used && normTitle(p.f) === normTitle(f));
+    if (hit) hit.used = true;
     else (f.ids.length ? missingById : missing).push(f);
   }
   return { missing, missingById };
@@ -1157,18 +1161,36 @@ function main(argv) {
   // Приёмка ставит файлам отметку «проверено» по снимку прохода: от неё следующий проход
   // считает разницу. Файл, изменённый во время прохода, отметки не получает — отчёт его
   // текущее содержимое не видел.
-  if (gate && session && exitCode === 0) {
+  //
+  // Принимается след без ошибок: предупреждения приёмку не отменяют, иначе любое из них
+  // (находка без идентификатора, нечитаемый прошлый отчёт) молча выключало бы проход по
+  // исправлению. Исход приёмки печатается всегда — пропуск обязан оставлять след. Отчёт
+  // копируется рядом с состоянием: следующий проход сверяет перенос находок по копии, и отчёт,
+  // перезаписанный по тому же пути, не сравнивается сам с собой.
+  if (gate && session) {
     try {
       const rootDir = root || projectRoot();
+      const passN = ownSession(rootDir, session)?.pass?.n;
+      if (exitCode === 2) {
+        if (passN) process.stdout.write(`Проход ${passN} не принят: след отклонён — исправь отчёт по ошибкам выше и проверь снова.\n`);
+        return exitCode;
+      }
       const marked = updateSession({
         root: rootDir,
         sessionId: session,
         mutate: (s) => {
-          acceptPass(s, { report: resolvePath(file) });
           const pass = s.cycle?.passes?.at?.(-1);
-          return markChecked(s, snapshotBlobs(rootDir, Object.keys(pass?.blobs || {})));
+          if (!pass) return null;
+          const dir = join(rootDir, ...stateDirSegments(), 'qg-passes', session);
+          mkdirSync(dir, { recursive: true });
+          const copy = join(dir, `pass-${pass.n}.md`);
+          copyFileSync(resolvePath(file), copy);
+          acceptPass(s, { report: copy });
+          pass.source = resolvePath(file);
+          return { n: pass.n, copy, ...markChecked(s, snapshotBlobs(rootDir, Object.keys(pass.blobs || {}))) };
         },
       });
+      if (marked) process.stdout.write(`Проход ${marked.n} принят: отчёт сохранён — ${marked.copy}\n`);
       if (marked?.changed?.length) {
         process.stdout.write(
           `ПРЕДУПРЕЖДЕНИЕ — файлы менялись во время прохода: ${marked.changed.join(', ')}; отметка проверки им не поставлена, ` +
