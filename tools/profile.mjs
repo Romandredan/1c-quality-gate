@@ -128,6 +128,16 @@ export const ARCHETYPES = [
  */
 export const BASE_CHECKLIST = [1, 2, 3, 4, 5, 11, 16, 17];
 
+/** Метка базы прохода в записи scope. Валидатор импортирует шаблон отсюда — копии нет. */
+export const SCOPE_BASE = /^(HEAD|pass:[1-9]\d*)$/;
+
+/** Метка базы по базам файлов: максимум номеров проходов среди снимков, иначе HEAD. */
+export function baseLabel(bases) {
+  let max = 0;
+  for (const b of Object.values(bases || {})) if (b && typeof b === 'object' && b.pass > max) max = b.pass;
+  return max ? `pass:${max}` : 'HEAD';
+}
+
 const CODE_RANK = { skip: 0, L1: 1, L2: 2 };
 
 function codeMax(...values) {
@@ -430,10 +440,11 @@ function allLineNumbers(count) {
  * 1..N целиком); `note: 'no_git'` — сравнивать было не с чем: git недоступен либо файл вне
  * корня проекта.
  */
-function diffFile(file, root, gitOk) {
+function diffFile(file, root, gitOk, base = 'HEAD') {
   const abs = resolvePath(root, file);
   const rel = normalize(relative(resolvePath(root), abs));
 
+  // Вне git и вне корня сравнивать не с чем при любой базе: файл проверяется целиком.
   if (!gitOk || !rel || rel.startsWith('..')) {
     const lines = currentLines(abs);
     return {
@@ -448,16 +459,38 @@ function diffFile(file, root, gitOk) {
     };
   }
 
+  // База — снимок прохода. Пропавший снимок (сборка мусора) — полный проход от HEAD с
+  // пометкой, а не ошибка: так же поступает resolveBases в gate-cycle.mjs.
+  if (base && typeof base === 'object') {
+    const exists = spawnSync('git', ['cat-file', '-e', base.blob], { cwd: root, encoding: 'utf8' });
+    const cur = exists.error || exists.status !== 0 ? null : spawnSync('git', ['hash-object', '-w', rel], { cwd: root, encoding: 'utf8' });
+    const curSha = cur && !cur.error && cur.status === 0 ? String(cur.stdout || '').trim() : '';
+    if (!curSha) return { ...diffFile(file, root, gitOk, 'HEAD'), baseMissing: true };
+    if (curSha === base.blob) {
+      return { rel, added: 0, removed: 0, addedLines: [], removedLines: [], isNew: false, changedLines: new Set(), baseBlob: base.blob, unchanged: true };
+    }
+    return {
+      rel,
+      ...diffOutput(root, ['diff', '--numstat', base.blob, curSha], ['diff', '-U0', base.blob, curSha]),
+      isNew: false,
+      baseBlob: base.blob,
+    };
+  }
+
   const head = spawnSync('git', ['show', `HEAD:${rel}`], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   const hasHistory = !head.error && head.status === 0;
   if (!hasHistory) {
     const lines = currentLines(abs);
     return { rel, added: lines.length, removed: 0, addedLines: lines, removedLines: [], isNew: true, changedLines: allLineNumbers(lines.length) };
   }
+  return { rel, ...diffOutput(root, ['diff', '--numstat', 'HEAD', '--', rel], ['diff', '-U0', 'HEAD', '--', rel]), isNew: false };
+}
 
+/** Разбор `git diff --numstat` и `git diff -U0`: счётчики, сами строки и строки рабочего дерева. */
+function diffOutput(root, numstatArgs, unifiedArgs) {
   let added = 0;
   let removed = 0;
-  const num = spawnSync('git', ['diff', '--numstat', 'HEAD', '--', rel], { cwd: root, encoding: 'utf8' });
+  const num = spawnSync('git', numstatArgs, { cwd: root, encoding: 'utf8' });
   if (!num.error && num.status === 0) {
     const firstLine = String(num.stdout || '').trim().split('\n')[0] || '';
     const m = firstLine.match(/^(\d+|-)\s+(\d+|-)\s+/);
@@ -470,7 +503,7 @@ function diffFile(file, root, gitOk) {
   const addedLines = [];
   const removedLines = [];
   const changedLines = new Set();
-  const u = spawnSync('git', ['diff', '-U0', 'HEAD', '--', rel], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const u = spawnSync('git', unifiedArgs, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (!u.error && u.status === 0) {
     for (const line of String(u.stdout || '').split('\n')) {
       if (line.startsWith('+++') || line.startsWith('---')) continue;
@@ -492,7 +525,7 @@ function diffFile(file, root, gitOk) {
       }
     }
   }
-  return { rel, added, removed, addedLines, removedLines, isNew: false, changedLines };
+  return { added, removed, addedLines, removedLines, changedLines };
 }
 
 /**
@@ -527,6 +560,11 @@ function diffFile(file, root, gitOk) {
  * обработки и отчёты (`.os` — тот же синтаксис модуля) мимо метод-ориентированных правил оси 1
  * целиком, и правка двух методов внешней обработки молча оставалась в C1.
  */
+function blobText(sha, root) {
+  const r = spawnSync('git', ['cat-file', '-p', sha], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  return r.error || r.status !== 0 ? null : String(r.stdout).replace(/^﻿/, '');
+}
+
 function analyzeChangedMethods(diffs, root) {
   const touchedBodies = [];
   const newMethods = [];
@@ -535,7 +573,7 @@ function analyzeChangedMethods(diffs, root) {
   let touchedCount = 0;
 
   for (const d of diffs) {
-    if (d.isNew || !/\.(bsl|os)$/i.test(d.rel)) continue;
+    if (d.isNew || d.unchanged || !/\.(bsl|os)$/i.test(d.rel)) continue;
     const abs = resolvePath(root, d.rel);
     if (!existsSync(abs)) continue; // рабочее дерево файл удалило — сравнивать методы негде
 
@@ -545,7 +583,9 @@ function analyzeChangedMethods(diffs, root) {
     } catch {
       continue;
     }
-    const headRaw = headVersion(abs, root);
+    // База сравнения методов — та же, от которой посчитана разница: снимок прохода либо HEAD.
+    // От HEAD метод, добавленный на проходе 1, оставался бы «новым» на каждом следующем.
+    const headRaw = d.baseBlob ? blobText(d.baseBlob, root) : headVersion(abs, root);
     if (headRaw === null) continue; // защитный дубль условия d.isNew выше
 
     const currentMethods = methodRanges(currentText);
@@ -676,8 +716,15 @@ function computeConfigStamp({ config, root, configState }) {
  * берётся из него напрямую, без повторного чтения диска. `metrics` — `metrics` из
  * `analyzer-run.mjs --json` (`{}`, если анализатор не запускался — тогда сложность считается
  * пустой, а не приближается вручную).
+ *
+ * `bases` — необязательно; база каждого файла для прохода по исправлению (`'HEAD'` либо
+ * `{ pass, blob }` — снимок, проверенный прошлым проходом, см. `resolveBases` в
+ * `gate-cycle.mjs`). Объём, строки и архетипы считаются от базы: повторный проход оценивает
+ * исправление, а не всю правку заново. Граница правки (`touched`) — всегда от HEAD: исправление
+ * второго круга остаётся частью правки. Спецификация: раздел «Разница от базы»
+ * docs/superpowers/specs/2026-10-01-gate-passes-convergence-design.md.
  */
-export function computeProfile({ files, root, config, metrics, configState }) {
+export function computeProfile({ files, root, config, metrics, configState, bases = null }) {
   const cfg = {
     c1MaxFiles: config?.volume?.c1MaxFiles ?? DEFAULTS.volume.c1MaxFiles,
     c1MaxLines: config?.volume?.c1MaxLines ?? DEFAULTS.volume.c1MaxLines,
@@ -687,24 +734,31 @@ export function computeProfile({ files, root, config, metrics, configState }) {
   };
 
   const gitOk = gitAvailable(root);
-  const diffs = files.map((f) => ({ file: f, ...diffFile(f, root, gitOk) }));
+  const baseOf = (f) => (bases && bases[f] && typeof bases[f] === 'object' ? bases[f] : 'HEAD');
+  const diffs = files.map((f) => ({ file: f, ...diffFile(f, root, gitOk, baseOf(f)) }));
+  const fromBase = diffs.some((d) => d.baseBlob);
+  const headDiffs = fromBase ? files.map((f) => ({ file: f, ...diffFile(f, root, gitOk, 'HEAD') })) : diffs;
+  // Файл, не менявшийся со снимка, в объём и архетипы прохода не входит: проверен прошлым.
+  const effective = diffs.filter((d) => !d.unchanged);
 
-  const added = diffs.reduce((s, d) => s + d.added, 0);
-  const removed = diffs.reduce((s, d) => s + d.removed, 0);
-  const allAddedLines = diffs.flatMap((d) => d.addedLines);
-  const allRemovedLines = diffs.flatMap((d) => d.removedLines || []);
+  const added = effective.reduce((s, d) => s + d.added, 0);
+  const removed = effective.reduce((s, d) => s + d.removed, 0);
+  const allAddedLines = effective.flatMap((d) => d.addedLines);
+  const allRemovedLines = effective.flatMap((d) => d.removedLines || []);
   const addedText = allAddedLines.join('\n');
   const noGit = diffs.some((d) => d.note === 'no_git');
 
   // Методы, которых коснулась правка, — общий вход для оси 1 (новый метод / изменённая
   // сигнатура / >1 метода) и для оси 2 (маркеры архетипов ищутся и в телах этих методов, не
   // только в добавленных строках диффа).
-  const methodAnalysis = analyzeChangedMethods(diffs, root);
+  const methodAnalysis = analyzeChangedMethods(effective, root);
   const changedBodiesText = methodAnalysis.touchedBodies.join('\n');
   // Граница правки по файлам: методы (BSL с историей), диапазоны строк (XML и прочее), весь
   // файл (новый или без git). По ней run и субагент делят находки на «в правке» и «вне правки».
-  const touched = { ...methodAnalysis.touched };
-  for (const d of diffs) {
+  // Считается от HEAD на любом проходе.
+  const touchedAnalysis = fromBase ? analyzeChangedMethods(headDiffs, root) : methodAnalysis;
+  const touched = { ...touchedAnalysis.touched };
+  for (const d of headDiffs) {
     if (touched[d.rel]) continue;
     if (d.isNew || d.note === 'no_git') touched[d.rel] = { kind: 'whole', methods: [], ranges: [] };
     else touched[d.rel] = { kind: 'lines', methods: [], ranges: rangesOf(d.changedLines) };
@@ -717,9 +771,9 @@ export function computeProfile({ files, root, config, metrics, configState }) {
   for (const a of catalog) {
     const byMarker =
       a.markers && a.markers.length > 0 && a.markers.some((re) => re.test(addedText) || re.test(changedBodiesText));
-    const byPath = a.pathMarker ? diffs.some((d) => a.pathMarker.test(d.rel)) : false;
+    const byPath = a.pathMarker ? effective.some((d) => a.pathMarker.test(d.rel)) : false;
     const byNewFile = a.newFile
-      ? diffs.some((d) => {
+      ? effective.some((d) => {
           if (!d.isNew || !a.newFile.test(d.rel)) return false;
           if (a.newFileExclude && a.newFileExclude.test(d.rel)) return false;
           if (!a.declarationFrom) return true;
@@ -758,7 +812,11 @@ export function computeProfile({ files, root, config, metrics, configState }) {
   // («Ось 1») перечисляет их через «ИЛИ».
   let volume;
   let volumeReason = null;
-  if (cosmeticOnly) {
+  if (fromBase && effective.length === 0) {
+    // Ни один файл не менялся со снимка проверенного прохода — проверять заново нечего.
+    volume = 'C0';
+    volumeReason = 'unchanged-since-base';
+  } else if (cosmeticOnly) {
     volume = 'C0';
   } else if (newModuleOrMetadata) {
     volume = 'C3';
@@ -771,7 +829,7 @@ export function computeProfile({ files, root, config, metrics, configState }) {
   } else if (methodAnalysis.signatureChanges.length > 0) {
     volume = 'C2';
     volumeReason = `signature:${methodAnalysis.signatureChanges[0]}`;
-  } else if (files.length > cfg.c1MaxFiles) {
+  } else if (effective.length > cfg.c1MaxFiles) {
     volume = 'C2';
     volumeReason = 'files';
   } else if (added + removed > cfg.c1MaxLines) {
@@ -807,7 +865,7 @@ export function computeProfile({ files, root, config, metrics, configState }) {
   const archCandidates = [...archFromArchetypes, archFromComplexity, archFloor].filter((v) => v !== null);
   const resolvedArch = archCandidates.length ? Math.max(...archCandidates) : null;
 
-  const hasXmlChange = files.some((f) => /\.xml$/i.test(f));
+  const hasXmlChange = effective.some((d) => /\.xml$/i.test(d.rel));
   const resolvedXml =
     volume === 'C0' ? 'skip' : !hasXmlChange ? 'n/a' : volume === 'C1' ? 'changed' : volume === 'C2' ? 'changed+registration' : 'full';
   const resolvedHygiene = 'full';
@@ -855,10 +913,11 @@ export function computeProfile({ files, root, config, metrics, configState }) {
   const archetypesText = archetypeLabels.length ? archetypeLabels.join(',') : 'none';
   const complexityText = complexity.length ? complexity.join(',') : 'none';
   const archText = resolvedArch === null ? 'skip' : String(resolvedArch);
+  const base = fromBase ? baseLabel(Object.fromEntries(diffs.filter((d) => d.baseBlob).map((d) => [d.rel, baseOf(d.file)]))) : 'HEAD';
   const scopeLine =
     `[qg scope: volume=${volume}, files=${files.length}, loc=+${added}/-${removed}, ` +
     `archetypes=[${archetypesText}], complexity=[${complexityText}], driver=${driver}, ` +
-    `resolved=code:${resolvedCode}|arch:${archText}|xml:${resolvedXml}|hygiene:${resolvedHygiene}, ` +
+    `resolved=code:${resolvedCode}|arch:${archText}|xml:${resolvedXml}|hygiene:${resolvedHygiene}, base=${base}, ` +
     `config=${computeConfigStamp({ config, root, configState })}]`;
 
   const result = {
@@ -872,6 +931,9 @@ export function computeProfile({ files, root, config, metrics, configState }) {
     resolved,
     scopeLine,
     touched,
+    base,
+    unchangedSinceBase: diffs.filter((d) => d.unchanged).map((d) => d.rel),
+    baseMissing: diffs.filter((d) => d.baseMissing).map((d) => d.rel),
   };
   if (noGit) result.note = 'no_git';
   return result;
