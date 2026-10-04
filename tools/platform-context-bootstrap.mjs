@@ -494,7 +494,9 @@ export async function startServer({
   const url = urlForPort(port, host);
   let child;
   try {
-    child = spawnImpl(bin, ['--config', configFile], { detached: true, stdio: 'ignore', windowsHide: true });
+    // Свой рабочий каталог: унаследованный — корень проекта, и на Windows живой демон не даёт
+    // его ни удалить, ни переименовать.
+    child = spawnImpl(bin, ['--config', configFile], { cwd: dirname(bin), detached: true, stdio: 'ignore', windowsHide: true });
     child.unref?.();
   } catch (e) {
     return { ok: false, reason: 'spawn_failed', error: String(e.message || e) };

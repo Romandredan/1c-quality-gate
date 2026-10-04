@@ -6973,6 +6973,28 @@ section('Самозаведение контура платформенного 
     check('состояние на чужой процесс не записывается', boot.readServers(raceRoot).length === 0);
   }
 
+  // --- рабочий каталог демона ---------------------------------------------------
+  // Демон живёт дольше прогона и запускается в отрыве от него. Унаследованный рабочий каталог —
+  // корень проекта пользователя: на Windows его потом нельзя ни удалить, ни переименовать, пока
+  // демон жив. Каталог демона — каталог его исполняемого файла.
+  {
+    const cwdRoot = join(WORK, 'pc-cwd');
+    rmSync(cwdRoot, { recursive: true, force: true });
+    mkdirSync(join(cwdRoot, 'bin'), { recursive: true });
+    const binStub = join(cwdRoot, 'bin', 'stub.exe');
+    writeFileSync(binStub, 'не исполняется, важен факт наличия', 'utf8');
+    let opts = null;
+    await boot.startServer({
+      root: cwdRoot,
+      binary: binStub,
+      configFile: join(cwdRoot, 'config.toml'),
+      port: 8110,
+      spawnImpl: (_bin, _args, o) => { opts = o; return { pid: 999998, exitCode: 1, signalCode: null, unref() {} }; },
+      fetchImpl: async () => ({ ok: true, text: async () => JSON.stringify({ version: '0.16.0', index_loaded: true }) }),
+    });
+    check('демон справки запускается в своём каталоге, а не в каталоге проекта', opts?.cwd === join(cwdRoot, 'bin'), JSON.stringify(opts));
+  }
+
   // --- сквозной прогон против поддельного сервера ----------------------------
   // Весь путь целиком: заведение по адресу, часовой, разбор ответа, след, код возврата.
   // Сервер поддельный и локальный — тесты не должны зависеть ни от сети, ни от установленной
