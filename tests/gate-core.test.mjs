@@ -338,6 +338,80 @@ check('чужие правки: предупреждение не трогать
   rmSync(cr, { recursive: true, force: true });
 }
 
+// --- Снимок и база прохода ---
+{
+  const { snapshotBlobs, blobExists, resolveBases, startPass, lastAcceptedReport, markChecked } = await import('../tools/gate-cycle.mjs');
+  const { execFileSync } = await import('node:child_process');
+  const sr = mkdtempSync(join(tmpdir(), 'qg-core-snap-'));
+  execFileSync('git', ['init', '-q'], { cwd: sr });
+  mkdirSync(join(sr, 'm'), { recursive: true });
+  writeFileSync(join(sr, 'm', 'A.bsl'), 'А = 1;\n', 'utf8');
+  writeFileSync(join(sr, 'm', 'B.bsl'), 'Б = 1;\n', 'utf8');
+  execFileSync('git', ['add', '-A'], { cwd: sr });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], { cwd: sr });
+  writeFileSync(join(sr, 'm', 'A.bsl'), 'А = 2;\n', 'utf8');
+
+  const blobs1 = snapshotBlobs(sr, ['m/A.bsl', 'm/B.bsl', 'm/Нет.bsl']);
+  check('снимок даёт blob каждого существующего файла', /^[0-9a-f]{40}$/.test(blobs1['m/A.bsl']) && /^[0-9a-f]{40}$/.test(blobs1['m/B.bsl']));
+  check('удалённый файл в снимке — null, без исключения', blobs1['m/Нет.bsl'] === null);
+  check('записанный снимок есть в хранилище', blobExists(sr, blobs1['m/A.bsl']));
+  check('выдуманного blob в хранилище нет', !blobExists(sr, '0123456789012345678901234567890123456789'));
+
+  const session = { files: { 'm/A.bsl': { kind: 'code', edits: 1 }, 'm/B.bsl': { kind: 'code', edits: 1 } } };
+  const r1 = resolveBases({ session, blobs: blobs1, root: sr });
+  check('без отметок проверки база HEAD у всех', r1.label === 'HEAD' && r1.bases['m/A.bsl'] === 'HEAD' && r1.bases['m/B.bsl'] === 'HEAD');
+  check('удалённый файл помечен', r1.notes['m/Нет.bsl'] === 'deleted');
+  startPass(session, '2026-10-04T10:00:00.000Z', { blobs: blobs1, bases: r1.bases, notes: r1.notes, label: r1.label });
+  check('проход хранит снимок и базы', session.cycle.passes[0].blobs['m/A.bsl'] === blobs1['m/A.bsl'] && session.cycle.passes[0].base === 'HEAD');
+
+  // Файл изменён во время прохода — отметку не получает.
+  writeFileSync(join(sr, 'm', 'B.bsl'), 'Б = 2;\n', 'utf8');
+  const now = snapshotBlobs(sr, ['m/A.bsl', 'm/B.bsl']);
+  const marked = markChecked(session, now);
+  check('неизменённый файл получает отметку проверки', session.files['m/A.bsl'].checked?.blob === blobs1['m/A.bsl'] && session.files['m/A.bsl'].checked.pass === 1);
+  check('изменённый во время прохода — без отметки и назван', !session.files['m/B.bsl'].checked && marked.changed.includes('m/B.bsl'));
+  session.cycle.passes[0].report = 'C:/t/r1.md';
+  session.cycle.passes[0].acceptedAt = '2026-10-04T10:20:00.000Z';
+
+  // Второй проход: A исправлен, B — от HEAD (отметки нет).
+  writeFileSync(join(sr, 'm', 'A.bsl'), 'А = 3;\n', 'utf8');
+  const blobs2 = snapshotBlobs(sr, ['m/A.bsl', 'm/B.bsl']);
+  const r2 = resolveBases({ session, blobs: blobs2, root: sr });
+  check('проверенный файл идёт от снимка прохода 1', r2.bases['m/A.bsl']?.pass === 1 && r2.bases['m/A.bsl'].blob === blobs1['m/A.bsl']);
+  check('файл без отметки идёт от HEAD', r2.bases['m/B.bsl'] === 'HEAD');
+  check('метка базы — pass:1', r2.label === 'pass:1');
+  check('прошлый принятый отчёт находится', lastAcceptedReport(session)?.report === 'C:/t/r1.md');
+  check('отчёт текущего прохода не считается прошлым', lastAcceptedReport(session, { before: 1 }) === null);
+
+  // Неизменённый со снимка файл помечается.
+  const r2same = resolveBases({ session, blobs: { 'm/A.bsl': blobs1['m/A.bsl'] }, root: sr });
+  check('файл, не менявшийся с прохода 1, помечен', r2same.notes['m/A.bsl'] === 'unchanged:1');
+
+  // Снимок убран сборкой мусора — база HEAD с пометкой.
+  const gone = { files: { 'm/A.bsl': { kind: 'code', edits: 1, checked: { blob: '0123456789012345678901234567890123456789', pass: 1 } } } };
+  const r3 = resolveBases({ session: gone, blobs: { 'm/A.bsl': blobs2['m/A.bsl'] }, root: sr });
+  check('пропавший снимок — HEAD и base_missing', r3.bases['m/A.bsl'] === 'HEAD' && r3.notes['m/A.bsl'] === 'base_missing' && r3.label === 'HEAD');
+
+  // Файл вне корня проекта (ключ состояния — абсолютный путь) и файл без git: проход всегда полный.
+  const outside = mkdtempSync(join(tmpdir(), 'qg-core-snap-out-'));
+  const outFile = join(outside, 'X.bsl');
+  writeFileSync(outFile, 'Х = 1;\n', 'utf8');
+  const outBlobs = snapshotBlobs(sr, [outFile]);
+  const outSession = { files: { [outFile]: { kind: 'code', edits: 1, checked: { blob: blobs1['m/A.bsl'], pass: 1 } } } };
+  const r4 = resolveBases({ session: outSession, blobs: outBlobs, root: sr });
+  check('файл вне корня — HEAD и no_git, не «удалён»', r4.bases[outFile] === 'HEAD' && r4.notes[outFile] === 'no_git' && r4.label === 'HEAD', JSON.stringify(r4));
+  const outPassSession = { files: { [outFile]: { kind: 'code', edits: 1 } } };
+  startPass(outPassSession, '2026-10-04T11:00:00.000Z', { blobs: outBlobs, bases: r4.bases, notes: r4.notes, label: r4.label });
+  markChecked(outPassSession, outBlobs);
+  check('файлу вне git отметка проверки не ставится', !outPassSession.files[outFile].checked);
+  const nogit = mkdtempSync(join(tmpdir(), 'qg-core-snap-nogit-'));
+  writeFileSync(join(nogit, 'Y.bsl'), 'У = 1;\n', 'utf8');
+  const r5 = resolveBases({ session: { files: { 'Y.bsl': { kind: 'code', edits: 1 } } }, blobs: snapshotBlobs(nogit, ['Y.bsl']), root: nogit });
+  check('проект без git — HEAD и no_git', r5.bases['Y.bsl'] === 'HEAD' && r5.notes['Y.bsl'] === 'no_git', JSON.stringify(r5));
+  rmSync(outside, { recursive: true, force: true });
+  rmSync(nogit, { recursive: true, force: true });
+  rmSync(sr, { recursive: true, force: true });
+}
 rmSync(outsideDir, { recursive: true, force: true });
 rmSync(root, { recursive: true, force: true });
 rmSync(root2, { recursive: true, force: true });

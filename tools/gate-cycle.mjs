@@ -14,7 +14,8 @@
  */
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, isAbsolute } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { stateDirSegments } from './state-dir.mjs';
 import { withStateLock } from './state-lock.mjs';
 
@@ -37,11 +38,107 @@ export function passCount(session) {
   return c.passes.filter((p) => Date.parse(p.startedAt) > since).length;
 }
 
-export function startPass(session, now = new Date().toISOString()) {
+export function startPass(session, now = new Date().toISOString(), extra = {}) {
   const c = cycleOf(session);
-  const pass = { n: c.passes.length + 1, startedAt: now, base: 'HEAD' };
+  const { label, ...rest } = extra;
+  const pass = { n: c.passes.length + 1, startedAt: now, base: label ?? 'HEAD', ...rest };
   c.passes.push(pass);
   return pass;
+}
+
+/**
+ * Снимок файлов сессии на старте прохода: blob каждого файла, записанный в хранилище объектов
+ * (`hash-object -w`), — по нему следующий проход считает разницу. Недостижимый blob живёт до
+ * сборки мусора; пропажу ловит `resolveBases`, и проход становится полным, а не падает.
+ */
+export function snapshotBlobs(root, files) {
+  const out = {};
+  for (const rel of files) {
+    const r = spawnSync('git', ['hash-object', '-w', rel], { cwd: root, encoding: 'utf8' });
+    const sha = String(r.stdout || '').trim();
+    out[rel] = !r.error && r.status === 0 && /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
+  }
+  return out;
+}
+
+export function blobExists(root, sha) {
+  if (!sha) return false;
+  const r = spawnSync('git', ['cat-file', '-e', sha], { cwd: root, encoding: 'utf8' });
+  return !r.error && r.status === 0;
+}
+
+/**
+ * База каждого файла: blob, проверенный последним принятым проходом (`checked`), либо HEAD.
+ * Отметку ставит валидатор при приёмке отчёта, поэтому файл, добавленный после прохода или
+ * изменённый во время него, идёт от HEAD либо от своей прежней отметки — проверенное раньше
+ * не теряется, непроверенное не выдаётся за проверенное. Файл вне корня или без git идёт от
+ * HEAD всегда (`no_git`): сравнивать не с чем, как и в `profile.mjs`.
+ */
+export function resolveBases({ session, blobs, root }) {
+  const bases = {};
+  const notes = {};
+  const lastPass = session?.cycle?.passes?.at?.(-1) || null;
+  const git = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: root, encoding: 'utf8' });
+  const gitOk = !git.error && git.status === 0;
+  let maxPass = 0;
+  for (const [rel, cur] of Object.entries(blobs)) {
+    const checked = session?.files?.[rel]?.checked;
+    if (!gitOk || isAbsolute(rel) || rel.startsWith('..')) {
+      bases[rel] = 'HEAD';
+      notes[rel] = 'no_git';
+      continue;
+    }
+    if (cur === null) {
+      bases[rel] = 'HEAD';
+      notes[rel] = existsSync(join(root, rel)) ? 'no_git' : 'deleted';
+      continue;
+    }
+    if (!checked?.blob) {
+      bases[rel] = 'HEAD';
+      if (lastPass?.blobs?.[rel] && lastPass.blobs[rel] === cur) notes[rel] = `unchanged:${lastPass.n}`;
+      continue;
+    }
+    if (!blobExists(root, checked.blob)) {
+      bases[rel] = 'HEAD';
+      notes[rel] = 'base_missing';
+      continue;
+    }
+    bases[rel] = { pass: checked.pass, blob: checked.blob };
+    if (checked.blob === cur) notes[rel] = `unchanged:${checked.pass}`;
+    if (checked.pass > maxPass) maxPass = checked.pass;
+  }
+  return { bases, notes, label: maxPass ? `pass:${maxPass}` : 'HEAD' };
+}
+
+/** Последний принятый проход с номером меньше `before` — источник прошлого отчёта. */
+export function lastAcceptedReport(session, { before = Infinity } = {}) {
+  const passes = session?.cycle?.passes || [];
+  for (let i = passes.length - 1; i >= 0; i--) {
+    const p = passes[i];
+    if (p.n < before && p.report && p.acceptedAt) return { n: p.n, report: p.report };
+  }
+  return null;
+}
+
+/**
+ * Отметка «проверено» по снимку принятого прохода. Файл, чей blob разошёлся со снимком,
+ * менялся во время прохода: отчёт его текущее содержимое не видел, отметки нет.
+ */
+export function markChecked(session, currentBlobs) {
+  const out = { checked: [], changed: [] };
+  const pass = session?.cycle?.passes?.at?.(-1);
+  if (!pass?.blobs) return out;
+  for (const [rel, blob] of Object.entries(pass.blobs)) {
+    const entry = session.files?.[rel];
+    if (!entry || pass.notes?.[rel] === 'no_git') continue;
+    if (blob && currentBlobs[rel] === blob) {
+      entry.checked = { blob, pass: pass.n };
+      out.checked.push(rel);
+    } else {
+      out.changed.push(rel);
+    }
+  }
+  return out;
 }
 
 export function notePrompt(session, now = new Date().toISOString()) {
