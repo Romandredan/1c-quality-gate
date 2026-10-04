@@ -1100,7 +1100,8 @@ function codeModelPasses({ resolvedCode, volume, archetypeLabels, bslFiles, refs
       `проход по исправлению: субагентам слоёв — ${fixPass.fixDiff}` +
         (fixPass.prevReport ? ` и прошлый отчёт ${fixPass.prevReport}` : '') +
         '; файлы целиком не читать, кроме строк за пределами разницы, нужных для понимания исправления; ' +
-        'файлы, названные «от HEAD» в разделе «База прохода», читать целиком'
+        'файлы, названные «от HEAD» в разделе «База прохода», читать целиком' +
+        (fixPass.floor ? '; слою 2 — ещё и вся правка (change.diff): не нарушило ли исправление общую логику' : '')
     );
   }
   if (bslFiles.length) {
@@ -1268,7 +1269,7 @@ function cmdPlan(args) {
   // База предстоящего прохода — та же, что возьмёт run: строка scope плана и черновика
   // совпадают, и валидатор, отсылающий к плану, отсылает к верной строке. Проход не пишется.
   const ctx = planContext(args, {
-    bases: (rootDir, files, sessionId) => prepareBases({ rootDir, files, sessionId, continueLast: false })?.bases || null,
+    bases: (rootDir, files, sessionId) => prepareBases({ rootDir, files, sessionId, continueLast: false }),
   });
   if (ctx.error) {
     process.stderr.write(ctx.error);
@@ -1390,11 +1391,19 @@ function prepareBases({ rootDir, files, sessionId, continueLast }) {
   const session = state?.sessions?.[sessionId];
   if (!session) return null;
   const last = session.cycle?.passes?.at?.(-1);
-  if (continueLast && last?.bases) {
-    return { blobs: last.blobs || {}, bases: last.bases, notes: last.notes || {}, label: last.base || 'HEAD', continued: true };
-  }
-  const blobs = snapshotBlobs(rootDir, files);
-  return { blobs, ...resolveBases({ session, blobs, root: rootDir }), continued: false };
+  const prepared =
+    continueLast && last?.bases
+      ? { blobs: last.blobs || {}, bases: last.bases, notes: last.notes || {}, label: last.base || 'HEAD', continued: true }
+      : (() => {
+          const blobs = snapshotBlobs(rootDir, files);
+          return { blobs, ...resolveBases({ session, blobs, root: rootDir }), continued: false };
+        })();
+  // Порог глубины — глубина прохода, от снимка которого считается разница: исправление
+  // значительнее правки одного метода ниже неё не опускается (computeProfile, `floor`).
+  const k = /^pass:(\d+)$/.exec(prepared.label)?.[1];
+  const from = k ? session.cycle?.passes?.find((p) => p.n === Number(k)) : null;
+  prepared.floor = from?.resolved ? { code: from.resolved.code, arch: from.resolved.arch ?? null, pass: from.n } : null;
+  return prepared;
 }
 
 /**
@@ -1456,10 +1465,13 @@ function planContext(args, { analyzer: provide = null, bases: provideBases = nul
       ? analyzerMetrics(rootDir, files, { skip: args['no-analyzer'] === true })
       : provide(rootDir, files);
 
-  const bases = provideBases ? provideBases(rootDir, files, sessionId) : null;
+  const prepared = provideBases ? provideBases(rootDir, files, sessionId) : null;
   let profile;
   try {
-    profile = computeProfile({ files, root: rootDir, config, metrics: analyzer.metrics, configState, bases });
+    profile = computeProfile({
+      files, root: rootDir, config, metrics: analyzer.metrics, configState,
+      bases: prepared?.bases || null, floor: prepared?.floor || null,
+    });
   } catch (e) {
     // Неверная запись `archetypes.custom` (extends на неизвестную метку, попытка понизить
     // минимум, name и extends вместе или ни одного) — план печатать не для чего: молча
@@ -1482,6 +1494,13 @@ function profileLines({ profile, analyzer }) {
   // строк либо файлов) — без неё «C2» видно, а почему C2 — нет, и первое же «почему так
   // глубоко на трёх строках?» превращается в спор без записи, на которую можно сослаться.
   if (profile.volumeReason) out.push(`объём: ${volume} (${profile.volumeReason})`);
+  if (profile.floor) {
+    out.push(
+      `глубина code и arch сохранена от прохода ${profile.floor.pass}: исправление значительнее правки одного метода ` +
+        `(${profile.volumeReason || volume}) и может нарушить общую логику правки — контуру arch и слою 2 даётся и вся ` +
+        'правка (change.diff): не нарушило ли исправление общую логику и не стала ли архитектура хуже'
+    );
+  }
   if (!analyzer.ok) out.push(`сложность не считалась: ${analyzer.reason}`);
   out.push(`resolved: code=${resolved.code} arch=${resolved.arch === null ? 'skip' : resolved.arch} xml=${resolved.xml} hygiene=${resolved.hygiene}`);
   out.push(profile.scopeLine);
@@ -1638,7 +1657,7 @@ function cmdRun(args) {
     },
     bases: (rootDir, files, sessionId) => {
       prepared = prepareBases({ rootDir, files, sessionId, continueLast: Boolean(wanted) });
-      return prepared?.bases || null;
+      return prepared;
     },
   });
   if (ctx.error) {
@@ -1678,6 +1697,7 @@ function cmdRun(args) {
           bases: prepared?.bases,
           notes: prepared?.notes,
           label: prepared?.label,
+          resolved: profile.resolved,
         });
         if (done >= MAX_PASSES) addDecision(session, { text: decision, pass: pass.n });
         return { pass, prev };
@@ -1727,7 +1747,7 @@ function cmdRun(args) {
   let fixPass = null;
   if (prepared && prepared.label !== 'HEAD') {
     writeFileSync(join(runDir, 'fix.diff'), buildBaseDiff(rootDir, files, prepared.bases), 'utf8');
-    fixPass = { fixDiff: `${relRun}/fix.diff`, prevReport: prev?.report || null };
+    fixPass = { fixDiff: `${relRun}/fix.diff`, prevReport: prev?.report || null, floor: profile.floor };
     w(`fix.diff: ${relRun}/fix.diff — вход модельных слоёв прохода по исправлению\n`);
   }
   w('\n## Задето правкой\n');
@@ -1840,7 +1860,13 @@ function cmdRun(args) {
     const d = diffPath ? `"${relRun}/change.diff"` : '<файл.diff>';
     w(`- после читателя: node "$QG/${manual.script || 'tools/catalog.mjs'}" attest --result <файл.json> --files ${quoteAll(manual.attestFiles)} --archetypes ${manual.arch} --diff ${d}\n`);
   }
-  w(`- контур arch: ${archContourLine(resolved, archetypeLabels, ctx.analyzer.ok && profile.complexity.length > 0)}\n`);
+  w(
+    `- контур arch: ${archContourLine(resolved, archetypeLabels, ctx.analyzer.ok && profile.complexity.length > 0)}` +
+      (profile.floor
+        ? ` — сохранён от прохода ${profile.floor.pass}; вход — fix.diff и вся правка change.diff: стала ли общая архитектура правки хуже после исправления`
+        : '') +
+      '\n'
+  );
   w(`- контур xml: ${xmlContourLine(resolved.xml)}\n`);
   w('- Закрыть в следе:\n');
   for (const id of mustCloseList({ archetypeLabels, resolvedCode: resolved.code, bslFiles })) w(`  - ${id}: ${closeNote(id)}\n`);

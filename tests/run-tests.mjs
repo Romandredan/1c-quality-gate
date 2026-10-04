@@ -3735,6 +3735,7 @@ check('верификатор не грузит каталог антипатт�
       // оркестратор заканчивал ход раньше читателей — ответ «жду результатов» без отчёта.
       ['run_in_background: false', 'субагенты контуров запускаются синхронно'],
       ['Отчёт прохода:', 'файл отчёта — по пути из вывода run'],
+      ['сохранена от прохода', 'исправление значительнее одного метода проверяется на глубине прошлого прохода и по всей правке'],
     ]) check(`gate-runner: ${label}`, text.includes(needle));
   }
   const stale = readdirSync(join(ROOT, 'agents')).filter((f) => readFileSync(join(ROOT, 'agents', f), 'utf8').includes('rlm-tools-bsl'));
@@ -8233,6 +8234,73 @@ section('gate.mjs run — инструментальная фаза одним �
   const p4 = computeProfile({ files: [bsl, fresh, decl], root: br, config: {}, metrics: {}, configState: null,
     bases: { [bsl]: { pass: 2, blob: same[bsl] }, [fresh]: { pass: 2, blob: same[fresh] }, [decl]: { pass: 2, blob: same[decl] } } });
   check('без изменений со снимка — C0 с причиной', p4.volume === 'C0' && p4.volumeReason === 'unchanged-since-base', JSON.stringify({ v: p4.volume, r: p4.volumeReason }));
+}
+
+// Глубина прохода по исправлению (решение владельца 05.10.2026). Исправление значительнее правки
+// одного метода может нарушить общую логику правки, поэтому глубина code и arch не опускается
+// ниже прошлого прохода: вопрос архитектуры, поднятый правкой, проверяется повторно. Исправление
+// в пределах одного метода (C1) идёт на своей глубине.
+{
+  const { computeProfile } = await import(pathToFileURL(join(ROOT, 'tools', 'profile.mjs')).href);
+  const { snapshotBlobs } = await import(pathToFileURL(join(ROOT, 'tools', 'gate-cycle.mjs')).href);
+  const fl = join(WORK, 'floor-root');
+  rmSync(fl, { recursive: true, force: true });
+  mkdirSync(join(fl, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: fl });
+  writeFileSync(join(fl, '.1c-quality-gate.json'), '{}', 'utf8');
+  const bsl = 'src/cf/CommonModules/М/Ext/Module.bsl';
+  const mod = (a, b, c) => BOM + `Процедура А() Экспорт\n\tХ = ${a};\nКонецПроцедуры\n\nПроцедура Б() Экспорт\n\tХ = ${b};\nКонецПроцедуры\n\nПроцедура В() Экспорт\n\tХ = ${c};\nКонецПроцедуры\n`;
+  writeFileSync(join(fl, bsl), mod(1, 1, 1), 'utf8');
+  execFileSync('git', ['add', '-A'], { cwd: fl });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], { cwd: fl });
+  writeFileSync(join(fl, bsl), mod(2, 1, 1), 'utf8');
+  const snap = snapshotBlobs(fl, [bsl]);
+  const bases = { [bsl]: { pass: 1, blob: snap[bsl] } };
+  const floor = { code: 'L2', arch: 3, pass: 1 };
+
+  writeFileSync(join(fl, bsl), mod(3, 1, 1), 'utf8');
+  const one = computeProfile({ files: [bsl], root: fl, config: {}, metrics: {}, configState: null, bases, floor });
+  check('исправление в одном методе идёт на своей глубине', one.volume === 'C1' && one.resolved.code === 'L1' && one.resolved.arch === null && !one.floor, JSON.stringify({ v: one.volume, r: one.resolved, f: one.floor }));
+
+  writeFileSync(join(fl, bsl), mod(3, 2, 1), 'utf8');
+  const two = computeProfile({ files: [bsl], root: fl, config: {}, metrics: {}, configState: null, bases, floor });
+  check('исправление в двух методах сохраняет глубину code и arch прошлого прохода',
+    two.volume === 'C2' && two.resolved.code === 'L2' && two.resolved.arch === 3 && two.floor?.pass === 1, JSON.stringify({ v: two.volume, r: two.resolved, f: two.floor }));
+  check('строка scope несёт сохранённую глубину', /resolved=code:L2\|arch:3\|/.test(two.scopeLine), two.scopeLine);
+  const head = computeProfile({ files: [bsl], root: fl, config: {}, metrics: {}, configState: null, floor });
+  check('без базы прохода порог прошлого прохода не применяется', !head.floor && head.resolved.arch !== 3, JSON.stringify(head.resolved));
+
+  // Сквозь run: проход записывает свою глубину, следующий проход поднимает до неё и говорит почему.
+  const fresh = 'src/cf/CommonModules/Н/Ext/Module.bsl';
+  const decl = 'src/cf/CommonModules/Н.xml';
+  writeFileSync(join(fl, bsl), mod(2, 1, 1), 'utf8');
+  mkdirSync(join(fl, 'src', 'cf', 'CommonModules', 'Н', 'Ext'), { recursive: true });
+  writeFileSync(join(fl, fresh), BOM + 'Процедура Н() Экспорт\nКонецПроцедуры\n', 'utf8');
+  writeFileSync(join(fl, decl), '<?xml version="1.0" encoding="UTF-8"?>\n<MetaDataObject>\n<CommonModule/>\n</MetaDataObject>\n', 'utf8');
+  const env = { CLAUDE_PROJECT_DIR: fl };
+  const arm = (rel) => execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-arm.mjs')], { input: JSON.stringify({ session_id: 'L1', cwd: fl, tool_input: { file_path: join(fl, rel) } }), env: { ...process.env, CLAUDE_PROJECT_DIR: fl } });
+  for (const rel of [bsl, fresh, decl]) arm(rel);
+  const p = join(fl, '.claude', '.state', 'qg-pending.json');
+  const r1 = run('tools/gate.mjs', ['run', '--session', 'L1', '--no-analyzer', '--only', 'hygiene-check'], { env });
+  // --only продолжает проход, поэтому первый проход — без --only.
+  const r1full = run('tools/gate.mjs', ['run', '--session', 'L1', '--no-analyzer'], { env });
+  const st = JSON.parse(readFileSync(p, 'utf8'));
+  const pass1 = st.sessions.L1.cycle.passes.at(-1);
+  check('проход записывает свою глубину', pass1.resolved?.code === 'L2' && pass1.resolved?.arch === 3, JSON.stringify(pass1.resolved) + (r1.out + r1full.out).slice(0, 200));
+  for (const [rel, b] of Object.entries(pass1.blobs)) st.sessions.L1.files[rel].checked = { blob: b, pass: pass1.n };
+  pass1.report = join(WORK, 'floor-r1.md');
+  pass1.acceptedAt = new Date().toISOString();
+  writeFileSync(pass1.report, '## Открыто в правке\n', 'utf8');
+  writeFileSync(p, JSON.stringify(st, null, 2), 'utf8');
+
+  writeFileSync(join(fl, bsl), mod(3, 2, 1), 'utf8');
+  arm(bsl);
+  const r2 = run('tools/gate.mjs', ['run', '--session', 'L1', '--no-analyzer'], { env });
+  check('проход по исправлению в двух методах поднимает глубину и называет причину',
+    /resolved: code=L2 arch=3/.test(r2.out) && new RegExp(`глубина code и arch сохранена от прохода ${pass1.n}`).test(r2.out), (r2.out.match(/^resolved:.*$/m) || [''])[0] + ' | ' + (r2.out.match(/^глубина.*$/m) || ['нет строки'])[0]);
+  check('контуру arch и слою 2 даётся и вся правка', /change\.diff[^\n]*общ/.test(r2.out), (r2.out.match(/^- контур arch:.*$/m) || [''])[0]);
+  const pl = run('tools/gate.mjs', ['plan', '--session', 'L1', '--no-analyzer'], { env });
+  check('plan показывает ту же сохранённую глубину', /resolved: code=L2 arch=3/.test(pl.out), (pl.out.match(/^resolved:.*$/m) || [''])[0]);
 }
 
 // Проход по исправлению в run: снимок на старте, база от проверенного, прошлый отчёт и его
