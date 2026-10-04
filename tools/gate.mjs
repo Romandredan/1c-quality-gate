@@ -32,7 +32,7 @@ import { readCatalog } from './gen-catalog-index.mjs';
 import { expectedExamined } from './catalog.mjs';
 import { validatePatterns, matchesAny } from './path-match.mjs';
 import { handoffLines, toProjectRelative, pathKey, retireEmptySession } from '../hooks/gate-core.mjs';
-import { MAX_PASSES, passCount, startPass, addDecision, updateSession } from './gate-cycle.mjs';
+import { MAX_PASSES, passCount, startPass, addDecision, updateSession, snapshotBlobs, resolveBases, lastAcceptedReport } from './gate-cycle.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -1086,10 +1086,17 @@ function refsAndChecklist(archetypeLabels) {
  * `bsl-code-review/SKILL.md` («Слой 1б», «Слой 2») — план не придумывает новый процесс,
  * он лишь избавляет модель от подбора глубины и списка справочников по трём таблицам.
  */
-function codeModelPasses({ resolvedCode, volume, archetypeLabels, bslFiles, refs, checklist }) {
+function codeModelPasses({ resolvedCode, volume, archetypeLabels, bslFiles, refs, checklist, fixPass = null }) {
   if (resolvedCode === 'skip') return ['контур code пропущен (класс C0)'];
 
   const passes = [];
+  if (fixPass) {
+    passes.push(
+      `проход по исправлению: субагентам слоёв — ${fixPass.fixDiff}` +
+        (fixPass.prevReport ? ` и прошлый отчёт ${fixPass.prevReport}` : '') +
+        '; файлы целиком не читать, кроме строк за пределами разницы, нужных для понимания исправления'
+    );
+  }
   if (bslFiles.length) {
     const cards = readCatalog();
     const active = expectedExamined(archetypeLabels, cards);
@@ -1252,7 +1259,11 @@ function cmdPlan(args) {
   };
   const diag = (s) => process.stderr.write(s);
 
-  const ctx = planContext(args);
+  // База предстоящего прохода — та же, что возьмёт run: строка scope плана и черновика
+  // совпадают, и валидатор, отсылающий к плану, отсылает к верной строке. Проход не пишется.
+  const ctx = planContext(args, {
+    bases: (rootDir, files, sessionId) => prepareBases({ rootDir, files, sessionId, continueLast: false })?.bases || null,
+  });
   if (ctx.error) {
     process.stderr.write(ctx.error);
     return 2;
@@ -1362,7 +1373,54 @@ function analyzerOnce(rootDir, changed) {
   }
 }
 
-function planContext(args, { analyzer: provide = null } = {}) {
+/**
+ * Снимок и база прохода — до профиля: профиль прохода по исправлению считается от базы.
+ * Перезапуск через --only продолжает проход и берёт его базы, а не снимает новый снимок:
+ * иначе файл, исправленный между запуском и повтором, выпал бы из проверки молча.
+ */
+function prepareBases({ rootDir, files, sessionId, continueLast }) {
+  if (!sessionId) return null;
+  const state = readPending();
+  const session = state?.sessions?.[sessionId];
+  if (!session) return null;
+  const last = session.cycle?.passes?.at?.(-1);
+  if (continueLast && last?.bases) {
+    return { blobs: last.blobs || {}, bases: last.bases, notes: last.notes || {}, label: last.base || 'HEAD', continued: true };
+  }
+  const blobs = snapshotBlobs(rootDir, files);
+  return { blobs, ...resolveBases({ session, blobs, root: rootDir }), continued: false };
+}
+
+/**
+ * Разница от базы прохода — вход модельных слоёв на проходе по исправлению. `git diff` двух
+ * blob печатает в заголовках хеши, поэтому заголовки заменяются путями файлов.
+ */
+function buildBaseDiff(rootDir, files, bases) {
+  const parts = [];
+  for (const rel of files) {
+    const b = bases?.[rel];
+    if (b && typeof b === 'object') {
+      const cur = spawnSync('git', ['hash-object', '-w', rel], { cwd: rootDir, encoding: 'utf8' });
+      const sha = String(cur.stdout || '').trim();
+      if (!sha || sha === b.blob) continue;
+      const d = spawnSync('git', ['diff', b.blob, sha], { cwd: rootDir, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+      parts.push(
+        String(d.stdout || '')
+          .split('\n')
+          .map((l) =>
+            l.startsWith('diff --git ') ? `diff --git a/${rel} b/${rel}` : l.startsWith('--- ') ? `--- a/${rel}` : l.startsWith('+++ ') ? `+++ b/${rel}` : l
+          )
+          .join('\n')
+      );
+    } else {
+      const d = spawnSync('git', ['diff', 'HEAD', '--', rel], { cwd: rootDir, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+      parts.push(String(d.stdout || ''));
+    }
+  }
+  return parts.filter((s) => s.trim()).join('\n');
+}
+
+function planContext(args, { analyzer: provide = null, bases: provideBases = null } = {}) {
   const { files, sessionId, error } = planFileList(args);
   if (error) return { error };
   if (!files.length) return { error: 'Список файлов пуст — план печатать не для чего.\n' + rootLine() };
@@ -1387,9 +1445,10 @@ function planContext(args, { analyzer: provide = null } = {}) {
       ? analyzerMetrics(rootDir, files, { skip: args['no-analyzer'] === true })
       : provide(rootDir, files);
 
+  const bases = provideBases ? provideBases(rootDir, files, sessionId) : null;
   let profile;
   try {
-    profile = computeProfile({ files, root: rootDir, config, metrics: analyzer.metrics, configState });
+    profile = computeProfile({ files, root: rootDir, config, metrics: analyzer.metrics, configState, bases });
   } catch (e) {
     // Неверная запись `archetypes.custom` (extends на неизвестную метку, попытка понизить
     // минимум, name и extends вместе или ни одного) — план печатать не для чего: молча
@@ -1508,11 +1567,56 @@ function touchedLines(touched, files) {
   });
 }
 
+/**
+ * Раздел «База прохода»: от чего посчитан профиль по каждому файлу и, на проходе по
+ * исправлению, прошлый отчёт с его находками. Находки печатаются с идентификаторами: по ним
+ * валидатор сверяет перенос, и субагент берёт их отсюда, а не по памяти.
+ */
+function baseLines(files, prepared, prev) {
+  const out = ['', '## База прохода', 'Объём и глубина посчитаны от базы; граница правки ниже — от HEAD.'];
+  for (const rel of files) {
+    const b = prepared.bases?.[rel];
+    const note = prepared.notes?.[rel] || '';
+    const since = note.startsWith('unchanged:') ? note.slice('unchanged:'.length) : null;
+    if (note === 'deleted') out.push(`${rel}: файла нет в рабочем дереве`);
+    else if (note === 'no_git') out.push(`${rel}: от HEAD — файл вне git или вне корня проекта, проверяется полностью на каждом проходе`);
+    else if (note === 'base_missing') out.push(`${rel}: от HEAD — снимок прохода убран сборкой мусора git (base_missing), файл проверяется полностью`);
+    else if (!b || b === 'HEAD') {
+      out.push(
+        `${rel}: от HEAD — нет принятого отчёта по этому файлу (добавлен после прохода, изменён во время него или отчёт не принят)` +
+          (since ? `; не менялся с прохода ${since}` : '')
+      );
+    } else if (since) out.push(`${rel}: не менялся с прохода ${b.pass} — слои по нему закрываются skipped reason=verified_earlier по отметкам verify`);
+    else out.push(`${rel}: от снимка прохода ${b.pass}`);
+  }
+  if (!prev) return out;
+  out.push(`Прошлый отчёт: ${prev.report}`);
+  let text = null;
+  try {
+    text = readFileSync(prev.report, 'utf8');
+  } catch {
+    /* отчёт удалён — сказано ниже */
+  }
+  if (text === null) {
+    out.push('Прошлый отчёт не читается — сверять проход по исправлению не с чем; находки ищутся заново.');
+    return out;
+  }
+  const s = reportSections(text);
+  out.push('', '## Находки прошлого отчёта', 'Каждая обязана попасть в новый отчёт: в «Закрыто» (проверено по коду) либо остаться в своём разделе.');
+  for (const [title, list] of [['Открыто в правке', s.inChange], ['Вне правки', s.outside], ['Нужно решение', s.needsDecision]]) {
+    if (!list.length) continue;
+    out.push(`${title}:`);
+    for (const f of list) out.push(`  ${f.sev} ${f.title}${f.ids?.length ? ` [${f.ids.join(', ')}]` : ''}`);
+  }
+  return out;
+}
+
 function cmdRun(args) {
   const wanted = typeof args.only === 'string' ? args.only.split(',').map((s) => s.trim()).filter(Boolean) : null;
   // Анализатор исполняется как инструмент плана — тогда его единственный запуск отдаёт и метрики.
   // Вне `--only` инструмент не исполняется, и метрики берутся прежним отдельным вызовом.
   let analyzerRun = null;
+  let prepared = null;
   const ctx = planContext(args, {
     analyzer: (rootDir, files) => {
       const changed = filesFor('tools/analyzer-run.mjs', files, toolAppliesMap());
@@ -1520,6 +1624,10 @@ function cmdRun(args) {
       const once = analyzerOnce(rootDir, changed);
       analyzerRun = once.run;
       return once;
+    },
+    bases: (rootDir, files, sessionId) => {
+      prepared = prepareBases({ rootDir, files, sessionId, continueLast: Boolean(wanted) });
+      return prepared?.bases || null;
     },
   });
   if (ctx.error) {
@@ -1533,6 +1641,7 @@ function cmdRun(args) {
   // решением: цикл «проход → исправить → проход» иначе не кончается (девять подряд на рабочем
   // проекте). Запись прохода — до инструментов: прерванный прогон тоже проход.
   let passLine = null;
+  let outcome = null;
   if (sessionId) {
     const decision = typeof args.decision === 'string' ? args.decision.trim() : null;
     if (decision !== null && decision.length < 20) {
@@ -1541,19 +1650,26 @@ function cmdRun(args) {
       );
       return 2;
     }
-    const outcome = updateSession({
+    outcome = updateSession({
       root: rootDir,
       sessionId,
       mutate: (session) => {
         // Перезапуск инструмента через --only — продолжение последнего прохода, а не новый:
         // иначе один повтор упавшего анализатора съедает проход из трёх.
         const last = session.cycle?.passes?.at?.(-1);
-        if (wanted && last) return { pass: last };
+        if (wanted && last) return { pass: last, prev: lastAcceptedReport(session, { before: last.n }) };
         const done = passCount(session);
         if (done >= MAX_PASSES && decision === null) return { refused: done };
-        const pass = startPass(session);
+        // Прошлый принятый отчёт — до записи нового прохода: его находки сверяет этот проход.
+        const prev = lastAcceptedReport(session);
+        const pass = startPass(session, undefined, {
+          blobs: prepared?.blobs,
+          bases: prepared?.bases,
+          notes: prepared?.notes,
+          label: prepared?.label,
+        });
         if (done >= MAX_PASSES) addDecision(session, { text: decision, pass: pass.n });
-        return { pass };
+        return { pass, prev };
       },
     });
     if (outcome?.refused) {
@@ -1593,6 +1709,16 @@ function cmdRun(args) {
   w('## Профиль\n');
   if (passLine) w(`${passLine}\n`);
   for (const l of profileLines(ctx)) w(`${l}\n`);
+  const prev = outcome?.prev || null;
+  if (prepared && (prepared.label !== 'HEAD' || prev)) for (const l of baseLines(files, prepared, prev)) w(`${l}\n`);
+  // Проход по исправлению: модельные слои читают разницу со снимком, а не правку целиком.
+  // change.diff остаётся от HEAD — его сверяет catalog.mjs attest с настоящим git diff HEAD.
+  let fixPass = null;
+  if (prepared && prepared.label !== 'HEAD') {
+    writeFileSync(join(runDir, 'fix.diff'), buildBaseDiff(rootDir, files, prepared.bases), 'utf8');
+    fixPass = { fixDiff: `${relRun}/fix.diff`, prevReport: prev?.report || null };
+    w(`fix.diff: ${relRun}/fix.diff — вход модельных слоёв прохода по исправлению\n`);
+  }
   w('\n## Задето правкой\n');
   w('Граница относительно HEAD: находка по строке вне этих методов и диапазонов — «вне правки», в этом цикле не исправляется и гейт не держит.\n');
   for (const l of touchedLines(profile.touched, files)) w(`${l}\n`);
@@ -1689,7 +1815,7 @@ function cmdRun(args) {
   w('\n## Дальше\n');
   if (failed) w(`- СБОЕВ: ${failed}. Строки следа за упавший инструмент нет и быть не должно: перезапусти его отдельно либо закрой записью skipped с причиной.\n`);
   const { refs, checklist } = refsAndChecklist(archetypeLabels);
-  for (const p of codeModelPasses({ resolvedCode: resolved.code, volume, archetypeLabels, bslFiles, refs, checklist })) {
+  for (const p of codeModelPasses({ resolvedCode: resolved.code, volume, archetypeLabels, bslFiles, refs, checklist, fixPass })) {
     // В плане индекс напечатан строкой выше; здесь он сохранён файлом, чтобы не занимать контекст.
     w(`- ${p.replace('(см. index выше)', `(индекс: ${relRun}/catalog-index.txt)`)}\n`);
   }
