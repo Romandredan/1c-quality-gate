@@ -724,7 +724,7 @@ function computeConfigStamp({ config, root, configState }) {
  * второго круга остаётся частью правки. Спецификация: раздел «Разница от базы»
  * docs/superpowers/specs/2026-10-01-gate-passes-convergence-design.md.
  */
-export function computeProfile({ files, root, config, metrics, configState, bases = null }) {
+export function computeProfile({ files, root, config, metrics, configState, bases = null, floor = null }) {
   const cfg = {
     c1MaxFiles: config?.volume?.c1MaxFiles ?? DEFAULTS.volume.c1MaxFiles,
     c1MaxLines: config?.volume?.c1MaxLines ?? DEFAULTS.volume.c1MaxLines,
@@ -852,7 +852,7 @@ export function computeProfile({ files, root, config, metrics, configState, base
   const codeFromComplexity = complexityFired ? 'L2' : 'skip';
   const archFromComplexity = complexityFired ? 1 : null;
 
-  const resolvedCode = codeMax(codeBase, codeFromArchetypes, codeFromComplexity);
+  let resolvedCode = codeMax(codeBase, codeFromArchetypes, codeFromComplexity);
   // У `arch`, как и у `code`, объём САМ ПО СЕБЕ даёт пол — так же прямо, как задокументировано
   // в «Шаг 2» (исходно `quality-gate/SKILL.md`, теперь `profile-axes.md`, матрица глубин по
   // объёму): C2 — «ур. 1–2», C3 — «ур. 3». Живой прогон, где `arch:skip` встречался при
@@ -863,7 +863,7 @@ export function computeProfile({ files, root, config, metrics, configState, base
   // а не заменяет: архетип со своим минимумом никогда не может ПОНИЗИТЬ то, что даёт объём.
   const archFloor = volume === 'C3' ? 3 : volume === 'C2' ? 1 : null;
   const archCandidates = [...archFromArchetypes, archFromComplexity, archFloor].filter((v) => v !== null);
-  const resolvedArch = archCandidates.length ? Math.max(...archCandidates) : null;
+  let resolvedArch = archCandidates.length ? Math.max(...archCandidates) : null;
 
   const hasXmlChange = effective.some((d) => /\.xml$/i.test(d.rel));
   const resolvedXml =
@@ -908,6 +908,21 @@ export function computeProfile({ files, root, config, metrics, configState, base
     driver = 'volume';
   }
 
+  // Порог прохода по исправлению (решение владельца 05.10.2026). Исправление значительнее
+  // правки одного метода (C2 и выше по разнице со снимком) может нарушить общую логику правки,
+  // поэтому code и arch не опускаются ниже глубины прохода, от снимка которого считается
+  // разница: вопрос архитектуры, поднятый правкой, проверяется повторно. Исправление в
+  // пределах одного метода (C0/C1) идёт на своей глубине — ради этого проход и считается от
+  // снимка. `driver` порог не меняет: он называет, что подняло глубину самого исправления.
+  let floorApplied = null;
+  if (floor && fromBase && (volume === 'C2' || volume === 'C3')) {
+    const code = codeMax(resolvedCode, floor.code || 'skip');
+    const arch = maxOrNull([resolvedArch, floor.arch ?? null]);
+    if (code !== resolvedCode || arch !== resolvedArch) floorApplied = { pass: floor.pass, code, arch };
+    resolvedCode = code;
+    resolvedArch = arch;
+  }
+
   const resolved = { code: resolvedCode, arch: resolvedArch, xml: resolvedXml, hygiene: resolvedHygiene };
 
   const archetypesText = archetypeLabels.length ? archetypeLabels.join(',') : 'none';
@@ -932,6 +947,7 @@ export function computeProfile({ files, root, config, metrics, configState, base
     scopeLine,
     touched,
     base,
+    floor: floorApplied,
     unchangedSinceBase: diffs.filter((d) => d.unchanged).map((d) => d.rel),
     baseMissing: diffs.filter((d) => d.baseMissing).map((d) => d.rel),
   };
