@@ -8085,7 +8085,11 @@ section('gate.mjs run — инструментальная фаза одним �
   const v = run('tools/evidence-validator.mjs', [okReport, '--gate', '--session', 'P1'], { env });
   check('валидатор принял след фикстуры', v.code === 0, v.out.slice(0, 400));
   const lastPass = pendingOf().cycle.passes.at(-1);
-  check('принятый отчёт записан в последний проход', lastPass.report === okReport && typeof lastPass.acceptedAt === 'string', JSON.stringify(lastPass));
+  // С v3.17.0 записывается копия рядом с состоянием (сверка переноса не зависит от того, что
+  // отчёт перезапишут по тому же пути), исходный путь — в source.
+  check('принятый отчёт записан в последний проход',
+    lastPass.source === okReport && existsSync(lastPass.report) && readFileSync(lastPass.report, 'utf8') === readFileSync(okReport, 'utf8') && typeof lastPass.acceptedAt === 'string',
+    JSON.stringify(lastPass));
 
   // Хук сообщения пользователя: ставит отметку только взведённой сессии, в чужом проекте и
   // чужой сессии не делает ничего и не создаёт файлов.
@@ -8410,6 +8414,81 @@ section('gate.mjs run — инструментальная фаза одним �
   check('закрытые находки в остаток не входят',
     doneRec?.residual && !('closed' in doneRec.residual) && !JSON.stringify(doneRec.residual).includes('Запрос в цикле')
       && doneRec.residual.inChange.some((f) => /Магическое число/.test(f.title)), JSON.stringify(doneRec?.residual));
+  check('копии отчётов проходов убраны при снятии', !existsSync(join(fr, '.claude', '.state', 'qg-passes', 'F1')));
+}
+
+// Обзор ветки v3.17.0: перенос находок по пересечению идентификаторов, заголовок «Закрыто»
+// с украшением, новый неотслеживаемый файл в fix.diff, приёмка при предупреждениях, отчёт
+// по тому же пути, удалённый файл без ложного «менялся во время прохода».
+{
+  const { carriedOver, reportSections } = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+  const { markChecked, startPass } = await import(pathToFileURL(join(ROOT, 'tools', 'gate-cycle.mjs')).href);
+  const prevR = '## Открыто в правке\n\n### 🟡 Магическое число\nm.bsl:7, qg:MAGIC-NUMBER\n';
+  const extraId = '## Закрыто\n\n### 🟡 Магическое число\nЗаменено константой по #std456, qg:MAGIC-NUMBER\n';
+  check('закрытие с дополнительной ссылкой на стандарт засчитывается', carriedOver(prevR, extraId).missingById.length === 0, JSON.stringify(carriedOver(prevR, extraId)));
+  const prevTwo = '## Открыто в правке\n\n### 🟡 Магическое число\nm.bsl:7, qg:MAGIC-NUMBER, #std456\n';
+  const oneId = '## Закрыто\n\n### 🟡 Магическое число\nqg:MAGIC-NUMBER\n';
+  check('закрытие без вторичного идентификатора засчитывается', carriedOver(prevTwo, oneId).missingById.length === 0);
+  const twice = '## Открыто в правке\n\n### 🟡 Число 1\nqg:MAGIC-NUMBER\n\n### 🟡 Число 2\nqg:MAGIC-NUMBER\n';
+  check('две находки с одним идентификатором не закрываются одной', carriedOver(twice, oneId).missingById.length === 1);
+  const decorated = '## ✅ Закрыто\n\n### 🟡 Магическое число\nqg:MAGIC-NUMBER\n';
+  check('заголовок «Закрыто» с украшением распознаётся', reportSections(decorated).closed.length === 1 && carriedOver(prevR, decorated).missingById.length === 0, JSON.stringify(reportSections(decorated)));
+
+  const del = { files: { 'm/D.bsl': { kind: 'code', edits: 1 } } };
+  startPass(del, '2026-10-04T12:00:00.000Z', { blobs: { 'm/D.bsl': null }, bases: { 'm/D.bsl': 'HEAD' }, notes: { 'm/D.bsl': 'deleted' }, label: 'HEAD' });
+  check('удалённый файл не числится изменённым во время прохода', markChecked(del, { 'm/D.bsl': null }).changed.length === 0);
+
+  const xr = join(WORK, 'fixrev-root');
+  rmSync(xr, { recursive: true, force: true });
+  mkdirSync(join(xr, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: xr });
+  writeFileSync(join(xr, '.1c-quality-gate.json'), '{}', 'utf8');
+  const bsl = 'src/cf/CommonModules/М/Ext/Module.bsl';
+  writeFileSync(join(xr, bsl), BOM + 'Процедура П() Экспорт\n\tА = 1;\nКонецПроцедуры\n', 'utf8');
+  execFileSync('git', ['add', '-A'], { cwd: xr });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], { cwd: xr });
+  const env = { CLAUDE_PROJECT_DIR: xr };
+  const arm = (rel) => execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-arm.mjs')], { input: JSON.stringify({ session_id: 'R1', cwd: xr, tool_input: { file_path: join(xr, rel) } }), env: { ...process.env, CLAUDE_PROJECT_DIR: xr } });
+  writeFileSync(join(xr, bsl), BOM + 'Процедура П() Экспорт\n\tА = 2;\nКонецПроцедуры\n', 'utf8');
+  arm(bsl);
+  const sessR = () => JSON.parse(readFileSync(join(xr, '.claude', '.state', 'qg-pending.json'), 'utf8')).sessions.R1;
+  const tail = readFileSync(ev('valid.md'), 'utf8').slice(readFileSync(ev('valid.md'), 'utf8').indexOf('## quality evidence'));
+  // Новый модуль с запросом поднимает профиль до L2 с архетипом query — след закрывает и это:
+  // предмет теста — приёмка и перенос, а не состав следа.
+  const report = (prose, out) =>
+    `${prose}\n\n${tail.replace(/^\[qg scope: .*\]$/m, (out.match(/^\[qg scope: .*\]$/m) || [''])[0])}` +
+    '[qg not_verified: dimension=static-analysis, reason=not_in_analyzer_report, files=1]\n' +
+    '[qg not_verified: dimension=query-execution, reason=no_platform]\n' +
+    '[qg applied: layer=code, scope=logic-review, ids=[qg:LOGIC-CONTRACT], verdict=clean]\n' +
+    '[qg skipped: layer=code, scope=stale-local-calls, reason=new_file, files=1]\n';
+  const same = join(WORK, 'fixrev-report.md');
+
+  const x1 = run('tools/gate.mjs', ['run', '--session', 'R1', '--no-analyzer'], { env });
+  writeFileSync(same, report('## Открыто в правке\n\n### 🟡 Магическое число\nqg:MAGIC-NUMBER\n\n### 🟡 Без идентификатора\nстрока 2\n', x1.out), 'utf8');
+  const a1 = run('tools/evidence-validator.mjs', [same, '--gate', '--session', 'R1'], { env });
+  check('приёмка называет принятый проход', a1.code === 0 && /Проход 1 принят/.test(a1.out), a1.out.slice(-500));
+
+  // Проход 2: исправление и новый неотслеживаемый модуль.
+  writeFileSync(join(xr, bsl), BOM + 'Процедура П() Экспорт\n\tА = 3;\nКонецПроцедуры\n', 'utf8');
+  arm(bsl);
+  const fresh = 'src/cf/CommonModules/Н/Ext/Module.bsl';
+  mkdirSync(join(xr, 'src', 'cf', 'CommonModules', 'Н', 'Ext'), { recursive: true });
+  writeFileSync(join(xr, fresh), BOM + 'Процедура Н() Экспорт\n\tЗ = Новый Запрос;\nКонецПроцедуры\n', 'utf8');
+  arm(fresh);
+  const x2 = run('tools/gate.mjs', ['run', '--session', 'R1', '--no-analyzer'], { env });
+  const fix = readFileSync(join(xr, '.claude', '.state', 'qg-run-R1', 'fix.diff'), 'utf8');
+  check('новый неотслеживаемый файл попадает в fix.diff целиком', fix.includes(`+++ b/${fresh}`) && fix.includes('Новый Запрос'), fix);
+  check('строка модельных слоёв называет исключение для файлов от HEAD', /от HEAD[^\n]*целиком/.test(x2.out), (x2.out.match(/проход по исправлению:[^\n]*/) || [''])[0]);
+
+  // Отчёт по тому же пути: прошлый сверяется по сохранённой копии, а не сам с собой.
+  writeFileSync(same, report('## Открыто в правке\n\n### 🟡 Без идентификатора\nстрока 2\n', x2.out), 'utf8');
+  const a2 = run('tools/evidence-validator.mjs', [same, '--gate', '--session', 'R1'], { env });
+  check('пропажа находки видна и при отчёте по тому же пути', a2.code === 2 && /MAGIC-NUMBER/.test(a2.out) && /Проход 2 не принят/.test(a2.out), a2.out.slice(-700));
+
+  // Предупреждение (пропала находка без идентификатора) приёмку не отменяет.
+  writeFileSync(same, report('## ✅ Закрыто\n\n### 🟡 Магическое число\nЗаменено константой по #std456, qg:MAGIC-NUMBER\n', x2.out), 'utf8');
+  const a3 = run('tools/evidence-validator.mjs', [same, '--gate', '--session', 'R1'], { env });
+  check('отчёт с предупреждением принимается и это сказано', a3.code === 1 && /Проход 2 принят/.test(a3.out) && sessR().cycle.passes[1].acceptedAt && sessR().files[bsl].checked?.pass === 2, a3.out.split(/\r?\n/).filter((l) => /ОШИБКА|Проход/.test(l)).join(' | '));
 }
 
 section('План прогона — пути автотестов и подсказка YAxUnit');

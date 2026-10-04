@@ -130,7 +130,9 @@ export function markChecked(session, currentBlobs) {
   if (!pass?.blobs) return out;
   for (const [rel, blob] of Object.entries(pass.blobs)) {
     const entry = session.files?.[rel];
-    if (!entry || pass.notes?.[rel] === 'no_git') continue;
+    // Вне git отметку не на что опереть; удалённый файл проверять нечего — и ни тот, ни
+    // другой не «менялся во время прохода».
+    if (!entry || pass.notes?.[rel] === 'no_git' || pass.notes?.[rel] === 'deleted') continue;
     if (blob && currentBlobs[rel] === blob) {
       entry.checked = { blob, pass: pass.n };
       out.checked.push(rel);
