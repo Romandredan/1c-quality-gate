@@ -3731,6 +3731,9 @@ check('верификатор не грузит каталог антипатт�
       ['Проход: N из 3, база:', 'строка ответа с базой прохода'],
       ['Закрыто: N из M', 'строка ответа о закрытии'],
       ['сохраняет идентификатор', 'запись под «Закрыто» несёт идентификатор находки — по нему валидатор сверяет перенос'],
+      // A/B v3.17.0 (Claude Code 2.1.286): Agent по умолчанию запускает субагента в фоне, и
+      // оркестратор заканчивал ход раньше читателей — ответ «жду результатов» без отчёта.
+      ['run_in_background: false', 'субагенты контуров запускаются синхронно'],
     ]) check(`gate-runner: ${label}`, text.includes(needle));
   }
   const stale = readdirSync(join(ROOT, 'agents')).filter((f) => readFileSync(join(ROOT, 'agents', f), 'utf8').includes('rlm-tools-bsl'));
@@ -8003,6 +8006,8 @@ section('gate.mjs run — инструментальная фаза одним �
     const ho = run('tools/gate.mjs', ['handoff'], { env: { ...env, QG_STATE_DIR: '' } });
     check('handoff печатает передачу субагенту с сессией и перечнем',
       ho.code === 0 && /gate-runner/.test(ho.out) && ho.out.includes('Сессия гейта: HS') && ho.out.includes('6. Сомнения'), ho.out.slice(0, 300));
+    // Фоновый gate-runner: сессия заканчивает ход «жду субагента», Stop-хук держит гейт, отчёта нет.
+    check('handoff велит запускать gate-runner синхронно', ho.out.includes('run_in_background: false'), ho.out.slice(0, 400));
     const hoOc = run('tools/gate.mjs', ['handoff', '--mode', 'opencode'], { env });
     check('handoff для OpenCode называет инструмент task', hoOc.code === 0 && /инструментом task/.test(hoOc.out), hoOc.out.slice(0, 300));
     rmSync(join(rr, '.claude', '.state', 'qg-pending.json'), { force: true });
