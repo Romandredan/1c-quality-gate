@@ -25,7 +25,7 @@ import { SCOPES, TOOL_BACKED, RENAMED, isKnownScope, isKnownQgId } from './evide
 import { readJournal, coveredFiles, normalizePath } from './run-journal.mjs';
 import { projectRoot } from './project-root.mjs';
 import { stateDirSegments } from './state-dir.mjs';
-import { computeProfile, SCOPE_BASE } from './profile.mjs';
+import { computeProfile, SCOPE_BASE, touchedLine } from './profile.mjs';
 
 export const SECTION = '## quality evidence';
 
@@ -415,6 +415,31 @@ export function reportSections(text) {
     needsDecision: all.filter((f) => f.section === 'decision'),
     closed: all.filter((f) => f.section === 'closed'),
   };
+}
+
+/**
+ * Находки, положенные вне правки, хотя по адресу «файл:строка» они в правке. Граница — та же
+ * таблица, что печатает run (`touched` из computeProfile, от HEAD). Адрес ищется по полному
+ * относительному пути файла сессии в заголовке и теле находки: `<путь>:<строка>` либо
+ * `<путь>…строка N`. Находка без адреса не сверяется — приближение заявлено.
+ */
+export function misplacedFindings(text, touched, files) {
+  const norm = (p) => String(p).replace(/\\/g, '/').toLowerCase();
+  const rels = files.map((rel) => ({ rel, key: norm(rel) })).sort((a, b) => b.key.length - a.key.length);
+  const out = [];
+  for (const f of collectFindings(text)) {
+    if (f.section !== 'outside' && f.section !== 'decision') continue;
+    const body = norm([f.title, ...f.body].join('\n'));
+    for (const r of rels) {
+      const at = body.indexOf(r.key);
+      if (at === -1) continue;
+      const rest = body.slice(at + r.key.length, at + r.key.length + 60);
+      const m = rest.match(/^:(\d+)/) || rest.match(/^[^\n]{0,40}?строк[аи]?\s*(\d+)/);
+      if (m && touchedLine(touched, r.rel, Number(m[1]))) out.push({ sev: f.sev, title: f.title, section: f.section, rel: r.rel, line: Number(m[1]) });
+      break;
+    }
+  }
+  return out;
 }
 
 const normTitle = (f) => f.title.trim().toLowerCase();
@@ -965,6 +990,31 @@ export function validate(text, { gate = false, root = null, session = null } = {
       }
     } catch {
       /* профиль не посчитан (нечитаемый файл, сбой git) — сверять не с чем, молчим */
+    }
+  }
+
+  // Раздел находки сверяется с границей правки (v3.17.0). До v3.16.0 любая 🔴 держала гейт;
+  // теперь 🔴 вне правки не держит, и без этой сверки блокировка зависела бы от того, куда
+  // модель положила находку. 🔴 в правке, положенная в «Вне правки» или «Нужно решение», —
+  // ошибка: гарантия «🔴 в правке не снимается молча» не должна зависеть от суждения модели.
+  // 🟠 — предупреждение: она гейт не держит, но выпадает из круга исправлений.
+  if (own?.rawFiles?.length) {
+    try {
+      const { touched, note } = computeProfile({ files: own.rawFiles, root: projectDir, config: project?.values, metrics: {}, configState: project });
+      if (note !== 'no_git') {
+        const where = { outside: 'Вне правки', decision: 'Нужно решение' };
+        for (const m of misplacedFindings(text, touched, own.rawFiles)) {
+          if (m.sev !== '🔴' && m.sev !== '🟠') continue;
+          add(
+            m.sev === '🔴' ? 'error' : 'warn',
+            0,
+            `находка «${m.sev} ${m.title}» помещена в раздел «${where[m.section]}», но ${m.rel}:${m.line} — в правке ` +
+              '(таблица «Задето правкой» вывода run): перенеси её в «Открыто в правке»'
+          );
+        }
+      }
+    } catch {
+      /* граница не посчитана (сбой git, нечитаемый файл) — сверять не с чем */
     }
   }
 

@@ -8329,6 +8329,53 @@ section('gate.mjs run — инструментальная фаза одним �
   check('контур arch не назначен — требования нет', validate(skipped, { gate: true, root: empty }).problems.every((p) => !/контур arch/.test(p.message)));
 }
 
+// Раздел находки сверяется с границей правки. В v3.15.0 любая 🔴 держала гейт; с v3.16.0 🔴 вне
+// правки не держит, и блокировка зависела от того, куда модель положила находку. Валидатор
+// знает границу правки (та же таблица, что печатает run) и по адресу «файл:строка» ловит 🔴,
+// положенную вне правки, хотя её строка в задетом методе. Находка без адреса не проверяется —
+// приближение заявлено.
+{
+  const mr = join(WORK, 'misplaced-root');
+  rmSync(mr, { recursive: true, force: true });
+  mkdirSync(join(mr, 'src', 'cf', 'CommonModules', 'М', 'Ext'), { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: mr });
+  writeFileSync(join(mr, '.1c-quality-gate.json'), '{}', 'utf8');
+  const bsl = 'src/cf/CommonModules/М/Ext/Module.bsl';
+  const mod = (b) => BOM + `Процедура Старая() Экспорт\n\tА = 1;\nКонецПроцедуры\n\nПроцедура Новая() Экспорт\n\tБ = ${b};\nКонецПроцедуры\n`;
+  writeFileSync(join(mr, bsl), mod(1), 'utf8');
+  execFileSync('git', ['add', '-A'], { cwd: mr });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], { cwd: mr });
+  writeFileSync(join(mr, bsl), mod(2), 'utf8');
+  execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-arm.mjs')], { input: JSON.stringify({ session_id: 'M1', cwd: mr, tool_input: { file_path: join(mr, bsl) } }), env: { ...process.env, CLAUDE_PROJECT_DIR: mr } });
+  const env = { CLAUDE_PROJECT_DIR: mr };
+  // run, а не plan: след фикстуры заявляет hygiene-check, и журнал прогонов должен его знать.
+  const pl = run('tools/gate.mjs', ['run', '--session', 'M1', '--no-analyzer', '--only', 'hygiene-check'], { env });
+  const scope = (pl.out.match(/^\[qg scope: .*\]$/m) || [''])[0];
+  const tail = readFileSync(ev('valid.md'), 'utf8').slice(readFileSync(ev('valid.md'), 'utf8').indexOf('## quality evidence')).replace(/^\[qg scope: .*\]$/m, scope);
+  const report = (prose) => `${prose}\n\n${tail}[qg not_verified: dimension=static-analysis, reason=not_in_analyzer_report, files=1]\n`;
+  const check1 = (name, prose, expect) => {
+    const f = join(WORK, `misplaced-${expect.tag}.md`);
+    writeFileSync(f, report(prose), 'utf8');
+    const v = run('tools/evidence-validator.mjs', [f, '--gate', '--session', 'M1'], { env });
+    check(name, expect.test(v), v.out.split(/\r?\n/).filter((l) => /ОШИБКА|ПРЕДУПРЕЖДЕНИЕ/.test(l)).join(' | ').slice(0, 600));
+  };
+  check1('🔴 в задетом методе, положенная вне правки, — ошибка с адресом',
+    `## Вне правки\n\n### 🔴 Запрос в цикле\nФайл: ${bsl}:6, qg:BSL-QUERY-IN-LOOP\n`,
+    { tag: 'red-in', test: (v) => v.code === 2 && /помещена в раздел «Вне правки»/.test(v.out) && /Module\.bsl:6/.test(v.out) });
+  check1('🔴 в задетом методе в «Нужно решение» — тоже ошибка',
+    `## Нужно решение пользователя\n\n### 🔴 Запрос в цикле\n${bsl}, строка 6, qg:BSL-QUERY-IN-LOOP\n`,
+    { tag: 'red-dec', test: (v) => v.code === 2 && /помещена в раздел «Нужно решение»/.test(v.out) });
+  check1('🔴 в нетронутом методе вне правки — не ошибка',
+    `## Вне правки\n\n### 🔴 Запрос в цикле\nФайл: ${bsl}:2, qg:BSL-QUERY-IN-LOOP\n`,
+    { tag: 'red-out', test: (v) => !/помещена в раздел/.test(v.out) });
+  check1('🟠 в задетом методе вне правки — предупреждение, не ошибка',
+    `## Вне правки\n\n### 🟠 Без Знач\nФайл: ${bsl}:5, qg:AI-07\n`,
+    { tag: 'orange-in', test: (v) => /ПРЕДУПРЕЖДЕНИЕ[^\n]*помещена в раздел «Вне правки»/.test(v.out) && !/ОШИБКА[^\n]*помещена/.test(v.out) });
+  check1('находка без адреса не сверяется',
+    '## Вне правки\n\n### 🔴 Запрос в цикле где-то в модуле\nqg:BSL-QUERY-IN-LOOP\n',
+    { tag: 'red-noaddr', test: (v) => !/помещена в раздел/.test(v.out) });
+}
+
 // Проход по исправлению в run: снимок на старте, база от проверенного, прошлый отчёт и его
 // находки в выводе, fix.diff для модельных слоёв. change.diff остаётся от HEAD — его сверяет attest.
 {
