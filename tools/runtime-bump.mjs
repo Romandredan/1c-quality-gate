@@ -76,16 +76,21 @@ const fill = (template, version) => String(template).replace(/\{version\}/g, ver
  * Цели манифеста в новом релизе. Имя asset берётся по шаблону (bsl-context: версия в имени)
  * либо как есть (bsl-analyzer: имена постоянные). Сумма — из поля digest вида `sha256:<hex>`;
  * иное значение или его отсутствие помечают цель в `unsigned`: сумму посчитает скачивание.
+ * При пропаже цели рядом лежат искомые имена и состав релиза: переименование файлов у автора
+ * иначе неотличимо от неполного релиза.
  */
 export function buildTargets(manifest, release, version) {
   const targets = {};
   const missing = [];
   const unsigned = [];
+  const expected = {};
+  const available = (release.assets || []).map((a) => a.name);
   for (const [key, t] of Object.entries(manifest.targets || {})) {
     const asset = fill(t.assetTemplate || t.asset, version);
     const found = (release.assets || []).find((a) => a.name === asset);
     if (!found) {
       missing.push(key);
+      expected[key] = asset;
       continue;
     }
     const next = { ...t, asset };
@@ -97,7 +102,7 @@ export function buildTargets(manifest, release, version) {
     if (!m) unsigned.push(key);
     targets[key] = next;
   }
-  return { ok: missing.length === 0, targets, missing, unsigned };
+  return { ok: missing.length === 0, targets, missing, unsigned, expected, available };
 }
 
 /** Копия манифеста с новой версией и целями. Порядок полей исходный, служебный `url` убран. */
@@ -217,7 +222,7 @@ export async function bump({ engine, root = PLUGIN_ROOT, apply = false, fetchImp
 
   const built = buildTargets(manifest, latest.release, latest.version);
   if (!built.ok) {
-    return { ok: false, reason: 'target_missing', engine, name: manifest.engine, current: manifest.version, latest: latest.version, missing: built.missing };
+    return { ok: false, reason: 'target_missing', engine, name: manifest.engine, current: manifest.version, latest: latest.version, missing: built.missing, expected: built.expected, available: built.available };
   }
   for (const key of built.unsigned) {
     const t = built.targets[key];

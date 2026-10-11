@@ -8960,6 +8960,13 @@ section('Сдвиг закрепления движков — выбор рел�
   const partial = analyzerReleases.find((r) => r.tag_name === 'v0.2.77');
   const broken = rb.buildTargets(analyzerManifest, partial, '0.2.77');
   check('релиз без одной цели — отказ целиком', !broken.ok && broken.missing.includes('darwin-arm64'), JSON.stringify(broken.missing));
+  // Переименование файлов у автора (bsl-context 0.21: версия ушла из имени) читается по
+  // логу workflow, только если рядом с пропавшей целью видно, что искали и что есть.
+  check('отказ называет искомое имя и состав релиза',
+    broken.expected?.['darwin-arm64'] === 'bsl-analyzer-app-darwin-arm64' &&
+      broken.available.length === (partial.assets || []).length &&
+      broken.available.every((n) => typeof n === 'string'),
+    JSON.stringify({ expected: broken.expected, available: broken.available }));
 
   const pcLatest = rb.pickLatest(pcReleases);
   const pcBuilt = rb.buildTargets(pcManifest, pcLatest.release, pcLatest.version);
@@ -9128,6 +9135,7 @@ section('Сдвиг закрепления движков — прогон и CL
   const refused = await rb.bump({ engine: 'analyzer', root, apply: true, fetchImpl: apiFor(partialOnly), token: '' });
   check('релиз без одной цели — отказ с перечнем целей, манифест не тронут',
     !refused.ok && refused.reason === 'target_missing' && refused.missing.includes('darwin-arm64') &&
+      refused.expected?.['darwin-arm64'] && Array.isArray(refused.available) &&
       JSON.parse(readFileSync(join(root, 'assets/analyzer/runtime-manifest.json'), 'utf8')).version === '0.2.73', JSON.stringify(refused));
   check('код возврата при отказе — 1 в обоих режимах', rb.exitCode(refused, 'check') === 1 && rb.exitCode(refused, 'apply') === 1);
 

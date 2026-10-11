@@ -1,34 +1,34 @@
 {
-  "_comment": "Закреплённая версия сервера справки платформы и контрольные суммы его архивов. Плагин качает файл с релизов автора (не зеркалит) и проверяет SHA-256 до распаковки. Обновление версии: `node tools/runtime-bump.mjs --engine platform-context --apply`; имена архивов собираются из assetTemplate и dirTemplate, суммы и размеры берутся из GitHub API релиза (поле digest у каждого asset).",
+  "_comment": "Закреплённая версия сервера справки платформы и контрольные суммы его архивов. Плагин качает файл с релизов автора (не зеркалит) и проверяет SHA-256 до распаковки. Обновление версии: `node tools/runtime-bump.mjs --engine platform-context --apply`; имена архивов собираются из assetTemplate и dirTemplate (с 0.21 версии в имени нет — шаблон совпадает с именем), суммы и размеры берутся из GitHub API релиза (поле digest у каждого asset).",
   "engine": "bsl-context",
-  "version": "0.19.1",
+  "version": "0.22.0",
   "repo": "Regsorm/bsl-context",
   "urlTemplate": "https://github.com/{repo}/releases/download/v{version}/{asset}",
   "binary": "bsl-context-rs",
   "targets": {
     "win32-x64": {
-      "assetTemplate": "bsl-context-v{version}-x86_64-pc-windows-msvc.zip",
-      "dirTemplate": "bsl-context-v{version}-x86_64-pc-windows-msvc",
-      "asset": "bsl-context-v0.19.1-x86_64-pc-windows-msvc.zip",
-      "dir": "bsl-context-v0.19.1-x86_64-pc-windows-msvc",
-      "sha256": "8ec743268337e3ab2bd9106bd24bfcd40bdbaca91d208a04a1ad1706626a3a05",
-      "size": 5524682
+      "assetTemplate": "bsl-context-windows-x64.zip",
+      "dirTemplate": "bsl-context-windows-x64",
+      "asset": "bsl-context-windows-x64.zip",
+      "dir": "bsl-context-windows-x64",
+      "sha256": "7ad00c0e69016c4dbccd52cd4d4fca4193052036fdcc851fa63b723f3cf48aca",
+      "size": 6317358
     },
     "linux-x64": {
-      "assetTemplate": "bsl-context-v{version}-x86_64-unknown-linux-gnu.tar.gz",
-      "dirTemplate": "bsl-context-v{version}-x86_64-unknown-linux-gnu",
-      "asset": "bsl-context-v0.19.1-x86_64-unknown-linux-gnu.tar.gz",
-      "dir": "bsl-context-v0.19.1-x86_64-unknown-linux-gnu",
-      "sha256": "b25f9db106f6bdc14e5909132b7b79a050fb409133c1be8207c84a647d7eb87d",
-      "size": 5623882
+      "assetTemplate": "bsl-context-linux-x64.tar.gz",
+      "dirTemplate": "bsl-context-linux-x64",
+      "asset": "bsl-context-linux-x64.tar.gz",
+      "dir": "bsl-context-linux-x64",
+      "sha256": "daa2cfac93250b9442efe9aa9c6af260eb806fdd5d9ca5dcc9c49d667d7e49b9",
+      "size": 6360392
     },
     "darwin-arm64": {
-      "assetTemplate": "bsl-context-v{version}-aarch64-apple-darwin.tar.gz",
-      "dirTemplate": "bsl-context-v{version}-aarch64-apple-darwin",
-      "asset": "bsl-context-v0.19.1-aarch64-apple-darwin.tar.gz",
-      "dir": "bsl-context-v0.19.1-aarch64-apple-darwin",
-      "sha256": "338d8a60741e309ae4441afffbf5e90a698f784d88da084250cf5685255e0926",
-      "size": 4916767
+      "assetTemplate": "bsl-context-macos-arm64.tar.gz",
+      "dirTemplate": "bsl-context-macos-arm64",
+      "asset": "bsl-context-macos-arm64.tar.gz",
+      "dir": "bsl-context-macos-arm64",
+      "sha256": "651acbdc13c55316636425f4b68021366366050d0a836f90c7a8cdfc861ffad6",
+      "size": 5591703
     }
   }
 }
