@@ -31,6 +31,12 @@ const FIXTURES = join(ROOT, 'tests', 'fixtures');
 const WORK = join(tmpdir(), 'qg-tests');
 const VERBOSE = process.argv.includes('--verbose');
 
+// Каталог данных плагина — свой у тестов. Прогон `gate.mjs run` без `--only` заводит движки
+// по-настоящему, и в каталоге пользователя тест из ветки с другим закреплением гасил бы его
+// живой демон. Рядом с WORK, а не внутри: WORK удаляется в конце, а анализатор весит 70 МБ.
+// Дочерние процессы получают переменную через `...process.env`.
+process.env.QG_DATA_DIR ??= join(tmpdir(), 'qg-tests-data');
+
 // Контур кода запущен — валидатор требует заявить проходы по каталогу антипаттернов
 // (ai-antipatterns, platform-antipatterns), иначе предупреждает. У обоих скоупов теперь есть
 // инструмент (tools/catalog.mjs) — заявить их пропуск причиной `not_applicable` в этих тестах
@@ -9328,6 +9334,11 @@ process.stdout.write(`\n${'='.repeat(60)}\nПройдено: ${passed}, пров
 if (failures.length) {
   process.stdout.write('\nПровалившиеся проверки:\n');
   for (const f of failures) process.stdout.write(`  - ${f.name}${f.detail ? ` (${f.detail})` : ''}\n`);
+}
+// Демон, поднятый прогоном, гасится им же: иначе после каждого прогона остаётся живой процесс.
+{
+  const boot = await import(pathToFileURL(join(ROOT, 'tools', 'platform-context-bootstrap.mjs')).href);
+  await boot.stopServer({ root: process.env.QG_DATA_DIR });
 }
 removeTreeSync(WORK);
 process.exit(failures.length ? 1 : 0);
