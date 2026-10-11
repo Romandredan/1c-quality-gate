@@ -4541,7 +4541,10 @@ section('Чужая установка принимается, только ес
   // Дальше проверяется порядок разрешения, поэтому каталог данных подменяется на пустой:
   // иначе тест увидел бы установку той машины, на которой запущен, и означал бы разное в
   // разных местах.
+  // QG_DATA_DIR старше CLAUDE_PLUGIN_DATA, а набор задаёт его себе сам: снимается на время блока.
   const savedData = process.env.CLAUDE_PLUGIN_DATA;
+  const savedQgData = process.env.QG_DATA_DIR;
+  delete process.env.QG_DATA_DIR;
   process.env.CLAUDE_PLUGIN_DATA = join(WORK, 'adopt-empty-data');
   rmSync(process.env.CLAUDE_PLUGIN_DATA, { recursive: true, force: true });
   try {
@@ -4562,6 +4565,7 @@ section('Чужая установка принимается, только ес
   } finally {
     if (savedData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
     else process.env.CLAUDE_PLUGIN_DATA = savedData;
+    if (savedQgData !== undefined) process.env.QG_DATA_DIR = savedQgData;
   }
 }
 
@@ -9007,6 +9011,28 @@ section('Сдвиг закрепления движков — выбор рел�
 // Закрепление не самообновление: скрипт лишь готовит новую версию манифеста, а решение и
 // проверка остаются за ревью PR. Здесь проверяется чистая часть: без сети и без записи.
 //
+// A/B сервера справки к ревью сдвига: сравнение — чистая функция, серверы не нужны.
+{
+  const ab = await import(pathToFileURL(join(ROOT, 'tools', 'platform-context-ab.mjs')).href);
+  const res = ab.compareRuns([
+    { file: 'a.bsl', a: { findings: ['3|unknown_type_member|low'] }, b: { findings: [] } },
+    { file: 'b.bsl', a: { findings: ['5|unknown_enum_value|high'] }, b: { findings: ['5|unknown_enum_value|high'] } },
+    { file: 'c.bsl', a: { findings: [] }, b: { error: 'отказ: нужен source' } },
+  ]);
+  check('A/B: совпавший файл не в расхождениях', !res.diffs.some((d) => d.file === 'b.bsl'), JSON.stringify(res.diffs));
+  check('A/B: ушедшая находка видна по файлу', res.diffs.find((d) => d.file === 'a.bsl')?.gone.join() === '3|unknown_type_member|low');
+  // Отказ сервера — расхождение, даже без находок: так выглядел пустой модуль на 0.22.0.
+  check('A/B: отказ одной стороны — расхождение', res.diffs.find((d) => d.file === 'c.bsl')?.errorB?.startsWith('отказ'));
+  check(
+    'A/B: счёт по виду и уверенности',
+    JSON.stringify(res.table) === JSON.stringify([
+      { kind: 'unknown_enum_value|high', a: 1, b: 1 },
+      { kind: 'unknown_type_member|low', a: 1, b: 0 },
+    ]),
+    JSON.stringify(res.table)
+  );
+}
+
 // Манифесты во всех секциях сдвига — замороженные копии из фикстур, а не assets/. Workflow
 // runtime-bump гоняет этот набор ПОСЛЕ того, как переписал настоящие манифесты: тест,
 // читающий assets/ и ждущий в нём прежнюю версию, валил бы первый же сдвиг на шаге тестов.
