@@ -633,12 +633,16 @@ async function main(argv) {
       unchecked.push({ file, reason: 'missing' });
       continue;
     }
+    const moduleText = readFileSync(abs, 'utf8');
+    // В пустом модуле нет обращений к платформе — он проверен без находок. Сервер
+    // (замер на 0.22.0) отвечает на пустой текст отказом, и без этой ветки отказ стал бы «не проверено».
+    if (!moduleText.trim()) continue; // trim снимает и BOM выгрузки
     const res = await validateModule({
       url,
       repo: cfg.repo,
       level: cfg.level,
       timeoutMs: cfg.timeoutMs,
-      moduleText: readFileSync(abs, 'utf8'),
+      moduleText,
       modulePath: modulePathOf(abs, root),
     });
     if (!res.ok) {

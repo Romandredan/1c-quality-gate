@@ -7043,6 +7043,14 @@ section('Самозаведение контура платформенного 
         try { rpc = JSON.parse(body); } catch { /* ниже ответим отказом разбора */ }
         const source = String(rpc?.params?.arguments?.module || '');
         seen.push(rpc?.params?.arguments?.module_path || '');
+        // Так отвечает bsl-context 0.22.0 на пустой текст: отказ, а не пустой список находок.
+        if (!source.trim()) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: rpc?.id ?? 1, result: { content: [
+            { type: 'text', text: JSON.stringify({ ok: false, message: 'нужен либо source (текст модуля), либо path' }) },
+          ] } }));
+          return;
+        }
         const errors = source.includes('ТипГруппыЭлементовОтбораКомпоновкиДанных')
           ? [{ line: 5, kind: 'unknown_enum_value', confidence: 'high', message: 'значения перечисления нет' }]
           : [{ line: 3, kind: 'unknown_type_member', confidence: 'high', message: 'у типа Массив нет члена Сортировать' }];
@@ -7068,13 +7076,16 @@ section('Самозаведение контура платформенного 
     mkdirSync(join(e2eProj, 'src'), { recursive: true });
     const module = join(e2eProj, 'src', 'Module.bsl');
     writeFileSync(module, 'Процедура П() Экспорт\n\tМассив = Новый Массив;\n\tМассив.Сортировать();\nКонецПроцедуры\n', 'utf8');
+    // Пустой модуль менеджера — обычное дело у нового объекта; в выгрузке это BOM и перевод строки.
+    const emptyModule = join(e2eProj, 'src', 'ManagerModule.bsl');
+    writeFileSync(emptyModule, '﻿\r\n', 'utf8');
 
     // Запуск асинхронный намеренно: execFileSync блокирует цикл событий, и поддельный сервер
     // в этом же процессе не успел бы ответить.
     const done = await new Promise((resolve) => {
       execFile(
         process.execPath,
-        [join(ROOT, 'tools', 'platform-context-run.mjs'), '--changed', module],
+        [join(ROOT, 'tools', 'platform-context-run.mjs'), '--changed', module, '--changed', emptyModule],
         {
           encoding: 'utf8',
           env: {
@@ -7105,6 +7116,10 @@ section('Самозаведение контура платформенного 
     // Путь модуля обязателен в запросе: без него сервер не отличает модуль объекта от
     // произвольного фрагмента и выдаёт ложные находки по реквизитам.
     check('сквозной прогон: путь модуля передан серверу', seen.some((p) => p && p.includes('Module.bsl')), JSON.stringify(seen));
+    // Проверять в пустом модуле нечего: отказ сервера на нём не должен становиться
+    // «не проверено» — такой след неотличим от упавшего запроса.
+    check('сквозной прогон: пустой модуль не даёт not_verified', !done.out.includes('reason=request_failed'), done.out.trim().slice(0, 400));
+    check('сквозной прогон: пустой модуль на сервер не отправляется', !seen.some((p) => p && p.includes('ManagerModule.bsl')), JSON.stringify(seen));
   }
 }
 
