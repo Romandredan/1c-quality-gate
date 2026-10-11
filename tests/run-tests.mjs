@@ -6893,6 +6893,59 @@ section('Самозаведение контура платформенного 
       configSeen && readFileSync(configSeen, 'utf8').includes(join('P', '8.3.27.1688')),
       configSeen ? readFileSync(configSeen, 'utf8') : 'конфиг не записан'
     );
+
+    // Свой демон живёт неделями, а закрепление сдвигается релизом плагина. Без сверки версии
+    // демон прошлого закрепления переиспользуется до перезагрузки, и сдвиг до пользователя не
+    // доходит: так на машине автора 0.16.0 отвечал при закреплённой 0.19.1.
+    const pinned = { ...boot.readManifest(), version: '0.22.0' };
+    const ownCase = async ({ recorded, answers }) => {
+      const root = join(WORK, 'pc-own-version');
+      rmSync(root, { recursive: true, force: true });
+      mkdirSync(root, { recursive: true });
+      boot.saveServer(root, { pid: 7777, port: 8120, url: 'http://127.0.0.1:8120/mcp', platform: '8.3.27.1688', version: recorded });
+      const killed = [];
+      let started = false;
+      const res = await boot.ensureServer(
+        {},
+        {
+          root,
+          manifest: pinned,
+          fetchImpl: fetchFor({ 'http://127.0.0.1:8120/health': health('8.3.27.1688', { version: answers }) }),
+          killImpl: (pid) => { killed.push(pid); },
+          discover: () => [{ version: '8.3.27.1688', path: 'P' }],
+          installImpl: async () => ({ ok: true, path: 'bin' }),
+          portImpl: async () => 8121,
+          startImpl: async (opts) => {
+            started = true;
+            return { ok: true, url: boot.urlForPort(opts.port), health: { version: '0.22.0', index_loaded: true } };
+          },
+        }
+      );
+      return { res, killed, started, left: boot.readServers(root).map((s) => s.pid) };
+    };
+
+    const outdated = await ownCase({ recorded: '0.19.1', answers: '0.19.1' });
+    check(
+      'свой демон прошлого закрепления гасится и заменяется',
+      outdated.killed.join(',') === '7777' && outdated.started && outdated.res.url === 'http://127.0.0.1:8121/mcp' && !outdated.left.includes(7777),
+      JSON.stringify(outdated)
+    );
+
+    const current = await ownCase({ recorded: '0.22.0', answers: '0.22.0' });
+    check(
+      'свой демон текущего закрепления переиспользуется',
+      current.killed.length === 0 && !current.started && current.res.own === true && current.res.url === 'http://127.0.0.1:8120/mcp',
+      JSON.stringify(current)
+    );
+
+    // Порт из записи после перезагрузки занял чужой сервер: брать его своим нельзя (это не та
+    // версия), гасить — тем более: записанный pid ему не принадлежит.
+    const foreignOnOwnPort = await ownCase({ recorded: '0.19.1', answers: '0.16.0' });
+    check(
+      'чужой сервер по адресу своей записи не считается своим и не гасится',
+      foreignOnOwnPort.killed.length === 0 && foreignOnOwnPort.started && foreignOnOwnPort.res.url === 'http://127.0.0.1:8121/mcp',
+      JSON.stringify(foreignOnOwnPort)
+    );
   }
 
   // --- движок назван там, где его будут искать -------------------------------

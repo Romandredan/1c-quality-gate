@@ -405,6 +405,34 @@ export function saveServer(root, state) {
   writeFileSync(statePath(root), JSON.stringify(all, null, 2), 'utf8');
 }
 
+/** Убирает одну запись — ту, чей процесс погашен. Остальные демоны (другие платформы) живут. */
+export function dropServer(root, record) {
+  let all = {};
+  try {
+    const raw = JSON.parse(readFileSync(statePath(root), 'utf8'));
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) all = raw;
+  } catch {
+    return;
+  }
+  for (const [key, s] of Object.entries(all)) {
+    if (s?.pid === record.pid && s?.url === record.url) delete all[key];
+  }
+  writeFileSync(statePath(root), JSON.stringify(all, null, 2), 'utf8');
+}
+
+/**
+ * Отвечает ли по адресу записи тот сервер, который мы туда ставили. Номер процесса и порт
+ * система переиспользует: после перезагрузки по записи может отвечать посторонний, и тогда ни
+ * брать его своим, ни гасить записанный pid нельзя.
+ */
+export function sameServer(record, health) {
+  return (
+    Boolean(health) &&
+    (!record.version || !health.version || health.version === record.version) &&
+    (!record.platform || platformOf(health) === record.platform)
+  );
+}
+
 export function clearState(root = dataRoot()) {
   removeFileSync(statePath(root));
 }
@@ -542,15 +570,10 @@ export async function stopServer({ root = dataRoot(), killImpl = process.kill, p
   const stale = [];
   const failed = [];
   for (const s of servers) {
-    // Номер процесса система переиспользует: после перезагрузки записанный pid принадлежит
-    // постороннему, и «уборка за собой» убила бы чужую программу. Гасим только тогда, когда по
-    // записанному адресу отвечает именно тот сервер, который мы туда ставили.
+    // Гасим только тогда, когда по записанному адресу отвечает именно наш сервер: иначе
+    // «уборка за собой» убила бы чужую программу с тем же pid.
     const health = await probe({ url: s.url, timeoutMs: 2000, fetchImpl });
-    const same =
-      health &&
-      (!s.version || !health.version || health.version === s.version) &&
-      (!s.platform || platformOf(health) === s.platform);
-    if (!same) {
+    if (!sameServer(s, health)) {
       stale.push(s.pid);
       continue;
     }
@@ -603,7 +626,7 @@ export function healthSuitable(health, { platformVersion = null, repo = null } =
  */
 export async function ensureServer(
   cfg,
-  { root = dataRoot(), manifest = readManifest(), log = () => {}, fetchImpl = globalThis.fetch, spawnImpl = spawn, discover = discoverPlatforms, installImpl = install, startImpl = startServer, portImpl = pickPort } = {}
+  { root = dataRoot(), manifest = readManifest(), log = () => {}, fetchImpl = globalThis.fetch, spawnImpl = spawn, discover = discoverPlatforms, installImpl = install, startImpl = startServer, portImpl = pickPort, killImpl = process.kill } = {}
 ) {
   const wanted = cfg?.platformVersion || null;
 
@@ -632,9 +655,26 @@ export async function ensureServer(
 
   // Свои демоны перебираются все: на машине с несколькими версиями платформы годится тот,
   // чья справка совпадает с закреплением проекта, а не тот, что поднят последним.
+  // Свой — только тот, кто отвечает по записи как записанный (`sameServer`), и только текущего
+  // закрепления: демон живёт неделями, и без сверки версии сдвиг закрепления не доходил бы до
+  // проверки до перезагрузки. Демон прошлого закрепления гасится, а не бросается: запись о нём
+  // перезапишет новый демон той же платформы, и старый остался бы процессом без хозяина.
   for (const s of readServers(root)) {
-    const mine = await tryUrl(s?.url, true);
-    if (mine?.ok) return mine;
+    if (!s?.url) continue;
+    const health = await probeHealth({ url: s.url, fetchImpl });
+    if (!sameServer(s, health)) continue;
+    if (health.version && manifest.version && health.version !== manifest.version) {
+      log(`Свой сервер справки ${health.version} не совпадает с закреплённым ${manifest.version} — заменяю`);
+      try {
+        if (s.pid) killImpl(s.pid);
+      } catch {
+        // Процесс уже завершился — запись всё равно устарела.
+      }
+      dropServer(root, s);
+      continue;
+    }
+    const fit = healthSuitable(health, { platformVersion: wanted, repo: cfg?.repo });
+    if (fit.ok) return { ok: true, url: s.url, health, own: true };
   }
 
   const shared = await tryUrl(urlForPort(DEFAULT_PORT), false);
@@ -728,8 +768,15 @@ async function main(argv) {
     }
     for (const state of servers) {
       const health = await probeHealth({ url: state.url });
-      out(`Свой демон: ${state.url} (pid ${state.pid}) — ${health ? 'отвечает' : 'не отвечает'}`);
-      if (health) out(`Платформа: ${platformOf(health)} | индекс: ${health.index_loaded ? 'загружен' : 'нет'}`);
+      const answer = !health
+        ? 'не отвечает'
+        : !sameServer(state, health)
+          ? `отвечает чужой сервер ${health.version || '?'} — запись устарела`
+          : health.version && health.version !== manifest.version
+            ? `отвечает ${health.version}, закреплён ${manifest.version} — заменится при следующем прогоне`
+            : `отвечает ${health.version || ''}`.trim();
+      out(`Свой демон: ${state.url} (pid ${state.pid}) — ${answer}`);
+      if (health && sameServer(state, health)) out(`Платформа: ${platformOf(health)} | индекс: ${health.index_loaded ? 'загружен' : 'нет'}`);
     }
     const shared = await probeHealth({ url: urlForPort(DEFAULT_PORT) });
     if (shared) out(`На ${DEFAULT_PORT} отвечает сервер ${shared.version}, платформа ${platformOf(shared)}`);
