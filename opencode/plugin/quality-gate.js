@@ -1,8 +1,21 @@
 /**
  * 1c-quality-gate — механика гейта качества 1С для OpenCode.
  *
- * Адаптация двух хуков Claude Code (gate-arm/gate-check) на плагинный API OpenCode:
+ * Модуль поддерживает ОБЕ версии OpenCode из одной точки входа:
  *
+ *   - V1 (>= 1.18.29): вызывает `server()` и получает объект хуков
+ *     ("tool.execute.before/after", "config", "shell.env", "event").
+ *   - V2: читает `id` и `setup(ctx)` и регистрацию ведёт через домены контекста
+ *     (ctx.skill/command/agent/mcp.transform, ctx.tool.hook, ctx.shell.hook,
+ *     ctx.event.subscribe). Хуки между версиями НЕ транслируются — у каждой своя
+ *     реализация поверх общих помощников этого файла и ядра hooks/gate-core.mjs.
+ *
+ * Почему экспорт — голый объект, а не Plugin.define из "@opencode/plugin":
+ * у пакета принципиально нет зависимостей, а define — функция-тождество, нужная
+ * только для типизации. Загрузчик V2 читает из default-экспорта поля id и setup,
+ * импорт пакета типов в рантайме не требуется.
+ *
+ * V1-реализация:
  *   - "tool.execute.before/after" — взвод гейта при правке .bsl/.os/XML метаданных
  *     инструментом правки и командой `bash` (аналог PostToolUse и хука gate-shell.mjs).
  *     Подсказка дописывается в результат инструмента, чтобы модель увидела взвод
@@ -18,11 +31,19 @@
  *     без этих переменных он ищет пакет угадыванием, а состояние — по умолчанию
  *     Claude Code. Тогда взвод шёл бы в один каталог, а снятие в другой.
  *
- * ВАЖНОЕ ОТЛИЧИЕ ОТ ХУКОВ CLAUDE CODE. В Claude Code Stop-хук жёстко отказывает
- * в завершении сессии (exit 2). У OpenCode такого механизма нет: плагин не может
- * запретить завершение, он отправляет агенту новое сообщение, и тот продолжает
- * работу. Это настойчивый, но мягкий гейт: пользователь всегда может прервать
- * сессию вручную. Чтобы цикл «idle → возврат» не был бесконечным спамом, на
+ * V2-реализация (соответствия V1):
+ *   - ctx.tool.hook("execute.before/after")   ← tool.execute.before/after
+ *   - ctx.event.subscribe() + session.execution.succeeded / session.idle
+ *                                             ← хук event на session.idle
+ *   - ctx.shell.hook("create.before")         ← shell.env
+ *   - ctx.skill/command/agent/mcp.transform   ← хук config
+ *   - ctx.session.prompt({sessionID, text})   ← client.session.prompt({path, body})
+ *
+ * ВАЖНОЕ ОТЛИЧИЕ ОТ ХУКОВ CLAUDE CODE (обе версии OpenCode). В Claude Code Stop-хук
+ * жёстко отказывает в завершении сессии (exit 2). У OpenCode такого механизма нет:
+ * плагин не может запретить завершение, он отправляет агенту новое сообщение, и тот
+ * продолжает работу. Это настойчивый, но мягкий гейт: пользователь всегда может
+ * прервать сессию вручную. Чтобы цикл «idle → возврат» не был бесконечным спамом, на
  * неизменный состав правок даётся не более MAX_REPROMPTS автоматических возвратов;
  * счётчик ведётся по сессии и сбрасывает её любая новая правка. Исчерпание лимита
  * фиксируется записью gate-surrendered в журнале прогонов (без поля scope — запись
@@ -38,20 +59,27 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { agentsFrom, commandsFrom } from './registry.js';
+import { agentsFrom, agentsV2From, commandsFrom, skillsFrom } from './registry.js';
 
 /**
  * MCP-сервер стандартов. Зависимость обязательная, а не удобство: без подтверждённого
  * часового источника стандартов гейт не снимается. Регистрируется, только если у
  * пользователя нет своей записи с этим именем.
+ *
+ * Поле enabled — из V1-схемы; в записи V2 его нет: нативный переключатель V2 —
+ * `disabled`, а по умолчанию сервер включён.
  */
 const V8STD_MCP = { type: 'remote', url: 'https://ai.v8std.ru/mcp', enabled: true };
+const V8STD_MCP_V2 = { type: 'remote', url: 'https://ai.v8std.ru/mcp' };
 
 /** Максимум автоматических возвратов на неизменный состав правок. */
 const MAX_REPROMPTS = 3;
 
 /** Верхняя граница журнала прогонов (tools/run-journal.mjs). */
 const JOURNAL_KEEP = 500;
+
+/** Инструменты правки — аналог matcher исходного PostToolUse-хука. */
+const EDIT_TOOLS = new Set(['write', 'edit', 'multiedit', 'patch', 'notebookedit']);
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -78,53 +106,42 @@ function fileOfArgs(args) {
   return typeof p === 'string' && p ? p : null;
 }
 
-export const QualityGatePlugin = async ({ project, client, directory, worktree }) => {
-  // Корень проекта: рабочее дерево точнее (git worktree), иначе каталог запуска.
-  const root = worktree || directory || process.cwd();
-
-  // Каталог состояния: OpenCode держит его отдельно от Claude Code — .opencode/.state
-  // вместо .claude/.state (tools/state-dir.mjs). Значение вычисляется ОДИН раз и отсюда
-  // же уходит в оболочку агента хуком shell.env. Разойтись эти два пути не должны:
-  // взвод пошёл бы в один каталог, а снятие через gate.mjs — в другой, и гейт не
-  // снимался бы никогда. Значение пользователя уважается, если он задал его сам.
-  const stateEnv = { QG_STATE_DIR: process.env.QG_STATE_DIR || '.opencode/.state' };
-
-  // Корень пакета и ядро механики гейта. Если импорт не удался (пакет установлен
-  // частично), плагин молчит — ложный гейт хуже отсутствующего.
-  const packageRoot = resolvePackageRoot();
-  if (!packageRoot) return {};
-
-  let core = null;
-  let shell = null;
-  let stateDir = null;
-  let ensureConfig = null;
-  let readConfig = null;
+/**
+ * Ядро механики гейта и его зависимости. Если импорт не удался (пакет установлен
+ * частично), возвращается null, и плагин молчит — ложный гейт хуже отсутствующего.
+ * file-URL, а не путь: динамический import() по голому пути на Windows падает с
+ * ERR_UNSUPPORTED_ESM_URL_SCHEME, и плагин молча не работал бы вообще.
+ *
+ * Взвод по командам оболочки (shell-core) — отдельным импортом: его сбой не должен
+ * выключать взвод по правкам и мягкий гейт, которые работают без него.
+ */
+async function loadGateDeps(packageRoot) {
   try {
-    // file-URL, а не путь: динамический import() по голому пути на Windows
-    // падает с ERR_UNSUPPORTED_ESM_URL_SCHEME, и плагин молча не работал бы вообще.
-    core = await import(pathToFileURL(join(packageRoot, 'hooks', 'gate-core.mjs')).href);
-    stateDir = await import(pathToFileURL(join(packageRoot, 'tools', 'state-dir.mjs')).href);
-    ({ ensureConfig, readConfig } = await import(pathToFileURL(join(packageRoot, 'tools', 'config.mjs')).href));
+    const core = await import(pathToFileURL(join(packageRoot, 'hooks', 'gate-core.mjs')).href);
+    const stateDir = await import(pathToFileURL(join(packageRoot, 'tools', 'state-dir.mjs')).href);
+    const { ensureConfig, readConfig } = await import(pathToFileURL(join(packageRoot, 'tools', 'config.mjs')).href);
+    let shell = null;
+    try {
+      shell = await import(pathToFileURL(join(packageRoot, 'hooks', 'shell-core.mjs')).href);
+    } catch {
+      shell = null;
+    }
+    return { core, stateDir, ensureConfig, readConfig, shell };
   } catch {
-    return {};
+    return null;
   }
+}
 
-  // Взвод по командам оболочки — отдельным импортом: его сбой не должен выключать взвод по
-  // правкам и мягкий гейт, которые работают без него. Без модуля ветка bash пропускается.
-  try {
-    shell = await import(pathToFileURL(join(packageRoot, 'hooks', 'shell-core.mjs')).href);
-  } catch {
-    shell = null;
-  }
-
-  // Карта callID → путь файла: аргументы известны на before, взводим на after,
-  // когда правка фактически состоялась.
-  const pendingCalls = new Map();
-
-  // Карта callID → команда оболочки. Файла у команды нет: что она изменила, ядро
-  // (hooks/shell-core.mjs) выясняет по снимку до и после, как хук Claude Code gate-shell.mjs.
-  const shellCalls = new Map();
-
+/**
+ * Общая для обеих версий OpenCode механика мягкого гейта на паузе сессии.
+ *
+ * Возвращает handleIdle(sessionId, send), где send(text, opts) — способ доставки
+ * сообщения агенту конкретной версии (у V1 и V2 разные сигнатуры; opts.note помечает
+ * уведомление, которое не должно провоцировать ход модели). Вся логика — итог снятого
+ * гейта, чтение маркера, отпечаток состава правок, лимит возвратов, журнал сдачи —
+ * здесь, чтобы две копии не разъезжались при первой же правке.
+ */
+function createIdleGate({ root, core, stateDir, stateEnv, packageRoot }) {
   // Защита от бесконечного цикла возвратов. Счётчик — ПО СЕССИИ: sessionId →
   // { fingerprint, count }. Глобальный лимит (как у первой редакции, ключ = сессия +
   // отпечаток) при переполнении карты стирал счётчики ВСЕХ сессий, включая текущую, —
@@ -162,6 +179,183 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
       /* журнал не обязан мешать работе */
     }
   };
+
+  return async function handleIdle(sessionId, send) {
+    // Итог снятого гейта — один раз: аналог systemMessage Stop-хука Claude Code.
+    const note = core.residualNote({ root, sessionId, env: stateEnv });
+    if (note) {
+      // note: это уведомление, а не задание — без noReply модель отвечает ходом и может
+      // взяться за остаток, включая находки вне правки.
+      await send(`[ГЕЙТ КАЧЕСТВА 1С] ${note}`, { note: true }).catch(() => {});
+      return;
+    }
+
+    const state = core.readPendingState(root, stateEnv);
+    if (!state) return;
+
+    if (state.corrupt) {
+      await send(
+        `[ГЕЙТ КАЧЕСТВА 1С]\nМаркер ${stateEnv.QG_STATE_DIR}/qg-pending.json повреждён и не читается.\n` +
+          'Прогони skill quality-gate заново либо удали маркер вручную, если правки не требуют проверки.'
+      ).catch(() => {});
+      return;
+    }
+
+    const mine = state.sessions?.[sessionId]?.files || {};
+    const files = Object.entries(mine);
+    if (files.length === 0) return;
+
+    // Отпечаток состава правок: новая правка меняет его и сбрасывает счётчик
+    // возвратов. На неизменный состав — не более MAX_REPROMPTS попыток.
+    const fingerprint = JSON.stringify(files.map(([f, v]) => [f, v.edits, v.lastEdit]).sort());
+    let entry = reprompts.get(sessionId);
+    if (!entry || entry.fingerprint !== fingerprint) entry = { fingerprint, count: 0 };
+    entry.count += 1;
+    reprompts.set(sessionId, entry);
+    if (reprompts.size > 200) {
+      // Долгоживущий процесс, карта не должна расти. Вытесняем чужие сессии —
+      // счётчик ТЕКУЩЕЙ сессии сбрасывать нельзя, иначе лимит возвратов обнулялся бы
+      // самой же уборкой.
+      for (const id of reprompts.keys()) {
+        if (reprompts.size <= 200) break;
+        if (id !== sessionId) reprompts.delete(id);
+      }
+    }
+
+    if (entry.count > MAX_REPROMPTS) {
+      // Первое превышение лимита — момент сдачи гейта: фиксируем в журнале,
+      // чтобы отказ от проверки был наблюдаемым фактом, а не тихим умолчанием.
+      if (entry.count === MAX_REPROMPTS + 1) journalSurrender(sessionId, files);
+      return;
+    }
+
+    const foreign = Object.entries(state.sessions || {})
+      .filter(([id]) => id !== sessionId)
+      .reduce((sum, [, s]) => sum + Object.keys(s.files || {}).length, 0);
+
+    await send(
+      core.blockMessage({
+        sessionId,
+        files,
+        foreign,
+        packageRoot,
+        mode: 'opencode',
+        repeated: entry.count,
+        maxReprompts: MAX_REPROMPTS,
+        passes: core.passesOf({ root, sessionId, env: stateEnv }),
+      })
+    ).catch(() => {});
+  };
+}
+
+/**
+ * Снимок состояния до команды оболочки. Общий для V1 (tool.execute.before) и V2
+ * (ctx.tool.hook("execute.before")): у версий различаются только формы события.
+ */
+function shellTrackBefore({ shell, root, shellCalls, callId, sessionId, args }) {
+  // Файла у команды нет: что она изменила, ядро (hooks/shell-core.mjs) выясняет
+  // по снимку до и после, как хук Claude Code gate-shell.mjs.
+  const command = String(args?.command || '');
+  const cwd = args?.workdir || root;
+  const key = shell.callKey({ id: callId, sessionId, command });
+  shellCalls.set(callId, { command, cwd, key });
+  shell.shellBefore({ root, cwd, command, key });
+}
+
+/**
+ * Взвод гейта по завершённой команде оболочки. Возвращает массив заметок для модели
+ * либо null, если вызов не отслеживался или взводить нечего.
+ */
+function shellTrackAfter({ shell, core, root, shellCalls, callId, sessionId, ensureConfig, readConfig, stateEnv, packageRoot }) {
+  const call = shellCalls.get(callId);
+  if (!call) return null;
+  shellCalls.delete(callId);
+  const { armed, blind } = shell.shellAfter({ root, ...call, sessionId, ensureConfig, readConfig, env: stateEnv });
+  const notes = [];
+  if (armed.length) {
+    notes.push(
+      '[изменено командой оболочки]\n' +
+        core.gateHint({
+          ...armed[0],
+          sessionId,
+          packageRoot,
+          mode: 'opencode',
+          passes: core.passesOf({ root, sessionId, env: stateEnv }),
+        })
+    );
+    if (armed.length > 1) notes.push('Также взведены:\n' + armed.slice(1).map((a) => `Файл: ${a.rel}`).join('\n'));
+    notes.push(core.disownLines({ sessionId, packageRoot }).join('\n'));
+  }
+  if (blind.length) notes.push('Гейт не смог посмотреть правки оболочки: ' + blind.join('; '));
+  return notes.length ? notes : null;
+}
+
+/**
+ * Взвод гейта по завершённой правке. Общий для V1 (tool.execute.after) и V2
+ * (ctx.tool.hook("execute.after")): у версий различаются только формы события.
+ * Возвращает подсказку для модели либо null, если правка не относится к 1С.
+ */
+function armAfterEdit({ core, ensureConfig, readConfig, stateEnv, root, packageRoot, pendingCalls, callId, sessionId, tool, args }) {
+  const file = pendingCalls.get(callId) || fileOfArgs(args);
+  pendingCalls.delete(callId);
+  if (!file) return null;
+
+  // Реагируем только на инструменты правки, как matcher исходного хука.
+  if (!EDIT_TOOLS.has(String(tool || '').toLowerCase())) return null;
+
+  const abs = isAbsolute(file) ? file : resolve(root, file);
+  const sid = String(sessionId || 'unknown-session');
+  const armed = core.armGate({
+    root,
+    filePath: abs,
+    sessionId: sid,
+    ensureConfig,
+    readConfig,
+    env: stateEnv,
+  });
+  if (!armed) return null;
+
+  return core.gateHint({
+    ...armed,
+    sessionId: sid,
+    packageRoot,
+    mode: 'opencode',
+    passes: core.passesOf({ root, sessionId: sid, env: stateEnv }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode V1: функция плагина, возвращающая объект хуков.
+// ---------------------------------------------------------------------------
+
+export const QualityGatePlugin = async ({ project, client, directory, worktree }) => {
+  // Корень проекта: рабочее дерево точнее (git worktree), иначе каталог запуска.
+  const root = worktree || directory || process.cwd();
+
+  // Каталог состояния: OpenCode держит его отдельно от Claude Code — .opencode/.state
+  // вместо .claude/.state (tools/state-dir.mjs). Значение вычисляется ОДИН раз и отсюда
+  // же уходит в оболочку агента хуком shell.env. Разойтись эти два пути не должны:
+  // взвод пошёл бы в один каталог, а снятие через gate.mjs — в другой, и гейт не
+  // снимался бы никогда. Значение пользователя уважается, если он задал его сам.
+  const stateEnv = { QG_STATE_DIR: process.env.QG_STATE_DIR || '.opencode/.state' };
+
+  // Корень пакета и ядро механики гейта. Если импорт не удался (пакет установлен
+  // частично), плагин молчит — ложный гейт хуже отсутствующего.
+  const packageRoot = resolvePackageRoot();
+  if (!packageRoot) return {};
+
+  const deps = await loadGateDeps(packageRoot);
+  if (!deps) return {};
+  const { core, stateDir, ensureConfig, readConfig, shell } = deps;
+
+  // Карта callID → путь файла: аргументы известны на before, взводим на after,
+  // когда правка фактически состоялась.
+  const pendingCalls = new Map();
+
+  // Карта callID → команда оболочки.
+  const shellCalls = new Map();
+
+  const handleIdle = createIdleGate({ root, core, stateDir, stateEnv, packageRoot });
 
   return {
     /**
@@ -218,11 +412,7 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
       try {
         if (String(input.tool || '').toLowerCase() === 'bash') {
           if (!shell) return;
-          const command = String(output?.args?.command || '');
-          const cwd = output?.args?.workdir || root;
-          const key = shell.callKey({ id: input.callID, sessionId: input.sessionID, command });
-          shellCalls.set(input.callID, { command, cwd, key });
-          shell.shellBefore({ root, cwd, command, key });
+          shellTrackBefore({ shell, root, shellCalls, callId: input.callID, sessionId: input.sessionID, args: output?.args });
           return;
         }
         const file = fileOfArgs(output?.args);
@@ -234,43 +424,40 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
 
     'tool.execute.after': async (input, output) => {
       try {
-        const call = shellCalls.get(input.callID);
-        if (call) {
-          shellCalls.delete(input.callID);
-          const sessionId = String(input.sessionID || 'unknown-session');
-          const { armed, blind } = shell.shellAfter({ root, ...call, sessionId, ensureConfig, readConfig, env: stateEnv });
-          const notes = [];
-          if (armed.length) {
-            notes.push('[изменено командой оболочки]\n' + core.gateHint({ ...armed[0], sessionId, packageRoot, mode: 'opencode', passes: core.passesOf({ root, sessionId, env: stateEnv }) }));
-            if (armed.length > 1) notes.push('Также взведены:\n' + armed.slice(1).map((a) => `Файл: ${a.rel}`).join('\n'));
-            notes.push(core.disownLines({ sessionId, packageRoot }).join('\n'));
-          }
-          if (blind.length) notes.push('Гейт не смог посмотреть правки оболочки: ' + blind.join('; '));
-          if (notes.length && output && typeof output.output === 'string') output.output += '\n\n' + notes.join('\n');
+        const notes = shell
+          ? shellTrackAfter({
+              shell,
+              core,
+              root,
+              shellCalls,
+              callId: input.callID,
+              sessionId: String(input.sessionID || 'unknown-session'),
+              ensureConfig,
+              readConfig,
+              stateEnv,
+              packageRoot,
+            })
+          : null;
+        if (notes) {
+          if (output && typeof output.output === 'string') output.output += '\n\n' + notes.join('\n');
           return;
         }
 
-        const file = pendingCalls.get(input.callID) || fileOfArgs(output?.args);
-        pendingCalls.delete(input.callID);
-        if (!file) return;
-
-        // Реагируем только на инструменты правки, как matcher исходного хука.
-        const tool = String(input.tool || '').toLowerCase();
-        if (!['write', 'edit', 'multiedit', 'patch', 'notebookedit'].includes(tool)) return;
-
-        const abs = isAbsolute(file) ? file : resolve(root, file);
-        const sessionId = String(input.sessionID || 'unknown-session');
-        const armed = core.armGate({
-          root,
-          filePath: abs,
-          sessionId,
+        const hint = armAfterEdit({
+          core,
           ensureConfig,
           readConfig,
-          env: stateEnv,
+          stateEnv,
+          root,
+          packageRoot,
+          pendingCalls,
+          callId: input.callID,
+          sessionId: input.sessionID,
+          tool: input.tool,
+          args: output?.args,
         });
-        if (!armed) return;
+        if (!hint) return;
 
-        const hint = core.gateHint({ ...armed, sessionId, packageRoot, mode: 'opencode', passes: core.passesOf({ root, sessionId, env: stateEnv }) });
         // Аналог additionalContext хука Claude Code: подсказка уходит модели вместе
         // с результатом инструмента — о взводе узнают немедленно, а не на паузе.
         if (output && typeof output.output === 'string') {
@@ -287,95 +474,12 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
         const sessionId = String(event?.properties?.sessionID || '');
         if (!sessionId) return;
 
-        // Итог снятого гейта — один раз: аналог systemMessage Stop-хука Claude Code.
-        const note = core.residualNote({ root, sessionId, env: stateEnv });
-        if (note) {
-          await client.session
-            // noReply: это уведомление, а не задание — без него модель отвечает ходом и может
-            // взяться за остаток, включая находки вне правки.
-            .prompt({ path: { id: sessionId }, body: { noReply: true, parts: [{ type: 'text', text: `[ГЕЙТ КАЧЕСТВА 1С] ${note}` }] } })
-            .catch(() => {});
-          return;
-        }
-
-        const state = core.readPendingState(root, stateEnv);
-        if (!state) return;
-
-        if (state.corrupt) {
-          await client.session
-            .prompt({
-              path: { id: sessionId },
-              body: {
-                parts: [
-                  {
-                    type: 'text',
-                    text:
-                      `[ГЕЙТ КАЧЕСТВА 1С]\nМаркер ${stateEnv.QG_STATE_DIR}/qg-pending.json повреждён и не читается.\n` +
-                      'Прогони skill quality-gate заново либо удали маркер вручную, если правки не требуют проверки.',
-                  },
-                ],
-              },
-            })
-            .catch(() => {});
-          return;
-        }
-
-        const mine = state.sessions?.[sessionId]?.files || {};
-        const files = Object.entries(mine);
-        if (files.length === 0) return;
-
-        // Отпечаток состава правок: новая правка меняет его и сбрасывает счётчик
-        // возвратов. На неизменный состав — не более MAX_REPROMPTS попыток.
-        const fingerprint = JSON.stringify(
-          files.map(([f, v]) => [f, v.edits, v.lastEdit]).sort()
-        );
-        let entry = reprompts.get(sessionId);
-        if (!entry || entry.fingerprint !== fingerprint) entry = { fingerprint, count: 0 };
-        entry.count += 1;
-        reprompts.set(sessionId, entry);
-        if (reprompts.size > 200) {
-          // Долгоживущий процесс, карта не должна расти. Вытесняем чужие сессии —
-          // счётчик ТЕКУЩЕЙ сессии сбрасывать нельзя, иначе лимит возвратов обнулялся бы
-          // самой же уборкой.
-          for (const id of reprompts.keys()) {
-            if (reprompts.size <= 200) break;
-            if (id !== sessionId) reprompts.delete(id);
-          }
-        }
-
-        if (entry.count > MAX_REPROMPTS) {
-          // Первое превышение лимита — момент сдачи гейта: фиксируем в журнале,
-          // чтобы отказ от проверки был наблюдаемым фактом, а не тихим умолчанием.
-          if (entry.count === MAX_REPROMPTS + 1) journalSurrender(sessionId, files);
-          return;
-        }
-
-        const foreign = Object.entries(state.sessions || {})
-          .filter(([id]) => id !== sessionId)
-          .reduce((sum, [, s]) => sum + Object.keys(s.files || {}).length, 0);
-
-        await client.session
-          .prompt({
+        await handleIdle(sessionId, (text, opts) =>
+          client.session.prompt({
             path: { id: sessionId },
-            body: {
-              parts: [
-                {
-                  type: 'text',
-                  text: core.blockMessage({
-                    sessionId,
-                    files,
-                    foreign,
-                    packageRoot,
-                    mode: 'opencode',
-                    repeated: entry.count,
-                    maxReprompts: MAX_REPROMPTS,
-                    passes: core.passesOf({ root, sessionId, env: stateEnv }),
-                  }),
-                },
-              ],
-            },
+            body: { ...(opts?.note ? { noReply: true } : {}), parts: [{ type: 'text', text }] },
           })
-          .catch(() => {});
+        );
       } catch {
         /* сбой плагина не должен запирать пользователя в сессии */
       }
@@ -383,4 +487,332 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
   };
 };
 
-export default QualityGatePlugin;
+// ---------------------------------------------------------------------------
+// OpenCode V2: setup(ctx) с регистрацией через домены контекста.
+// ---------------------------------------------------------------------------
+
+/**
+ * Дописывает подсказку о взводе в результат инструмента V2.
+ *
+ * V2 отдаёт результат как { content } со строкой или массивом частей (в отличие от
+ * строкового output V1). Дописываем в последнюю текстовую часть, а не заменяем массив
+ * целиком: смешанный контент (например, картинки) обязан пережить подсказку.
+ */
+function appendHintToResult(result, hint) {
+  if (!result || typeof result !== 'object') return;
+  const content = result.content;
+  if (typeof content === 'string') {
+    result.content = content + '\n\n' + hint;
+    return;
+  }
+  if (Array.isArray(content)) {
+    for (let i = content.length - 1; i >= 0; i--) {
+      const part = content[i];
+      if (part && part.type === 'text' && typeof part.text === 'string') {
+        content[i] = { ...part, text: part.text + '\n\n' + hint };
+        return;
+      }
+    }
+    content.push({ type: 'text', text: hint });
+    return;
+  }
+  // Результата без content не бывает у штатных инструментов правки, но если встретился —
+  // подсказку кладём в content, машиночитаемое output не трогаем.
+  if (typeof result.output === 'string') {
+    result.content = result.output + '\n\n' + hint;
+    return;
+  }
+  result.content = hint;
+}
+
+/**
+ * Регистрация с гашением ошибок и сбором disposer'ов. Каждый домен V2 регистрируется
+ * независимо: отказ одного (например, усечённый контекст TUI-процесса) не обязан
+ * выключать остальные.
+ */
+async function register(disposers, promise) {
+  try {
+    const reg = await promise;
+    if (reg && typeof reg.dispose === 'function') disposers.push(() => reg.dispose());
+  } catch {
+    /* неполная регистрация лучше сломанной конфигурации */
+  }
+}
+
+async function setup(ctx) {
+  // Корень проекта: каталог загрузки плагина; canonical — запасной вариант.
+  const root = ctx?.location?.directory || ctx?.location?.project?.canonical || process.cwd();
+
+  const stateEnv = { QG_STATE_DIR: process.env.QG_STATE_DIR || '.opencode/.state' };
+
+  const packageRoot = resolvePackageRoot();
+  if (!packageRoot) return;
+
+  const deps = await loadGateDeps(packageRoot);
+  if (!deps) return;
+  const { core, stateDir, ensureConfig, readConfig, shell } = deps;
+
+  const pendingCalls = new Map();
+  const shellCalls = new Map();
+  const handleIdle = createIdleGate({ root, core, stateDir, stateEnv, packageRoot });
+  const disposers = [];
+
+  // ── Навыки ──
+  // Снимок состава читается ДО регистрации трансформа: колбэк синхронный, а трансформы
+  // переигрываются при каждой перестройке реестра. Своё имя сильнее нашего.
+  await register(
+    disposers,
+    (async () => {
+      if (typeof ctx.skill?.transform !== 'function') return undefined;
+      const skills = skillsFrom(join(packageRoot, 'skills'));
+      if (!skills.length) return undefined;
+      return ctx.skill.transform((editor) => {
+        if (typeof editor.add !== 'function') return;
+        for (const info of skills) {
+          if (editor.get?.(info.id) !== undefined) continue;
+          editor.add(info);
+        }
+      });
+    })()
+  );
+
+  // ── Команды /gate, /gate-status ──
+  // В V2 у команды нет template: editor.add принимает { name, description, execute },
+  // а execute сам отправляет промпт в сессию. Шаблоном остаётся тело markdown-файла
+  // из opencode/commands/ — тот же источник, что у V1.
+  await register(
+    disposers,
+    (async () => {
+      if (typeof ctx.command?.transform !== 'function') return undefined;
+      const defs = commandsFrom(join(packageRoot, 'opencode', 'commands'));
+      if (!defs.length) return undefined;
+      let known = new Set();
+      try {
+        const listed = await ctx.command.list();
+        const arr = Array.isArray(listed) ? listed : listed?.data;
+        if (Array.isArray(arr)) known = new Set(arr.map((c) => c?.name).filter(Boolean));
+      } catch {
+        /* недоступный список — не повод не регистрироваться */
+      }
+      return ctx.command.transform((editor) => {
+        if (typeof editor.add !== 'function') return;
+        for (const [name, def] of defs) {
+          if (known.has(name)) continue;
+          try {
+            editor.add({
+              name,
+              ...(typeof def.description === 'string' ? { description: def.description } : {}),
+              execute: async ({ sessionID, prompt, delivery }) => {
+                // Тело команды использует $ARGUMENTS; в V2 аргументы приходят в prompt.text.
+                const args = typeof prompt?.text === 'string' ? prompt.text.trim() : '';
+                const text = String(def.template).split('$ARGUMENTS').join(args);
+                await ctx.session.prompt({ sessionID, text, ...(delivery ? { delivery } : {}) });
+              },
+            });
+          } catch {
+            /* одна битая команда не отменяет остальные */
+          }
+        }
+      });
+    })()
+  );
+
+  // ── Субагенты ──
+  // Источник один — agents/ в корне пакета (тот же, что у Claude Code). У редактора
+  // агентов V2 нет add: запись создаётся через update(name, fn) — так же, как это
+  // делают другие плагины, поставляющие свои агенты. Своё имя сильнее нашего.
+  await register(
+    disposers,
+    (async () => {
+      if (typeof ctx.agent?.transform !== 'function') return undefined;
+      const defs = agentsV2From(join(packageRoot, 'agents'));
+      if (!defs.length) return undefined;
+      return ctx.agent.transform((editor) => {
+        for (const [name, def] of defs) {
+          if (editor.get?.(name) !== undefined) continue;
+          editor.update(name, (agent) => {
+            agent.id = name;
+            agent.name = name;
+            agent.mode = def.mode;
+            agent.hidden = false;
+            if (def.description !== undefined) agent.description = def.description;
+            agent.system = def.system;
+            agent.permissions = def.permissions.map((r) => ({ ...r }));
+          });
+        }
+      });
+    })()
+  );
+
+  // ── MCP-сервер стандартов v8std ──
+  await register(
+    disposers,
+    (async () => {
+      if (typeof ctx.mcp?.transform !== 'function') return undefined;
+      return ctx.mcp.transform((editor) => {
+        if (editor.get?.('v8std') !== undefined) return;
+        editor.set('v8std', { ...V8STD_MCP_V2 });
+      });
+    })()
+  );
+
+  // ── Окружение оболочки ──
+  // V1-хук shell.env в V2 — shell.hook("create.before") с изменяемым event.env.
+  // Смысл тот же: инструменты пакета запускает агент из оболочки, и корень пакета,
+  // корень проекта и каталог состояния он обязан получить готовыми. Заданное
+  // пользователем не перекрываем.
+  await register(
+    disposers,
+    (async () => {
+      if (typeof ctx.shell?.hook !== 'function') return undefined;
+      return ctx.shell.hook('create.before', (event) => {
+        try {
+          if (!event || typeof event.env !== 'object' || event.env === null) return;
+          if (!event.env.QG_ROOT) event.env.QG_ROOT = packageRoot;
+          if (!event.env.QG_PROJECT_DIR) event.env.QG_PROJECT_DIR = root;
+          if (!event.env.QG_STATE_DIR) event.env.QG_STATE_DIR = stateEnv.QG_STATE_DIR;
+        } catch {
+          /* окружение не обязано ломать запуск оболочки */
+        }
+      });
+    })()
+  );
+
+  // ── Взвод гейта ──
+  await register(
+    disposers,
+    (async () => {
+      if (typeof ctx.tool?.hook !== 'function') return undefined;
+      return ctx.tool.hook('execute.before', (event) => {
+        try {
+          // Аргументы вызова в V2 — event.input (одно изменяемое событие вместо
+          // пары input/output из V1); идентификатор вызова — event.id.
+          if (String(event?.tool || '').toLowerCase() === 'bash') {
+            if (!shell) return;
+            shellTrackBefore({ shell, root, shellCalls, callId: event.id, sessionId: event.sessionID, args: event.input });
+            return;
+          }
+          const file = fileOfArgs(event?.input);
+          if (file) pendingCalls.set(event.id, file);
+        } catch {
+          /* никогда не ломаем вызов инструмента */
+        }
+      });
+    })()
+  );
+
+  await register(
+    disposers,
+    (async () => {
+      if (typeof ctx.tool?.hook !== 'function') return undefined;
+      return ctx.tool.hook('execute.after', (event) => {
+        try {
+          // Взводим только на успешном вызове: у провалившегося правки не было.
+          if (event?.status !== 'completed') return;
+          const sessionId = String(event.sessionID || 'unknown-session');
+
+          if (shell) {
+            const notes = shellTrackAfter({
+              shell,
+              core,
+              root,
+              shellCalls,
+              callId: event.id,
+              sessionId,
+              ensureConfig,
+              readConfig,
+              stateEnv,
+              packageRoot,
+            });
+            if (notes) {
+              appendHintToResult(event.result, notes.join('\n'));
+              return;
+            }
+          }
+
+          const hint = armAfterEdit({
+            core,
+            ensureConfig,
+            readConfig,
+            stateEnv,
+            root,
+            packageRoot,
+            pendingCalls,
+            callId: event.id,
+            sessionId,
+            tool: event.tool,
+            args: event.input,
+          });
+          if (!hint) return;
+          appendHintToResult(event.result, hint);
+        } catch {
+          /* гейт качества никогда не ломает работу пользователя */
+        }
+      });
+    })()
+  );
+
+  // ── Мягкий гейт на паузе сессии ──
+  // В V2 нет потокового session.idle: жизненный цикл приходит durable-событиями
+  // session.execution.*, и завершение прогона — session.execution.succeeded
+  // (payload под ключом data; properties — устаревшее написание). failed/interrupted
+  // не считаем паузой: прерванный прогон — это пользователь сам остановил работу,
+  // а не агент собрался завершать. session.idle тоже принимаем — встроенные клиенты
+  // V2 могут синтезировать его для совместимости.
+  if (typeof ctx?.event?.subscribe === 'function' && typeof ctx?.session?.prompt === 'function') {
+    const controller = new AbortController();
+    disposers.push(() => controller.abort());
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          try {
+            const type = event?.type;
+            let sessionId = null;
+            if (type === 'session.idle' || type === 'session.execution.succeeded') {
+              sessionId = event?.data?.sessionID ?? event?.properties?.sessionID;
+            }
+            if (!sessionId) continue;
+            const id = String(sessionId);
+            await handleIdle(id, (text, opts) =>
+              ctx.session.prompt({ sessionID: id, text, ...(opts?.note ? { noReply: true } : {}) })
+            );
+          } catch {
+            /* одно битое событие не останавливает поток */
+          }
+        }
+      } catch {
+        /* конец потока или abort — штатное завершение */
+      }
+    })();
+  }
+
+  // Загрузка, не зарегистрировавшая НИЧЕГО, неотличима от успешной снаружи —
+  // оставляем наблюдаемый след, как это делает journalSurrender для гейта.
+  if (disposers.length === 0) {
+    console.error(
+      '[1c-quality-gate] ВНИМАНИЕ: плагин загрузился, но не зарегистрировал ни одного ' +
+        'расширения (усечённый контекст хоста?). Гейт не работает.'
+    );
+  }
+
+  return () => {
+    for (const dispose of disposers) {
+      try {
+        dispose();
+      } catch {
+        /* выгрузка не обязана падать из-за одного disposer'а */
+      }
+    }
+  };
+}
+
+/**
+ * Точка входа для обеих версий. V2 читает id и setup; V1 (>= 1.18.29) вызывает
+ * server(). Именованный экспорт QualityGatePlugin оставлен для старых загрузчиков
+ * и тестов V1.
+ */
+export default {
+  id: '1c-quality-gate',
+  server: QualityGatePlugin,
+  setup,
+};
