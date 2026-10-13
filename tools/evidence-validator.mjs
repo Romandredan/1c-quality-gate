@@ -773,7 +773,8 @@ export function validate(text, { gate = false, root = null, session = null } = {
   // назначенный уровень 3 закрыли одной самодельной записью («правка маленькая, сверил сам»),
   // и повторная проверка архитектуры после исправления на деле не шла. Список проверок — из
   // реестра (SCOPES, layer=arch), своей копии нет. Пропуск всего контура записью без scope —
-  // тоже отчёт: причина названа. Переходное окно (docs/RELEASING.md): сейчас предупреждение.
+  // тоже отчёт: причина названа. Окно открыто в v3.17.0 предупреждением, закрыто в v3.18.0
+  // ошибкой (docs/RELEASING.md). Проверка только строгого режима: обычный линт её не делает.
   const archLevel = scopes.length === 1 ? (String(scopes[0].fields.resolved || '').match(/(?:^|\|)arch:(\d+)/) || [])[1] : null;
   const archWhollySkipped = records.some((r) => r.type === 'skipped' && r.fields.layer === 'arch' && !r.fields.scope);
   if (archLevel && !archWhollySkipped) {
@@ -783,11 +784,11 @@ export function validate(text, { gate = false, root = null, session = null } = {
     const missingArch = Object.keys(SCOPES).filter((s) => SCOPES[s].layer === 'arch' && !closedArch.has(s));
     if (missingArch.length) {
       add(
-        'warn',
+        'error',
         scopes[0].line,
         `контур arch назначен на уровне ${archLevel}, но о проверках ${missingArch.join(', ')} не заявлено: нужна запись ` +
           '[qg applied: layer=arch, scope=<проверка>, ...] либо [qg skipped: layer=arch, scope=<проверка>, reason=...] — их пишет ' +
-          'навык bsl-architecture-review. Со следующего выпуска это станет ошибкой'
+          'навык bsl-architecture-review'
       );
     }
   }

@@ -8385,7 +8385,7 @@ section('gate.mjs run — инструментальная фаза одним �
 // Контур arch отчитывается по каждой своей проверке. A/B v3.17.0: назначенный run уровень 3
 // субагент закрыл одной самодельной записью («правка маленькая, сверил сам»), и валидатор её
 // пропустил — повторная проверка архитектуры после исправления на деле не шла. Переходное окно
-// (docs/RELEASING.md): в этом выпуске — предупреждение, со следующего — ошибка.
+// открыто в v3.17.0 предупреждением строгого режима и закрыто в v3.18.0 ошибкой.
 {
   const { validate } = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
   const { SCOPES } = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-scopes.mjs')).href);
@@ -8396,9 +8396,10 @@ section('gate.mjs run — инструментальная фаза одним �
   const base = readFileSync(ev('valid.md'), 'utf8').replace('arch:skip', 'arch:3').replace('[qg skipped: layer=arch, reason=volume_below_threshold]\n', '');
   const one = base + '[qg applied: layer=arch, scope=module-responsibility, ids=[qg:ARCH-A1], verdict=clean]\n';
   const w1 = validate(one, { gate: true, root: empty }).problems.filter((p) => /контур arch/.test(p.message));
-  check('контур arch с одной записью из трёх — предупреждение с именами пропущенных проверок',
-    w1.length === 1 && w1[0].severity === 'warn' && /branching-dispatch/.test(w1[0].message) && /call-graph-signs/.test(w1[0].message) && /станет ошибкой/.test(w1[0].message),
+  check('контур arch с одной записью из трёх в строгом режиме — ошибка с именами пропущенных проверок',
+    w1.length === 1 && w1[0].severity === 'error' && /branching-dispatch/.test(w1[0].message) && /call-graph-signs/.test(w1[0].message) && !/станет ошибкой/.test(w1[0].message),
     JSON.stringify(w1));
+  check('след с незакрытым контуром arch отвергается строгим режимом', validate(one, { gate: true, root: empty }).exitCode === 2);
   const all = base + archScopes.map((s, i) => (i === archScopes.length - 1
     ? `[qg skipped: layer=arch, scope=${s}, reason=stale_or_unavailable_index]\n`
     : `[qg applied: layer=arch, scope=${s}, ids=[qg:ARCH-A1], verdict=clean]\n`)).join('');
