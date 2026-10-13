@@ -8,7 +8,18 @@ skill `skills/quality-gate`. Различаются способ взвода, �
 
 ## Установка
 
-Одна строка в `opencode.json` проекта (или в `~/.config/opencode/opencode.json`):
+Одна строка в `opencode.json` проекта (или в `~/.config/opencode/opencode.json`).
+
+OpenCode 2.x — поле `plugins`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["1c-quality-gate@git+https://github.com/Romandredan/1c-quality-gate.git#v3.17.0"]
+}
+```
+
+OpenCode 1.x (начиная с 1.18.29) — поле `plugin`:
 
 ```json
 {
@@ -16,6 +27,11 @@ skill `skills/quality-gate`. Различаются способ взвода, �
   "plugin": ["1c-quality-gate@git+https://github.com/Romandredan/1c-quality-gate.git#v3.18.0"]
 }
 ```
+
+**Две версии — один плагин.** Точка входа `opencode/plugin/quality-gate.js` экспортирует
+оба интерфейса: V2 читает `id` и `setup(ctx)`, V1 вызывает функцию-плагин (`server`).
+Механика гейта общая; различается только способ регистрации состава и подписки на события
+(см. таблицу ниже и раздел «Почему гейт в OpenCode мягкий»).
 
 Перезапустите OpenCode — пакет установится сам и попадёт в кэш
 `~/.cache/opencode/packages/`. Проверка: `/gate-status` отвечает «Гейт не взведён».
@@ -28,12 +44,13 @@ skill `skills/quality-gate`. Различаются способ взвода, �
 Копировать в проект нечего: состав объявляется самим плагином в живой конфигурации
 (хук `config`), а инструменты находит агент по переменной `QG_ROOT` (хук `shell.env`).
 
-| Что регистрируется | Как |
-|---|---|
-| навыки контуров и `shared/` | `config.skills.paths` — каталог `skills/` внутри пакета |
-| команды `/gate`, `/gate-status` | `config.command`, тело файла становится `template` |
-| субагенты — все файлы каталога `agents/` | `config.agent` из общего каталога `agents/`, тело файла становится `prompt` |
-| MCP-сервер стандартов `v8std` | `config.mcp` |
+| Что регистрируется | V1 (OpenCode 1.x) | V2 (OpenCode 2.x) |
+|---|---|---|
+| навыки контуров и `shared/` | `config.skills.paths` — каталог `skills/` внутри пакета | `ctx.skill.transform` — `editor.add` с абсолютным путём к SKILL.md |
+| команды `/gate`, `/gate-status` | `config.command`, тело файла становится `template` | `ctx.command.transform` — `execute` отправляет шаблон в сессию, `$ARGUMENTS` подставляется из `prompt.text` |
+| субагенты — все файлы каталога `agents/` | `config.agent` из общего каталога `agents/`, тело файла становится `prompt` | `ctx.agent.transform` — `editor.update`; права инструментов переносятся в правила `permissions` (last-match-wins: база `allow *` первой, отказы после неё) |
+| MCP-сервер стандартов `v8std` | `config.mcp` | `ctx.mcp.transform` (`editor.set`) |
+| окружение оболочки (`QG_ROOT`, `QG_PROJECT_DIR`, `QG_STATE_DIR`) | хук `shell.env` | `ctx.shell.hook('create.before')` — заданное пользователем не перекрывается |
 
 Своё имя всегда сильнее: запись пользователя с тем же именем плагин не перекрывает.
 
@@ -104,9 +121,13 @@ OpenCode по умолчанию этого не позволяет. Прове�
 ## Почему гейт в OpenCode мягкий
 
 У OpenCode нет механизма, которым плагин мог бы запретить завершение сессии. Вместо
-блокировки плагин ловит событие `session.idle` и отправляет агенту новое сообщение со
-списком непроверенных правок — агент продолжает работу и прогоняет проверку. Пользователь
-всегда может прервать сессию вручную: гейт настойчив, но не запирает.
+блокировки плагин ловит событие `session.idle` (в V2 — durable-событие
+`session.execution.succeeded` из `ctx.event.subscribe`; `session.idle` принимается тоже,
+встроенные клиенты V2 могут синтезировать его для совместимости) и отправляет агенту новое
+сообщение со списком непроверенных правок — агент продолжает работу и прогоняет проверку.
+Прерванный прогон (`session.execution.interrupted`, `failed`) возврата не даёт: это
+пользователь сам остановил работу, а не агент собрался завершать. Пользователь всегда может
+прервать сессию вручную: гейт настойчив, но не запирает.
 
 Чтобы цикл «idle → возврат» не превращался в бесконечный спам, на неизменный состав правок
 даётся не более трёх автоматических возвратов (`MAX_REPROMPTS` в
