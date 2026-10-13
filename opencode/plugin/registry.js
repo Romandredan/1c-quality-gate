@@ -189,3 +189,109 @@ export function agentsFrom(dir) {
       return [name, def];
     });
 }
+
+
+// ---------------------------------------------------------------------------
+// OpenCode 2: те же источники, но формы V2 API (трансформы доменов вместо
+// правки живой конфигурации). V1-функции выше не трогаем: на них завязан
+// хук `config` плагина и тесты V1.
+// ---------------------------------------------------------------------------
+
+/**
+ * Навыки пакета в форме `Skill.Info` V2 (`ctx.skill.transform` → `editor.add`).
+ *
+ * `path` обязан быть абсолютным: навык лежит в кэше пакета, и справочники из
+ * `references/` разрешаются относительно SKILL.md — относительный путь оборвал бы
+ * их загрузку. `content` — тело файла целиком, включая frontmatter: так делает сам
+ * загрузчик OpenCode при файловом обнаружении.
+ */
+export function skillsFrom(dir) {
+  if (!dir || !existsSync(dir)) return [];
+  const out = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const file = join(dir, entry.name, 'SKILL.md');
+    if (!existsSync(file)) continue;
+    let content;
+    try {
+      content = readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    // Без description навык не рекламируется модели — а весь смысл поставки в том,
+    // чтобы модель находила контур сама. Неразобранный frontmatter пропускает навык
+    // целиком: зарегистрировать его без описания хуже, чем не зарегистрировать —
+    // тест состава покраснеет, а не сработает тихая деградация.
+    const parsed = parseFrontmatter(content);
+    if (!parsed || typeof parsed.data.description !== 'string' || !parsed.data.description) continue;
+    out.push({
+      id: entry.name,
+      name: typeof parsed.data.name === 'string' ? parsed.data.name : entry.name,
+      description: parsed.data.description,
+      path: file,
+      content,
+    });
+  }
+  return out;
+}
+
+/**
+ * Соответствие ключей инструментов пакета действиям (`action`) правил V2.
+ * `bash` в V2 — `execute` (старое имя тоже признаётся, закрываем оба);
+ * `write`+`patch` в V2 — единое `edit`.
+ */
+const TOOL_ACTIONS = {
+  skill: ['skill'],
+  read: ['read'],
+  grep: ['grep'],
+  glob: ['glob'],
+  bash: ['execute', 'bash'],
+  write: ['write'],
+  edit: ['edit', 'patch'],
+  task: ['task'],
+};
+
+/**
+ * Субагенты пакета в форме для `ctx.agent.transform` V2.
+ *
+ * Отличия от V1-перевода (agentsFrom):
+ *   - тело файла становится `system`, а не `prompt`;
+ *   - карта булевых инструментов становится упорядоченным массивом `permissions`.
+ *     Оценка правил в V2 — last-match-wins, поэтому разрешающая база `*` идёт ПЕРВОЙ,
+ *     а отказы по непредоставленным инструментам — после неё: неперечисленные
+ *     инструменты (MCP и прочие) остаются разрешёнными, как и в V1-карте, где
+ *     неупомянутый инструмент разрешён, а явные запреты базу перебивают.
+ *   - ключей `model`/`color`/`name` из frontmatter Claude Code здесь тоже нет —
+ *     по тем же причинам, что в agentsFrom.
+ *
+ * Возвращает пары [имя, определение]; применение к редактору — на стороне плагина,
+ * потому что редактор V2 изменяет запись через update(name, fn), а не принимает объект.
+ */
+export function agentsV2From(dir) {
+  return entries(dir)
+    .filter(([, p]) => p.body)
+    .map(([name, p]) => {
+      const keysOf = (list) =>
+        new Set(
+          String(list || '')
+            .split(',')
+            .map((t) => TOOL_NAMES[t.trim().toLowerCase()])
+            .filter(Boolean)
+        );
+      // Та же семантика, что в agentsFrom: закрытый список `tools` либо список
+      // запретов `disallowedTools`.
+      const denyOnly = !p.data.tools && p.data.disallowedTools;
+      const listed = keysOf(denyOnly ? p.data.disallowedTools : p.data.tools);
+      const granted = new Set(TOOL_KEYS.filter((k) => (denyOnly ? !listed.has(k) : listed.has(k))));
+
+      const rules = [{ action: '*', resource: '*', effect: 'allow' }];
+      for (const k of TOOL_KEYS) {
+        for (const action of TOOL_ACTIONS[k]) {
+          rules.push({ action, resource: '*', effect: granted.has(k) ? 'allow' : 'deny' });
+        }
+      }
+      const def = { mode: 'subagent', system: p.body, permissions: rules };
+      if (p.data.description !== undefined) def.description = p.data.description;
+      return [name, def];
+    });
+}
