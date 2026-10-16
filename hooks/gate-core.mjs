@@ -493,9 +493,11 @@ export function runnerType({ packageRoot, mode = 'claude' }) {
  * пересказ скатывается в «сделал хорошо». Служебные значения подставляет хук — модель их не
  * ищет и не может перепутать сессию.
  */
-export function handoffLines({ sessionId, packageRoot, mode = 'claude', passes = 0 }) {
+export function handoffLines({ sessionId, packageRoot, mode = 'claude', passes = 0, subagentTool = null }) {
   const qg = String(packageRoot).split(sep).join('/');
-  const tool = mode === 'claude' ? 'Agent' : 'task';
+  // Имя инструмента запуска субагентов зависит от версии хоста: OpenCode 1.x — task, 2.x — subagent.
+  // Плагин, знающий свой хост, передаёт имя явно; без него остаётся название по харнессу.
+  const tool = subagentTool || (mode === 'claude' ? 'Agent' : 'task');
   const fallback =
     mode === 'claude' ? 'прогони Skill: quality-gate сам' : 'вызови skill `quality-gate` сам: skill({ name: "quality-gate" })';
   return [
@@ -647,7 +649,7 @@ export function gateHint({ kind, rel, sessionId = null, created = null, outside 
  * mode: 'opencode' — мягкий возврат к работе на session.idle; repeated — номер
  * автоматического возврата из maxReprompts.
  */
-export function blockMessage({ sessionId, files, foreign = 0, packageRoot, mode = 'claude', repeated = 0, maxReprompts = 3, passes = 0 }) {
+export function blockMessage({ sessionId, files, foreign = 0, packageRoot, mode = 'claude', repeated = 0, maxReprompts = 3, passes = 0, subagentTool = null }) {
   const bsl = files.filter(([, v]) => v.kind === 'bsl').map(([k]) => k);
   const xml = files.filter(([, v]) => v.kind === 'metadata-xml').map(([k]) => k);
   const toolPath = (name) => join(packageRoot, 'tools', name).replace(/\\/g, '/');
@@ -685,7 +687,7 @@ export function blockMessage({ sessionId, files, foreign = 0, packageRoot, mode 
 
   lines.push(
     '',
-    ...handoffLines({ sessionId, packageRoot, mode, passes }),
+    ...handoffLines({ sessionId, packageRoot, mode, passes, subagentTool }),
     '',
     'Правка действительно не требует проверки (комментарий, опечатка) — сними гейт явно, с причиной:',
     `  node "${toolPath('gate.mjs')}" release --session ${sessionId} --class C0 --reason "<почему>"`,

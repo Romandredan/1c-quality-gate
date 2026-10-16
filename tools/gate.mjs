@@ -1893,7 +1893,9 @@ function cmdHandoff(args) {
   }
   // Каталог состояния OpenCode задаёт его плагин через окружение оболочки — по нему и режим.
   const mode = args.mode === 'opencode' || (args.mode !== 'claude' && process.env.QG_STATE_DIR) ? 'opencode' : 'claude';
-  process.stdout.write(handoffLines({ sessionId, packageRoot: dirname(HERE), mode, passes: passCount(state.sessions[sessionId]) }).join('\n') + '\n');
+  // Имя инструмента запуска субагентов плагин OpenCode 2.x сообщает через окружение оболочки.
+  const subagentTool = /^[a-z_]{1,32}$/.test(process.env.QG_SUBAGENT_TOOL || '') ? process.env.QG_SUBAGENT_TOOL : null;
+  process.stdout.write(handoffLines({ sessionId, packageRoot: dirname(HERE), mode, passes: passCount(state.sessions[sessionId]), subagentTool }).join('\n') + '\n');
   return 0;
 }
 
