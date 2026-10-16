@@ -144,9 +144,45 @@ function makeCtx(root) {
   return ctx;
 }
 
-async function callTool(ctx, { id, tool, input, result, status = 'completed' }) {
-  for (const h of ctx.__toolHooks['execute.before']) await h({ tool, sessionID: 's1', id, input });
-  for (const h of ctx.__toolHooks['execute.after']) await h({ tool, sessionID: 's1', id, input, status, result });
+/**
+ * Вызов инструмента через зарегистрированные хуки. Событие execute.after собирается в
+ * форме типов V2: при status "completed" — result, при "error" — error без result.
+ * Возвращается именно оно: плагин вправе подменить event.result, и проверять нужно его.
+ */
+async function callTool(ctx, { id, tool, input, result, status = 'completed', sessionID = 's1' }) {
+  for (const h of ctx.__toolHooks['execute.before']) await h({ tool, sessionID, id, input });
+  const ev =
+    status === 'error'
+      ? { tool, sessionID, id, input, status, error: { message: 'сбой' } }
+      : { tool, sessionID, id, input, status, result };
+  for (const h of ctx.__toolHooks['execute.after']) await h(ev);
+  return ev;
+}
+
+/** ctx с наружным доступом к хукам инструментов; плагин уже подключён. */
+async function setupHooked(rootDir) {
+  const c = makeCtx(rootDir);
+  const hooks = { 'execute.before': [], 'execute.after': [] };
+  c.tool.hook = async (name, cb) => { hooks[name].push(cb); return { dispose: async () => {} }; };
+  c.__toolHooks = hooks;
+  const cleanup = await mod.default.setup(c);
+  return { c, cleanup };
+}
+
+/** Поток событий по массиву: новые элементы, добавленные в массив позже, тоже читаются. */
+function feed(arr) {
+  let i = 0;
+  return {
+    [Symbol.asyncIterator]() {
+      return {
+        next: () =>
+          new Promise((resolve) => {
+            const t = () => (i < arr.length ? resolve({ value: arr[i++], done: false }) : setTimeout(t, 5));
+            t();
+          }),
+      };
+    },
+  };
 }
 
 const root = mkdtempSync(join(tmpdir(), 'qg-oc2-test-'));
@@ -192,11 +228,29 @@ const allowAll = rules.find((r) => r.action === '*' && r.effect === 'allow');
 check('читатель закрыт от правки правилом deny edit', !!denyEdit);
 check('разрешающая база стоит ПЕРЕД отказами (last-match-wins)',
   allowAll && denyEdit && rules.indexOf(allowAll) < rules.indexOf(denyEdit));
+
+// Действие правила в V2 равно имени инструмента (shell, subagent, skill, grep, glob, read),
+// а write, edit и patch запрашивают одно действие `edit` (packages/core/src/tool/plugin/*.ts
+// в OpenCode). Проверяем итог по last-match-wins, а не наличие отдельных строк: именно он
+// решает, откроет ли OpenCode инструмент агенту.
+const effective = (agent, action) => {
+  let verdict = null;
+  for (const r of agent?.permissions || []) if (r.action === '*' || r.action === action) verdict = r.effect;
+  return verdict;
+};
 const verifier = ctx2raw.agents.get('bsl-verifier');
-check('верификатору разрешён shell (execute), закрыта правка',
-  rules.length > 0 &&
-  !!verifier?.permissions?.find((r) => r.action === 'execute' && r.effect === 'allow') &&
-  !!verifier?.permissions?.find((r) => r.action === 'edit' && r.effect === 'deny'));
+check('верификатору разрешён shell, закрыты правка и запуск субагентов',
+  effective(verifier, 'shell') === 'allow' && effective(verifier, 'edit') === 'deny' && effective(verifier, 'subagent') === 'deny');
+check('читатель закрыт от shell и субагентов (запреты Bash и Agent действуют)',
+  effective(scout, 'shell') === 'deny' && effective(scout, 'subagent') === 'deny');
+const gateRunner = ctx2raw.agents.get('gate-runner');
+check('исполнитель гейта может писать отчёт: Write открыт, значит действие edit открыто',
+  effective(gateRunner, 'edit') === 'allow');
+check('исполнитель гейта запускает субагентов контуров и оболочку',
+  effective(gateRunner, 'subagent') === 'allow' && effective(gateRunner, 'shell') === 'allow');
+const xmlRunner = ctx2raw.agents.get('xml-runner');
+check('закрытый список tools: неперечисленное закрыто, перечисленное открыто',
+  effective(xmlRunner, 'edit') === 'deny' && effective(xmlRunner, 'subagent') === 'deny' && effective(xmlRunner, 'shell') === 'allow');
 
 check('MCP v8std зарегистрирован как remote', ctx2raw.mcpServers.get('v8std')?.type === 'remote' && ctx2raw.mcpServers.get('v8std')?.url?.includes('v8std'));
 
@@ -217,6 +271,7 @@ check('записи пользователя не перекрываются',
   for (const h of shellHooks2) await h({ env, command: 'x', cwd: root, timeout: 1, shell: 'sh' });
   check('create.before отдаёт QG_ROOT на корень пакета', existsSync(join(env.QG_ROOT || '', 'hooks', 'gate-core.mjs')));
   check('create.before отдаёт QG_PROJECT_DIR и QG_STATE_DIR', env.QG_PROJECT_DIR === root && env.QG_STATE_DIR === '.opencode/.state');
+  check('create.before сообщает имя инструмента запуска субагентов V2', env.QG_SUBAGENT_TOOL === 'subagent');
   const preset = { QG_ROOT: '/своё', QG_PROJECT_DIR: '/своё', QG_STATE_DIR: 'своё' };
   for (const h of shellHooks2) await h({ env: preset });
   check('заданное пользователем окружение не перекрывается', preset.QG_ROOT === '/своё' && preset.QG_STATE_DIR === 'своё');
@@ -227,31 +282,125 @@ const bslPath = join(root, 'CommonModules', 'Модуль', 'Module.bsl');
 mkdirSync(join(root, 'CommonModules', 'Модуль'), { recursive: true });
 writeFileSync(bslPath, 'Процедура Тест() КонецПроцедуры\n', 'utf8');
 
-const result = { content: 'файл записан' };
-await callTool(ctx2raw, { id: 'c1', tool: 'write', input: { filePath: bslPath }, result });
+const ev1 = await callTool(ctx2raw, { id: 'c1', tool: 'write', input: { path: bslPath }, result: { content: 'файл записан' } });
 
 const pendingPath = join(root, '.opencode', '.state', 'qg-pending.json');
 check('правка .bsl взвела гейт в .opencode/.state', existsSync(pendingPath));
-check('подсказка дописана в строковый content', typeof result.content === 'string' && result.content.includes('QUALITY GATE'));
+check('подсказка дописана в строковый content новым result (документированный способ V2)',
+  typeof ev1.result.content === 'string' && ev1.result.content.includes('QUALITY GATE') && ev1.result.content.startsWith('файл записан'));
 
 // Результат частями: подсказка уходит в последнюю текстовую часть, прочее не трогается.
 const img = { type: 'image', data: '…' };
-const partsResult = { content: [{ type: 'text', text: 'часть 1' }, img] };
+const frozenParts = Object.freeze([Object.freeze({ type: 'text', text: 'часть 1' }), img]);
 writeFileSync(bslPath, 'Процедура Тест2() КонецПроцедуры\n', 'utf8');
-await callTool(ctx2raw, { id: 'c2', tool: 'edit', input: { filePath: bslPath }, result: partsResult });
-check('подсказка в текстовой части, нетекстовые части целы',
-  partsResult.content[0].text.includes('QUALITY GATE') && partsResult.content[1] === img);
+// Результат и его части заморожены (в типах V2 они readonly): правка на месте упала бы,
+// подмена event.result — документированный способ — нет.
+const ev2 = await callTool(ctx2raw, { id: 'c2', tool: 'edit', input: { path: bslPath }, result: Object.freeze({ content: frozenParts }) });
+check('подсказка в текстовой части, нетекстовые части целы, исходный результат не тронут',
+  ev2.result.content[0].text.includes('QUALITY GATE') && ev2.result.content[1] === img && frozenParts[0].text === 'часть 1');
 
 // Провалившийся вызов гейт не взводит.
 const markerBefore = readFileSync(pendingPath, 'utf8');
-await callTool(ctx2raw, { id: 'c3', tool: 'write', input: { filePath: join(root, 'CommonModules', 'Модуль', 'Module.bsl') }, result: {}, status: 'error' });
+await callTool(ctx2raw, { id: 'c3', tool: 'write', input: { path: join(root, 'CommonModules', 'Модуль', 'Module.bsl') }, result: {}, status: 'error' });
 check('error-статус гейт не взводит', readFileSync(pendingPath, 'utf8') === markerBefore);
 
 // Чтение и нецелевые файлы гейт не трогают.
-await callTool(ctx2raw, { id: 'c4', tool: 'read', input: { filePath: bslPath }, result: { content: 'ok' } });
+await callTool(ctx2raw, { id: 'c4', tool: 'read', input: { path: bslPath }, result: { content: 'ok' } });
 writeFileSync(join(root, 'README.md'), '# t\n', 'utf8');
-await callTool(ctx2raw, { id: 'c5', tool: 'write', input: { filePath: join(root, 'README.md') }, result: { content: 'ok' } });
+await callTool(ctx2raw, { id: 'c5', tool: 'write', input: { path: join(root, 'README.md') }, result: { content: 'ok' } });
 check('read и не-1С файлы гейт не взводят', readFileSync(pendingPath, 'utf8') === markerBefore);
+
+// ── Инструмент patch ──
+// У patch нет аргумента-пути: файлы лежат в тексте патча (Add File / Update File / Move to).
+{
+  const pRoot = mkdtempSync(join(tmpdir(), 'qg-oc2-patch-'));
+  const { c } = await setupHooked(pRoot);
+  mkdirSync(join(pRoot, 'CommonModules', 'Патч', 'Ext'), { recursive: true });
+  writeFileSync(join(pRoot, 'CommonModules', 'Патч', 'Ext', 'Module.bsl'), 'Процедура П() КонецПроцедуры\n', 'utf8');
+  writeFileSync(join(pRoot, 'README.md'), 'x\n', 'utf8');
+  const patchText = [
+    '*** Begin Patch',
+    '*** Add File: CommonModules/Патч/Ext/Module.bsl',
+    '+Процедура П() КонецПроцедуры',
+    '*** Update File: README.md',
+    '@@',
+    '-x',
+    '+y',
+    '*** End Patch',
+  ].join('\n');
+  const evP = await callTool(c, { id: 'p1', tool: 'patch', input: { patchText }, result: { content: 'применён' } });
+  const pend = join(pRoot, '.opencode', '.state', 'qg-pending.json');
+  const files = existsSync(pend) ? Object.keys(JSON.parse(readFileSync(pend, 'utf8')).sessions?.s1?.files || {}) : [];
+  check('patch: модуль из текста патча взводит гейт', files.includes('CommonModules/Патч/Ext/Module.bsl'));
+  check('patch: не-1С файл патча гейт не взводит', !files.includes('README.md'));
+  check('patch: подсказка дописана в результат', typeof evP.result.content === 'string' && evP.result.content.includes('QUALITY GATE'));
+  rmSync(pRoot, { recursive: true, force: true });
+}
+
+// ── Взвод по командам оболочки ──
+// Встроенный инструмент оболочки V2 называется `shell` (в V1 — `bash`), вход — { command, workdir }.
+{
+  const shRoot = mkdtempSync(join(tmpdir(), 'qg-oc2-sh-'));
+  const { c } = await setupHooked(shRoot);
+  const modDir = join(shRoot, 'CommonModules', 'Модуль');
+  const input = { command: 'gen.sh', workdir: shRoot };
+  const pending = join(shRoot, '.opencode', '.state', 'qg-pending.json');
+
+  for (const h of c.__toolHooks['execute.before']) await h({ tool: 'shell', sessionID: 's-sh', id: 'sh1', input });
+  await new Promise((r) => setTimeout(r, 30));
+  mkdirSync(modDir, { recursive: true });
+  writeFileSync(join(modDir, 'Module.bsl'), 'Процедура Т() КонецПроцедуры\n', 'utf8');
+  const evSh = { tool: 'shell', sessionID: 's-sh', id: 'sh1', input, status: 'completed', result: { content: 'готово' } };
+  for (const h of c.__toolHooks['execute.after']) await h(evSh);
+  check('shell: модуль, записанный командой, взводит гейт', existsSync(pending));
+  check('shell: подсказка о правке оболочкой дописана в результат',
+    typeof evSh.result.content === 'string' && evSh.result.content.includes('изменено командой оболочки'));
+
+  // Команда, упавшая после записи файла, правку всё равно оставила: взвод не зависит от статуса.
+  const shRoot2 = mkdtempSync(join(tmpdir(), 'qg-oc2-sh2-'));
+  const { c: c2 } = await setupHooked(shRoot2);
+  const pending2 = join(shRoot2, '.opencode', '.state', 'qg-pending.json');
+  for (const h of c2.__toolHooks['execute.before']) await h({ tool: 'shell', sessionID: 's-sh2', id: 'sh2', input: { command: 'build.sh', workdir: shRoot2 } });
+  await new Promise((r) => setTimeout(r, 30));
+  mkdirSync(join(shRoot2, 'CommonModules', 'Модуль'), { recursive: true });
+  writeFileSync(join(shRoot2, 'CommonModules', 'Модуль', 'Module.bsl'), 'Процедура Т() КонецПроцедуры\n', 'utf8');
+  for (const h of c2.__toolHooks['execute.after']) {
+    await h({ tool: 'shell', sessionID: 's-sh2', id: 'sh2', input: { command: 'build.sh', workdir: shRoot2 }, status: 'error', error: { message: 'exit 1' } });
+  }
+  check('shell: упавшая команда с записанным модулем тоже взводит гейт', existsSync(pending2));
+
+  // Команда без записи ничего не взводит и ничего не дописывает.
+  const shRoot3 = mkdtempSync(join(tmpdir(), 'qg-oc2-sh3-'));
+  const { c: c3 } = await setupHooked(shRoot3);
+  const evRo = { tool: 'shell', sessionID: 's-sh3', id: 'sh3', input: { command: 'ls' }, status: 'completed', result: { content: 'список' } };
+  for (const h of c3.__toolHooks['execute.before']) await h({ tool: 'shell', sessionID: 's-sh3', id: 'sh3', input: evRo.input });
+  for (const h of c3.__toolHooks['execute.after']) await h(evRo);
+  check('shell: команда без записи ничего не дописывает', evRo.result.content === 'список' && !existsSync(join(shRoot3, '.opencode', '.state', 'qg-pending.json')));
+
+  for (const d of [shRoot, shRoot2, shRoot3]) rmSync(d, { recursive: true, force: true });
+}
+
+// ── Корень проекта ──
+// V1 брал worktree (корень репозитория), V2 даёт его в location.project.directory; location.directory —
+// каталог, из которого запущен OpenCode, и может быть вложенным.
+{
+  const repo = mkdtempSync(join(tmpdir(), 'qg-oc2-root-'));
+  const sub = join(repo, 'sub', 'dir');
+  mkdirSync(sub, { recursive: true });
+  const bsl = join(repo, 'CommonModules', 'Модуль', 'Module.bsl');
+  mkdirSync(join(repo, 'CommonModules', 'Модуль'), { recursive: true });
+  writeFileSync(bsl, 'Процедура Т() КонецПроцедуры\n', 'utf8');
+  const c = makeCtx(sub);
+  c.location = { directory: sub, project: { id: 'p', directory: repo, canonical: repo } };
+  const hooks = { 'execute.before': [], 'execute.after': [] };
+  c.tool.hook = async (name, cb) => { hooks[name].push(cb); return { dispose: async () => {} }; };
+  c.__toolHooks = hooks;
+  await mod.default.setup(c);
+  await callTool(c, { id: 'r1', tool: 'write', input: { path: bsl }, result: { content: 'ok' } });
+  check('корень проекта — каталог репозитория, а не подкаталог запуска',
+    existsSync(join(repo, '.opencode', '.state', 'qg-pending.json')) && !existsSync(join(sub, '.opencode')));
+  rmSync(repo, { recursive: true, force: true });
+}
 
 // ── Мягкий гейт на завершении прогона ──
 const sessEvents = [];
@@ -286,21 +435,26 @@ const sessEvents = [];
   check('session.execution.succeeded возвращает агента к работе', ctx4.prompts.length === 1);
   check('возврат уходит в нужную сессию с текстом мягкого гейта',
     ctx4.prompts[0]?.sessionID === 's1' && /качеств/i.test(ctx4.prompts[0]?.text || ''));
+  check('передача проверки называет инструмент subagent, а не task из V1',
+    /инструментом subagent/.test(ctx4.prompts[0]?.text || '') && !/инструментом task/.test(ctx4.prompts[0]?.text || ''));
 
   // Событие с устаревшим написанием payload (properties) тоже принимается.
+  busEvents.push({ type: 'session.execution.started', data: { sessionID: 's1' } });
   busEvents.push({ type: 'session.idle', properties: { sessionID: 's1' } });
   await new Promise((r) => setTimeout(r, 100));
   check('session.idle с properties-payload принимается', ctx4.prompts.length === 2);
 
   // Прерванный прогон — не пауза: пользователь сам остановил работу.
+  busEvents.push({ type: 'session.execution.started', data: { sessionID: 's1' } });
   busEvents.push({ type: 'session.execution.interrupted', data: { sessionID: 's1' } });
   await new Promise((r) => setTimeout(r, 100));
   check('interrupted возврата не даёт', ctx4.prompts.length === 2);
 
   // Лимит возвратов на неизменный состав правок.
-  busEvents.push({ type: 'session.execution.succeeded', data: { sessionID: 's1' } });
-  busEvents.push({ type: 'session.execution.succeeded', data: { sessionID: 's1' } });
-  busEvents.push({ type: 'session.execution.succeeded', data: { sessionID: 's1' } });
+  for (let i = 0; i < 3; i++) {
+    busEvents.push({ type: 'session.execution.started', data: { sessionID: 's1' } });
+    busEvents.push({ type: 'session.execution.succeeded', data: { sessionID: 's1' } });
+  }
   await new Promise((r) => setTimeout(r, 200));
   check('возвратов не более MAX_REPROMPTS на неизменный состав', ctx4.prompts.length === 3);
 
@@ -314,6 +468,59 @@ const sessEvents = [];
   busEvents.push({ type: 'session.execution.succeeded', data: { sessionID: 's-chuzhaya' } });
   await new Promise((r) => setTimeout(r, 100));
   check('чужая сессия без правок не получает возврат', ctx4.prompts.length === 3);
+
+  // Один конец прогона может прийти двумя событиями: durable succeeded и устаревший idle.
+  // Возврат — один; следующий конец прогона считается после нового started.
+  const dedupRoot = mkdtempSync(join(tmpdir(), 'qg-oc2-dedup-'));
+  mkdirSync(join(dedupRoot, 'CommonModules', 'Модуль'), { recursive: true });
+  const dedupBsl = join(dedupRoot, 'CommonModules', 'Модуль', 'Module.bsl');
+  writeFileSync(dedupBsl, 'Процедура Т() КонецПроцедуры\n', 'utf8');
+  const ctx5 = makeCtx(dedupRoot);
+  const ev5 = [];
+  ctx5.event.subscribe = () => feed(ev5);
+  const hk5 = { 'execute.before': [], 'execute.after': [] };
+  ctx5.tool.hook = async (name, cb) => { hk5[name].push(cb); return { dispose: async () => {} }; };
+  ctx5.__toolHooks = hk5;
+  await mod.default.setup(ctx5);
+  await callTool(ctx5, { id: 'd1', tool: 'write', input: { path: dedupBsl }, result: { content: 'ok' }, sessionID: 's-dd' });
+  ev5.push({ type: 'session.execution.succeeded', data: { sessionID: 's-dd' } });
+  ev5.push({ type: 'session.idle', data: { sessionID: 's-dd' } });
+  await new Promise((r) => setTimeout(r, 120));
+  check('succeeded и idle одного прогона дают один возврат', ctx5.prompts.length === 1);
+  ev5.push({ type: 'session.execution.started', data: { sessionID: 's-dd' } });
+  ev5.push({ type: 'session.execution.succeeded', data: { sessionID: 's-dd' } });
+  await new Promise((r) => setTimeout(r, 120));
+  check('после нового started конец прогона снова возвращает агента', ctx5.prompts.length === 2);
+  check('возвраты идут без поля noReply, которого в V2 нет', ctx5.prompts.every((p) => !('noReply' in p)));
+  rmSync(dedupRoot, { recursive: true, force: true });
+
+  // Итог снятого гейта — уведомление, а не задание: в V2 ход модели отключает resume: false.
+  const noteRoot = mkdtempSync(join(tmpdir(), 'qg-oc2-note-'));
+  mkdirSync(join(noteRoot, '.opencode', '.state'), { recursive: true });
+  writeFileSync(join(noteRoot, '.opencode', '.state', 'qg-done.json'), JSON.stringify({ version: 2, sessions: { s7: { releasedAt: 'now', files: {}, mode: 'evidence', evidenceFile: 'C:/t/r.md', evidenceArchive: null,
+    residual: { inChange: [{ sev: '🟡', title: 'Шапка' }], outside: [], needsDecision: [] } } } }), 'utf8');
+  const ctx6 = makeCtx(noteRoot);
+  const ev6 = [{ type: 'session.execution.succeeded', data: { sessionID: 's7' } }];
+  ctx6.event.subscribe = () => feed(ev6);
+  await mod.default.setup(ctx6);
+  await new Promise((r) => setTimeout(r, 120));
+  check('итог после снятия отправлен один раз текстом остатка', ctx6.prompts.length === 1 && /в правке: 🔴 0, 🟠 0, 🟡 1/.test(ctx6.prompts[0]?.text || ''));
+  check('итог отправлен с resume: false и без noReply', ctx6.prompts[0]?.resume === false && !('noReply' in (ctx6.prompts[0] || {})));
+  rmSync(noteRoot, { recursive: true, force: true });
+
+  // Поток событий, закончившийся сам (не выгрузкой плагина), — это потерянный мягкий гейт: след обязателен.
+  const ctx7 = makeCtx(root);
+  ctx7.event.subscribe = () => ({ [Symbol.asyncIterator]() { return { next: async () => ({ value: undefined, done: true }) }; } });
+  const errs = [];
+  const origErr = console.error;
+  console.error = (...a) => errs.push(a.join(' '));
+  try {
+    await mod.default.setup(ctx7);
+    await new Promise((r) => setTimeout(r, 60));
+  } finally {
+    console.error = origErr;
+  }
+  check('обрыв потока событий оставляет предупреждение, а не тишину', errs.some((m) => /поток событий/.test(m)));
 
   sessEvents.push(ctx4);
 }

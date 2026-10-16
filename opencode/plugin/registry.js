@@ -237,19 +237,26 @@ export function skillsFrom(dir) {
 
 /**
  * Соответствие ключей инструментов пакета действиям (`action`) правил V2.
- * `bash` в V2 — `execute` (старое имя тоже признаётся, закрываем оба);
- * `write`+`patch` в V2 — единое `edit`.
+ *
+ * Действие правила в V2 равно имени инструмента: оболочка — `shell`, запуск субагентов —
+ * `subagent` (в V1 были `bash` и `task`). Сверено с исходниками OpenCode,
+ * packages/core/src/tool/plugin/*.ts: shell.ts, subagent.ts, skill.ts, grep.ts, glob.ts
+ * вызывают permission.assert({ action: name }). Неверное имя не вызывает ошибки: правило
+ * просто не совпадает ни с одним запросом, и запрет молча не действует.
+ *
+ * Инструменты write, edit и patch запрашивают одно общее действие `edit` (EDIT_ACTION).
  */
 const TOOL_ACTIONS = {
   skill: ['skill'],
   read: ['read'],
   grep: ['grep'],
   glob: ['glob'],
-  bash: ['execute', 'bash'],
-  write: ['write'],
-  edit: ['edit', 'patch'],
-  task: ['task'],
+  bash: ['shell'],
+  task: ['subagent'],
 };
+
+/** Общее действие правки в V2: его запрашивают write, edit и patch. */
+const EDIT_ACTION = 'edit';
 
 /**
  * Субагенты пакета в форме для `ctx.agent.transform` V2.
@@ -286,10 +293,18 @@ export function agentsV2From(dir) {
 
       const rules = [{ action: '*', resource: '*', effect: 'allow' }];
       for (const k of TOOL_KEYS) {
-        for (const action of TOOL_ACTIONS[k]) {
+        for (const action of TOOL_ACTIONS[k] || []) {
           rules.push({ action, resource: '*', effect: granted.has(k) ? 'allow' : 'deny' });
         }
       }
+      // Правка в V2 одна на три инструмента, поэтому закрыта она только тогда, когда закрыты и
+      // write, и edit — то же условие, что у V1 (`!tools.edit && !tools.write`). Закрыть её по
+      // одному Edit значило бы лишить Write исполнителя гейта, которому Write нужен для отчёта.
+      rules.push({
+        action: EDIT_ACTION,
+        resource: '*',
+        effect: granted.has('write') || granted.has('edit') ? 'allow' : 'deny',
+      });
       const def = { mode: 'subagent', system: p.body, permissions: rules };
       if (p.data.description !== undefined) def.description = p.data.description;
       return [name, def];

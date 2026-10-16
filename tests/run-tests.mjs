@@ -8091,6 +8091,11 @@ section('gate.mjs run — инструментальная фаза одним �
     check('handoff велит запускать gate-runner синхронно', ho.out.includes('run_in_background: false'), ho.out.slice(0, 400));
     const hoOc = run('tools/gate.mjs', ['handoff', '--mode', 'opencode'], { env });
     check('handoff для OpenCode называет инструмент task', hoOc.code === 0 && /инструментом task/.test(hoOc.out), hoOc.out.slice(0, 300));
+    // OpenCode 2.x запускает субагентов инструментом subagent; плагин сообщает имя окружением оболочки.
+    const hoOc2 = run('tools/gate.mjs', ['handoff', '--mode', 'opencode'], { env: { ...env, QG_SUBAGENT_TOOL: 'subagent' } });
+    check('handoff в окружении OpenCode 2.x называет инструмент subagent', hoOc2.code === 0 && /инструментом subagent/.test(hoOc2.out), hoOc2.out.slice(0, 300));
+    const hoBad = run('tools/gate.mjs', ['handoff', '--mode', 'opencode'], { env: { ...env, QG_SUBAGENT_TOOL: 'x"; rm -rf' } });
+    check('handoff не принимает постороннее имя инструмента из окружения', hoBad.code === 0 && /инструментом task/.test(hoBad.out), hoBad.out.slice(0, 300));
     rmSync(join(rr, '.claude', '.state', 'qg-pending.json'), { force: true });
   }
 
@@ -9344,7 +9349,7 @@ section('Исключение тестовых модулей — сопоста
 // ---------------------------------------------------------------------------
 // Изолированные наборы тестов — отдельными процессами: у них собственные счётчики
 // и временные каталоги, а их падение обязано быть видно в общем итоге CI.
-for (const suite of ['tests/gate-core.test.mjs', 'tests/opencode-plugin.test.mjs', 'tests/shell-core.test.mjs']) {
+for (const suite of ['tests/gate-core.test.mjs', 'tests/opencode-plugin.test.mjs', 'tests/opencode-plugin-v2.test.mjs', 'tests/shell-core.test.mjs']) {
   const res = spawnSync(process.execPath, [join(ROOT, ...suite.split('/'))], {
     encoding: 'utf8',
     env: { ...process.env },

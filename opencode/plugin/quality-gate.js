@@ -75,11 +75,23 @@ const V8STD_MCP_V2 = { type: 'remote', url: 'https://ai.v8std.ru/mcp' };
 /** Максимум автоматических возвратов на неизменный состав правок. */
 const MAX_REPROMPTS = 3;
 
+// Окно, в котором повторное событие конца прогона той же сессии считается дублем (V2).
+const DUPLICATE_WINDOW_MS = 2000;
+
 /** Верхняя граница журнала прогонов (tools/run-journal.mjs). */
 const JOURNAL_KEEP = 500;
 
 /** Инструменты правки — аналог matcher исходного PostToolUse-хука. */
 const EDIT_TOOLS = new Set(['write', 'edit', 'multiedit', 'patch', 'notebookedit']);
+
+// Встроенный инструмент оболочки: в V1 он называется bash, в V2 — shell (packages/core/src/tool/
+// plugin/shell.ts в OpenCode). Не распознав имя, плагин не снимал бы снимок до команды, и правки
+// генератором или скриптом не взводили бы гейт — молча.
+const V2_SHELL_TOOLS = new Set(['shell', 'bash']);
+
+// Инструмент запуска субагентов: в V1 — task, в V2 — subagent. Имя попадает в текст передачи
+// проверки, который модель исполняет буквально.
+const V2_SUBAGENT_TOOL = 'subagent';
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -141,7 +153,7 @@ async function loadGateDeps(packageRoot) {
  * гейта, чтение маркера, отпечаток состава правок, лимит возвратов, журнал сдачи —
  * здесь, чтобы две копии не разъезжались при первой же правке.
  */
-function createIdleGate({ root, core, stateDir, stateEnv, packageRoot }) {
+function createIdleGate({ root, core, stateDir, stateEnv, packageRoot, subagentTool = null }) {
   // Защита от бесконечного цикла возвратов. Счётчик — ПО СЕССИИ: sessionId →
   // { fingerprint, count }. Глобальный лимит (как у первой редакции, ключ = сессия +
   // отпечаток) при переполнении карты стирал счётчики ВСЕХ сессий, включая текущую, —
@@ -236,6 +248,7 @@ function createIdleGate({ root, core, stateDir, stateEnv, packageRoot }) {
     await send(
       core.blockMessage({
         sessionId,
+        subagentTool,
         files,
         foreign,
         packageRoot,
@@ -322,6 +335,42 @@ function armAfterEdit({ core, ensureConfig, readConfig, stateEnv, root, packageR
     mode: 'opencode',
     passes: core.passesOf({ root, sessionId: sid, env: stateEnv }),
   });
+}
+
+/**
+ * Файлы, затронутые патчем инструмента patch (V2): у него нет аргумента-пути, весь состав
+ * правок лежит в тексте патча заголовками «*** Add File», «*** Update File», «*** Move to».
+ * Без разбора этого текста правка модуля патчем не взводила бы гейт — молча.
+ */
+function filesOfPatch(text) {
+  if (typeof text !== 'string') return [];
+  const found = new Set();
+  for (const m of text.matchAll(/^\*\*\* (?:Add File|Update File|Move to): (.+?)\s*$/gm)) found.add(m[1]);
+  return [...found];
+}
+
+/** Взвод гейта по завершённому патчу: каждый затронутый файл — отдельным armAfterEdit. */
+function armAfterPatch({ core, ensureConfig, readConfig, stateEnv, root, packageRoot, callId, sessionId, input }) {
+  const armed = [];
+  for (const file of filesOfPatch(input?.patchText)) {
+    const hint = armAfterEdit({
+      core,
+      ensureConfig,
+      readConfig,
+      stateEnv,
+      root,
+      packageRoot,
+      pendingCalls: new Map([[callId, file]]),
+      callId,
+      sessionId,
+      tool: 'patch',
+      args: input,
+    });
+    if (hint) armed.push({ file, hint });
+  }
+  if (!armed.length) return null;
+  const rest = armed.slice(1);
+  return armed[0].hint + (rest.length ? '\nТакже взведены:\n' + rest.map((a) => `Файл: ${a.file}`).join('\n') : '');
 }
 
 // ---------------------------------------------------------------------------
@@ -492,37 +541,30 @@ export const QualityGatePlugin = async ({ project, client, directory, worktree }
 // ---------------------------------------------------------------------------
 
 /**
- * Дописывает подсказку о взводе в результат инструмента V2.
- *
- * V2 отдаёт результат как { content } со строкой или массивом частей (в отличие от
- * строкового output V1). Дописываем в последнюю текстовую часть, а не заменяем массив
- * целиком: смешанный контент (например, картинки) обязан пережить подсказку.
+ * Результат инструмента с дописанной подсказкой — НОВЫЙ объект. Поля результата в типах V2
+ * помечены readonly, а документация подменяет `event.result` целиком, поэтому исходный
+ * результат и его части не правим: правка на замороженном объекте падает, а исключение
+ * тут гасится, и подсказка пропала бы молча.
  */
-function appendHintToResult(result, hint) {
-  if (!result || typeof result !== 'object') return;
-  const content = result.content;
-  if (typeof content === 'string') {
-    result.content = content + '\n\n' + hint;
-    return;
-  }
+function resultWithHint(result, hint) {
+  const base = result && typeof result === 'object' ? result : {};
+  const content = base.content;
+  if (typeof content === 'string') return { ...base, content: content + '\n\n' + hint };
   if (Array.isArray(content)) {
-    for (let i = content.length - 1; i >= 0; i--) {
-      const part = content[i];
+    const parts = content.slice();
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const part = parts[i];
       if (part && part.type === 'text' && typeof part.text === 'string') {
-        content[i] = { ...part, text: part.text + '\n\n' + hint };
-        return;
+        parts[i] = { ...part, text: part.text + '\n\n' + hint };
+        return { ...base, content: parts };
       }
     }
-    content.push({ type: 'text', text: hint });
-    return;
+    parts.push({ type: 'text', text: hint });
+    return { ...base, content: parts };
   }
-  // Результата без content не бывает у штатных инструментов правки, но если встретился —
-  // подсказку кладём в content, машиночитаемое output не трогаем.
-  if (typeof result.output === 'string') {
-    result.content = result.output + '\n\n' + hint;
-    return;
-  }
-  result.content = hint;
+  // После нормализации в рантайме V2 content есть всегда; запасной путь — машиночитаемое output.
+  if (typeof base.output === 'string') return { ...base, content: base.output + '\n\n' + hint };
+  return { ...base, content: hint };
 }
 
 /**
@@ -540,8 +582,15 @@ async function register(disposers, promise) {
 }
 
 async function setup(ctx) {
-  // Корень проекта: каталог загрузки плагина; canonical — запасной вариант.
-  const root = ctx?.location?.directory || ctx?.location?.project?.canonical || process.cwd();
+  // Корень проекта. V1 брал worktree — корень репозитория; в V2 ему соответствует
+  // location.project.directory (OpenCode ищет его вверх от каталога запуска по .git).
+  // location.directory — каталог запуска, он может быть вложенным, и состояние гейта
+  // тогда оказалось бы в подкаталоге, а правки вне него не взводили бы гейт.
+  const root =
+    ctx?.location?.project?.directory ||
+    ctx?.location?.directory ||
+    ctx?.location?.project?.canonical ||
+    process.cwd();
 
   const stateEnv = { QG_STATE_DIR: process.env.QG_STATE_DIR || '.opencode/.state' };
 
@@ -554,7 +603,7 @@ async function setup(ctx) {
 
   const pendingCalls = new Map();
   const shellCalls = new Map();
-  const handleIdle = createIdleGate({ root, core, stateDir, stateEnv, packageRoot });
+  const handleIdle = createIdleGate({ root, core, stateDir, stateEnv, packageRoot, subagentTool: V2_SUBAGENT_TOOL });
   const disposers = [];
 
   // ── Навыки ──
@@ -671,6 +720,7 @@ async function setup(ctx) {
           if (!event.env.QG_ROOT) event.env.QG_ROOT = packageRoot;
           if (!event.env.QG_PROJECT_DIR) event.env.QG_PROJECT_DIR = root;
           if (!event.env.QG_STATE_DIR) event.env.QG_STATE_DIR = stateEnv.QG_STATE_DIR;
+          if (!event.env.QG_SUBAGENT_TOOL) event.env.QG_SUBAGENT_TOOL = V2_SUBAGENT_TOOL;
         } catch {
           /* окружение не обязано ломать запуск оболочки */
         }
@@ -687,7 +737,7 @@ async function setup(ctx) {
         try {
           // Аргументы вызова в V2 — event.input (одно изменяемое событие вместо
           // пары input/output из V1); идентификатор вызова — event.id.
-          if (String(event?.tool || '').toLowerCase() === 'bash') {
+          if (V2_SHELL_TOOLS.has(String(event?.tool || '').toLowerCase())) {
             if (!shell) return;
             shellTrackBefore({ shell, root, shellCalls, callId: event.id, sessionId: event.sessionID, args: event.input });
             return;
@@ -707,10 +757,11 @@ async function setup(ctx) {
       if (typeof ctx.tool?.hook !== 'function') return undefined;
       return ctx.tool.hook('execute.after', (event) => {
         try {
-          // Взводим только на успешном вызове: у провалившегося правки не было.
-          if (event?.status !== 'completed') return;
           const sessionId = String(event.sessionID || 'unknown-session');
+          const completed = event?.status === 'completed';
 
+          // Оболочка: команда, упавшая после записи файла, правку всё равно оставила, поэтому
+          // снимок сверяется при любом статусе (это же освобождает запись shellCalls).
           if (shell) {
             const notes = shellTrackAfter({
               shell,
@@ -725,26 +776,46 @@ async function setup(ctx) {
               packageRoot,
             });
             if (notes) {
-              appendHintToResult(event.result, notes.join('\n'));
+              // У упавшего вызова результата нет: гейт взведён, а напомнит о нём возврат на паузе.
+              if (completed) event.result = resultWithHint(event.result, notes.join('\n'));
               return;
             }
           }
 
-          const hint = armAfterEdit({
-            core,
-            ensureConfig,
-            readConfig,
-            stateEnv,
-            root,
-            packageRoot,
-            pendingCalls,
-            callId: event.id,
-            sessionId,
-            tool: event.tool,
-            args: event.input,
-          });
+          // Правка инструментом: у провалившегося вызова правки не было, взводить нечего.
+          if (!completed) {
+            pendingCalls.delete(event.id);
+            return;
+          }
+
+          const hint =
+            String(event.tool || '').toLowerCase() === 'patch'
+              ? armAfterPatch({
+                  core,
+                  ensureConfig,
+                  readConfig,
+                  stateEnv,
+                  root,
+                  packageRoot,
+                  callId: event.id,
+                  sessionId,
+                  input: event.input,
+                })
+              : armAfterEdit({
+                  core,
+                  ensureConfig,
+                  readConfig,
+                  stateEnv,
+                  root,
+                  packageRoot,
+                  pendingCalls,
+                  callId: event.id,
+                  sessionId,
+                  tool: event.tool,
+                  args: event.input,
+                });
           if (!hint) return;
-          appendHintToResult(event.result, hint);
+          event.result = resultWithHint(event.result, hint);
         } catch {
           /* гейт качества никогда не ломает работу пользователя */
         }
@@ -753,35 +824,60 @@ async function setup(ctx) {
   );
 
   // ── Мягкий гейт на паузе сессии ──
-  // В V2 нет потокового session.idle: жизненный цикл приходит durable-событиями
-  // session.execution.*, и завершение прогона — session.execution.succeeded
-  // (payload под ключом data; properties — устаревшее написание). failed/interrupted
-  // не считаем паузой: прерванный прогон — это пользователь сам остановил работу,
-  // а не агент собрался завершать. session.idle тоже принимаем — встроенные клиенты
-  // V2 могут синтезировать его для совместимости.
+  // В V2 жизненный цикл приходит durable-событиями session.execution.*, и завершение
+  // прогона — session.execution.succeeded (payload под ключом data; properties — устаревшее
+  // написание). failed/interrupted паузой не считаем: прерванный прогон — это пользователь
+  // сам остановил работу, а не агент собрался завершать. session.idle в схеме V2 помечен
+  // устаревшим, но принимается: старый клиент мог бы прислать только его.
+  //
+  // Один конец прогона может прийти двумя событиями, и без защиты агент получил бы два
+  // одинаковых возврата, а счётчик MAX_REPROMPTS расходовался бы вдвое быстрее. Повтор
+  // отбрасывается, если после обработки не началось нового прогона (started) и прошло меньше
+  // DUPLICATE_WINDOW_MS. Привязка только к started опасна: сборка OpenCode без этого события
+  // отключила бы гейт насовсем и тихо, поэтому окно по времени ограничивает отсечение.
   if (typeof ctx?.event?.subscribe === 'function' && typeof ctx?.session?.prompt === 'function') {
     const controller = new AbortController();
     disposers.push(() => controller.abort());
+    const handledAt = new Map();
+    const warnLost = (why) => {
+      if (controller.signal.aborted) return;
+      console.error(
+        `[1c-quality-gate] ВНИМАНИЕ: поток событий OpenCode оборвался (${why}). ` +
+          'Возврат к работе на паузе сессии отключён до перезапуска; взвод по правкам работает.'
+      );
+    };
     void (async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
           try {
             const type = event?.type;
-            let sessionId = null;
-            if (type === 'session.idle' || type === 'session.execution.succeeded') {
-              sessionId = event?.data?.sessionID ?? event?.properties?.sessionID;
-            }
+            const sessionId = event?.data?.sessionID ?? event?.properties?.sessionID;
             if (!sessionId) continue;
             const id = String(sessionId);
-            await handleIdle(id, (text, opts) =>
-              ctx.session.prompt({ sessionID: id, text, ...(opts?.note ? { noReply: true } : {}) })
-            );
+            if (type === 'session.execution.started') {
+              handledAt.delete(id);
+              continue;
+            }
+            if (type !== 'session.idle' && type !== 'session.execution.succeeded') continue;
+            const last = handledAt.get(id);
+            if (last !== undefined && Date.now() - last < DUPLICATE_WINDOW_MS) continue;
+            try {
+              // note — уведомление, а не задание: resume: false кладёт сообщение во входящие
+              // и не запускает ход модели (в V2 нет noReply; тело prompt не допускает лишних полей).
+              await handleIdle(id, (text, opts) =>
+                ctx.session.prompt({ sessionID: id, text, ...(opts?.note ? { resume: false } : {}) })
+              );
+            } finally {
+              handledAt.set(id, Date.now());
+              if (handledAt.size > 500) handledAt.delete(handledAt.keys().next().value);
+            }
           } catch {
             /* одно битое событие не останавливает поток */
           }
         }
-      } catch {
-        /* конец потока или abort — штатное завершение */
+        warnLost('поток закрыт хостом');
+      } catch (error) {
+        warnLost(String(error?.message || error).slice(0, 120));
       }
     })();
   }
