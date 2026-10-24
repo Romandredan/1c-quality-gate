@@ -710,7 +710,7 @@ node "$QG/tools/config.mjs" show
 
 ```json
 {
-  "analyzer": { "engine": "bsl-analyzer", "version": "0.2.85", "required": false },
+  "analyzer": { "engine": "bsl-analyzer", "version": "0.4.0", "required": false },
   "volume": { "c1MaxLines": 40, "c1MaxFiles": 1 },
   "complexity": { "maxNesting": 4, "maxMethodLines": 120, "maxParams": 7 },
   "archetypes": {
