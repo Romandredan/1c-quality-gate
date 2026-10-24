@@ -4831,9 +4831,10 @@ section('Находка 🔴/🟠 из текста отчёта закрыта 
 // Живой случай 24.10.2026 (v3.19.0): заголовок документа «# Гейт качества: проход после
 // исправлений» совпал с NOT_FINDINGS по корню «исправлен», исключение унаследовали все вложенные
 // разделы — валидатор увидел 0 находок и отклонил отчёт ложным «находка прошлого отчёта
-// отсутствует» по каждой. Разделы, которые находками не считаются, узнаются по началу заголовка.
+// отсутствует» по каждой. Заголовок документа — первый заголовок отчёта, если он первого уровня, —
+// разделом не считается; остальные заголовки сверяются с NOT_FINDINGS по всему тексту, как раньше.
 {
-  const { reportSections, severeFindings, carriedOver } = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+  const { reportSections, severeFindings, carriedOver, unparsedSections } = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
   const report = (h1) => [
     `# ${h1}`, '', '## Открыто в правке', '', '### 🔴 Запрос в цикле', 'm.bsl:5, qg:DB-READ-IN-LOOP', '',
     '### 🟡 Магическое число', 'm.bsl:7, qg:MAGIC-NUMBER', '', '## Вне правки', '', '### 🟡 Длинный метод', 'm.bsl:40', '',
@@ -4851,7 +4852,13 @@ section('Находка 🔴/🟠 из текста отчёта закрыта 
   const titledOutside = report('Гейт качества: находки вне правки и нужно решение');
   check('заголовок документа не переносит находки в чужой раздел',
     reportSections(titledOutside).inChange.length === 2 && severeFindings(titledOutside).length === 1, JSON.stringify(reportSections(titledOutside)));
-  // Заголовком документа считается только первый заголовок первого уровня: следующий H1 — раздел.
+  // Предупреждение о находках списком тоже не принимает заголовок документа за раздел находок,
+  // а настоящий раздел «Вне правки» со списком по-прежнему называет.
+  const titledNoFindings = '# Гейт качества: вне правки находок нет\n\n## Открыто в правке\n\nНаходок нет.\n\n## Не проверено\n\n- компиляция тел модулей\n';
+  check('заголовок документа не даёт ложного предупреждения о находках списком', unparsedSections(titledNoFindings).length === 0, JSON.stringify(unparsedSections(titledNoFindings)));
+  const listedOutside = '# Гейт качества: вне правки\n\n## Вне правки\n\n- m.bsl:40 длинный метод\n';
+  check('раздел «Вне правки» со списком под таким заголовком по-прежнему назван', JSON.stringify(unparsedSections(listedOutside)) === JSON.stringify([{ title: 'Вне правки', line: 3 }]), JSON.stringify(unparsedSections(listedOutside)));
+  // Заголовком документа считается только первый заголовок отчёта первого уровня: следующий H1 — раздел.
   const h1Sections = '# Отчёт\n\n# Отклонённые кандидаты\n\n## 🔴 Ложная TypeMismatch\nотклонена\n';
   check('второй заголовок первого уровня по-прежнему исключает раздел', severeFindings(h1Sections).length === 0 && reportSections(h1Sections).inChange.length === 0, JSON.stringify(severeFindings(h1Sections)));
   // Разделы без находок с украшением и номером по-прежнему узнаются.
