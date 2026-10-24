@@ -340,6 +340,9 @@ const SEVERITY_LABEL =
 // Раздел «Вне правки» — находки в коде, которого правка не касалась: гейт они не держат по
 // решению владельца (спецификация 2026-10-01); «Нужно решение» — то, что субагент оценить не
 // может, уходит пользователю в итоге снятия. Оба раздела разбираются, но из блокирующих исключены.
+// Корень ищется в любом месте заголовка («## Что осталось непроверенным»), поэтому к заголовку
+// документа — первому заголовку первого уровня — проверка не применяется: «# Гейт качества: проход
+// после исправлений» исключал бы через наследование `excluded` все вложенные разделы.
 const NOT_FINDINGS = /отклон|не\s*провер|непровер|предложени|закрыт|исправлен/i;
 const OUTSIDE_SECTION = /вне\s+правки/i;
 // «Закрыто» — находки прошлого отчёта, закрытие которых проверено на проходе по исправлению
@@ -491,6 +494,7 @@ function collectFindings(text) {
   const stack = []; // { level, section, excluded, markerSev, finding }
   let current = null;
   let fence = false;
+  let titleSeen = false;
   lines.forEach((line, i) => {
     if (/^\s*(```|~~~)/.test(line)) fence = !fence;
     const h = fence ? null : line.match(/^(#{1,6})\s+(.*)$/);
@@ -517,9 +521,14 @@ function collectFindings(text) {
     // разделом не бывает: «Транзакция открыта вне правки» — находка, а не раздел «Вне правки».
     const isFinding = Boolean(lead && !SEVERITY_LABEL.test(lead[2])) || Boolean(!lead && inherited);
     const parentSection = stack.map((s) => s.section).filter((x) => x && x !== 'change').pop() || null;
+    // Заголовок документа — первый заголовок первого уровня — разделом не бывает: его слова
+    // («# Гейт качества: проход после исправлений») наследовались бы всеми вложенными разделами,
+    // и находки под «Открыто в правке» исключались бы из разбора или уходили в чужой раздел.
+    const isDocTitle = level === 1 && !titleSeen && !isFinding;
+    titleSeen = true;
     // «Закрыто» проверяется раньше NOT_FINDINGS: иначе слово «закрыт» исключило бы раздел из
     // разбора целиком, и перенос находок прошлого отчёта сверить было бы не по чему.
-    const section = isFinding
+    const section = isFinding || isDocTitle
       ? parentSection || 'change'
       : CLOSED_SECTION.test(title)
         ? 'closed'
@@ -528,7 +537,7 @@ function collectFindings(text) {
           : DECISION_SECTION.test(title)
             ? 'decision'
             : parentSection || 'change';
-    const entry = { level, section, excluded: stack.some((s) => s.excluded) || (section === 'change' && !isFinding && NOT_FINDINGS.test(title)) };
+    const entry = { level, section, excluded: stack.some((s) => s.excluded) || (section === 'change' && !isFinding && !isDocTitle && NOT_FINDINGS.test(title)) };
     current = null;
     if (!entry.excluded) {
       let sev = null;

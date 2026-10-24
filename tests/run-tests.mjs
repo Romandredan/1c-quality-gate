@@ -4828,6 +4828,38 @@ section('Находка 🔴/🟠 из текста отчёта закрыта 
   check('исправленные и закрытые находки не считаются', severeFindings(closed).length === 0 && reportSections(closed).inChange.length === 0, JSON.stringify(severeFindings(closed)));
 }
 
+// Живой случай 24.10.2026 (v3.19.0): заголовок документа «# Гейт качества: проход после
+// исправлений» совпал с NOT_FINDINGS по корню «исправлен», исключение унаследовали все вложенные
+// разделы — валидатор увидел 0 находок и отклонил отчёт ложным «находка прошлого отчёта
+// отсутствует» по каждой. Разделы, которые находками не считаются, узнаются по началу заголовка.
+{
+  const { reportSections, severeFindings, carriedOver } = await import(pathToFileURL(join(ROOT, 'tools', 'evidence-validator.mjs')).href);
+  const report = (h1) => [
+    `# ${h1}`, '', '## Открыто в правке', '', '### 🔴 Запрос в цикле', 'm.bsl:5, qg:DB-READ-IN-LOOP', '',
+    '### 🟡 Магическое число', 'm.bsl:7, qg:MAGIC-NUMBER', '', '## Вне правки', '', '### 🟡 Длинный метод', 'm.bsl:40', '',
+  ].join('\n');
+  const prev = report('Отчёт');
+  for (const h1 of ['Гейт качества: проход после исправлений', 'Гейт качества: проход по исправлению', 'Предварительный отчёт: отклонённых нет']) {
+    const cur = report(h1);
+    const s = reportSections(cur);
+    check(`заголовок документа «${h1}» не обнуляет разбор`, s.inChange.length === 2 && s.outside.length === 1, JSON.stringify(s));
+    check(`под заголовком «${h1}» 🔴 в правке блокирует`, severeFindings(cur).length === 1);
+    const lost = carriedOver(prev, cur);
+    check(`под заголовком «${h1}» находки прошлого отчёта не пропадают`, lost.missingById.length === 0 && lost.missing.length === 0, JSON.stringify(lost));
+  }
+  // Заголовок документа не задаёт раздел и по словам «вне правки» / «нужно решение».
+  const titledOutside = report('Гейт качества: находки вне правки и нужно решение');
+  check('заголовок документа не переносит находки в чужой раздел',
+    reportSections(titledOutside).inChange.length === 2 && severeFindings(titledOutside).length === 1, JSON.stringify(reportSections(titledOutside)));
+  // Заголовком документа считается только первый заголовок первого уровня: следующий H1 — раздел.
+  const h1Sections = '# Отчёт\n\n# Отклонённые кандидаты\n\n## 🔴 Ложная TypeMismatch\nотклонена\n';
+  check('второй заголовок первого уровня по-прежнему исключает раздел', severeFindings(h1Sections).length === 0 && reportSections(h1Sections).inChange.length === 0, JSON.stringify(severeFindings(h1Sections)));
+  // Разделы без находок с украшением и номером по-прежнему узнаются.
+  const decorated = report('Отчёт') + '\n## 2. ❌ Отклонённые кандидаты\n\n### 🔴 Ложная TypeMismatch\nотклонена\n\n## 🔍 Не проверено\n\n### 🟠 Компиляция\nне запускалась\n\n## Предложения\n\n### 🟠 Вынести запрос\nидея\n';
+  check('украшенные и нумерованные разделы без находок по-прежнему исключены',
+    severeFindings(decorated).length === 1 && !JSON.stringify(reportSections(decorated)).match(/Ложная TypeMismatch|Компиляция|Вынести запрос/), JSON.stringify(reportSections(decorated)));
+}
+
 // ---------------------------------------------------------------------------
 section('План направляет каждый XML в свой валидатор');
 
