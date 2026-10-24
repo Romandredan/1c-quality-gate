@@ -4428,6 +4428,16 @@ section('Статический анализатор — нормализаци�
     readFileSync(join(ROOT, 'assets/analyzer/sentinel-fixture/Configuration.xml'), 'utf8').includes('<CommonModule>QG_SentinelModule</CommonModule>'));
 }
 
+// Диагностики, выключенные в гейтовом конфиге по замеру ложных срабатываний
+// (docs/false-positives-cfe.md). Удалённая строка молча возвращает ложные находки в изменённые
+// строки, и гейт требует `verdict=violation` по работающему коду.
+{
+  const gateToml = readFileSync(join(ROOT, 'assets/analyzer/bsl-analyzer.toml'), 'utf8');
+  for (const code of ['LatinAndCyrillicSymbolInWord', 'AmbiguousFieldInQuery', 'UnresolvedBareCall']) {
+    check(`гейтовый конфиг анализатора выключает ${code}`, new RegExp(`^${code} = false$`, 'm').test(gateToml));
+  }
+}
+
 // ---------------------------------------------------------------------------
 section('Установка анализатора — манифест и состояние установки');
 
