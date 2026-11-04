@@ -14,6 +14,9 @@ name: runtime-bump
 # уведомление о PR пропало бы.
 
 on:
+  push:
+    branches:
+      - main
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
@@ -39,8 +42,8 @@ jobs:
       GITHUB_TOKEN: ${{ github.token }}
       GH_TOKEN: ${{ github.token }}
       OWNER: ${{ github.repository_owner }}
-      # Ручной запуск с выбором одного движка: второе задание матрицы ничего не делает.
-      SELECTED: ${{ github.event_name == 'schedule' || inputs.engine == 'both' || inputs.engine == matrix.engine }}
+      # Push и schedule проверяют оба движка; ручной запуск — по выбору пользователя.
+      SELECTED: ${{ github.event_name == 'push' || github.event_name == 'schedule' || inputs.engine == 'both' || inputs.engine == matrix.engine }}
 
     steps:
       - uses: actions/checkout@v7
@@ -120,11 +123,12 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Ветка принадлежит workflow и пересобирается от main при каждом прогоне; ручных
-          # коммитов в ней не ожидается. Ссылку на удалённую ветку дотягиваем, чтобы
-          # --force-with-lease имел с чем сверяться.
+          # Ветка принадлежит workflow и пересобирается от актуального main при каждом
+          # прогоне; ручных коммитов в ней не ожидается. Ссылку на удалённую ветку
+          # дотягиваем, чтобы --force-with-lease имел с чем сверяться.
+          git fetch origin main
           git fetch origin "$BRANCH" || true
-          git checkout -B "$BRANCH"
+          git checkout -B "$BRANCH" origin/main
           git add assets docs/INSTALL.md
           git commit -m "$TITLE" -m "Собрано workflow runtime-bump. Проверки: см. тело PR."
           git push --force-with-lease origin "$BRANCH"
