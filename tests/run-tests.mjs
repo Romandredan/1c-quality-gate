@@ -2445,13 +2445,25 @@ section('Валидаторы XML — контракт вызова');
 const PY_VALIDATORS = ['cf', 'cfe', 'epf', 'form', 'interface', 'meta', 'mxl', 'role', 'skd', 'subsystem'];
 const pyTool = (name) => join(ROOT, 'tools', 'xml', `${name}-validate.py`);
 
-/** Запускает python-валидатор, возвращает код возврата и объединённый вывод. */
+/**
+ * Запускает python-валидатор, возвращает код возврата и объединённый вывод.
+ *
+ * Переменные корня проекта (QG_PROJECT_DIR / OPENCODE_PROJECT_DIR / CLAUDE_PROJECT_DIR)
+ * вычищаются из окружения потомка: _qg_journal.project_root() берёт их раньше маркеров, и
+ * харнесс, экспортирующий CLAUDE_PROJECT_DIR на репозиторий плагина, разворачивал
+ * form-validate.py на фикстуры самого репозитория — «основная конфигурация» находилась в
+ * tests/fixtures, и тесты разрешения имён базовой формы падали в любой сессии харнесса,
+ * оставаясь зелёными в CI. Сьют самодостаточен: его валидаторам достаётся только то, что
+ * сьют построил сам. Осознанная передача корня — через opts.env, поверх зачистки.
+ */
 function runPy(script, args, opts = {}) {
   try {
+    const env = { ...process.env };
+    for (const name of ['QG_PROJECT_DIR', 'OPENCODE_PROJECT_DIR', 'CLAUDE_PROJECT_DIR']) delete env[name];
     const out = execFileSync('python', [script, ...args], {
       encoding: 'utf8',
       stdio: 'pipe',
-      env: { ...process.env, ...(opts.env || {}) },
+      env: { ...env, ...(opts.env || {}) },
     });
     return { code: 0, out };
   } catch (e) {
@@ -2482,6 +2494,16 @@ if (!python.ok) {
   } else {
     process.stdout.write(`  (пропуск валидаторов XML: ${python.reason})\n`);
   }
+}
+
+if (python.ok) {
+  // Контракт зачистки из runPy: протечка воспроизводилась как хронические падения двух
+  // тестов разрешения базовой формы внутри харнесса (в CI — зелёные), поэтому фиксируется
+  // явно, а не только самим поведением тех тестов.
+  const leaked = runPy('-c', ['import os; print("LEAK", [n for n in ("QG_PROJECT_DIR", "OPENCODE_PROJECT_DIR", "CLAUDE_PROJECT_DIR") if n in os.environ])']);
+  check('валидаторы не наследуют переменные корня проекта', !/LEAK \[.+\]/.test(leaked.out), leaked.out.trim());
+  const forced = runPy('-c', ['import os; print("FORCED", os.environ.get("QG_PROJECT_DIR"))'], { env: { QG_PROJECT_DIR: join(WORK, 'explicit-root') } });
+  check('явная передача корня через opts.env работает', forced.out.includes(`FORCED ${join(WORK, 'explicit-root')}`), forced.out.trim());
 }
 
 if (python.ok) {
