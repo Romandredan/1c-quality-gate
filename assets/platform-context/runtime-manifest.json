@@ -1,7 +1,7 @@
 {
   "_comment": "Закреплённая версия сервера справки платформы и контрольные суммы его архивов. Плагин качает файл с релизов автора (не зеркалит) и проверяет SHA-256 до распаковки. Обновление версии: `node tools/runtime-bump.mjs --engine platform-context --apply`; имена архивов собираются из assetTemplate и dirTemplate (с 0.21 версии в имени нет — шаблон совпадает с именем), суммы и размеры берутся из GitHub API релиза (поле digest у каждого asset).",
   "engine": "bsl-context",
-  "version": "0.23.1",
+  "version": "0.24.1",
   "repo": "Regsorm/bsl-context",
   "urlTemplate": "https://github.com/{repo}/releases/download/v{version}/{asset}",
   "binary": "bsl-context-rs",
@@ -11,24 +11,24 @@
       "dirTemplate": "bsl-context-windows-x64",
       "asset": "bsl-context-windows-x64.zip",
       "dir": "bsl-context-windows-x64",
-      "sha256": "147c2c30f8fe1406ddbee274e08aa292e730979f7dc9dafa5228c38bb9e48477",
-      "size": 6550150
+      "sha256": "1986343d89af0cd1e09378982a5fcfef027d299d5571c9fa82ea61f15d4415d6",
+      "size": 6647630
     },
     "linux-x64": {
       "assetTemplate": "bsl-context-linux-x64.tar.gz",
       "dirTemplate": "bsl-context-linux-x64",
       "asset": "bsl-context-linux-x64.tar.gz",
       "dir": "bsl-context-linux-x64",
-      "sha256": "623ed603722842f47c0e0fd8da9f11ccfa9ddf9da7443b42c379d0923dcada36",
-      "size": 6571853
+      "sha256": "f1b3f6a00175e751fd7f67cff802e5eb53ebaf4ff90d136a36d4f04ce2d767f3",
+      "size": 6793774
     },
     "darwin-arm64": {
       "assetTemplate": "bsl-context-macos-arm64.tar.gz",
       "dirTemplate": "bsl-context-macos-arm64",
       "asset": "bsl-context-macos-arm64.tar.gz",
       "dir": "bsl-context-macos-arm64",
-      "sha256": "1bde8c2cf86524416168d5a65649583d3a651289e760191b5155aeda744d986e",
-      "size": 5810675
+      "sha256": "96ebf14045ea3c628248ecb709dd70afc0f65d04da2ed50d4c4575b201f95b38",
+      "size": 5912826
     }
   }
 }
