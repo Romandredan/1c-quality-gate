@@ -217,6 +217,22 @@ function createIdleGate({ root, core, stateDir, stateEnv, packageRoot, subagentT
     const files = Object.entries(mine);
     if (files.length === 0) return;
 
+    // Отсрочка прогонов — явное решение пользователя; возврат к работе был бы принуждением
+    // к проверке, от которой он отказался. Однократное уведомление — чтобы тихий пропуск
+    // не выглядел как «гейта нет».
+    const deferred = core.sessionDeferred(state.sessions[sessionId]);
+    if (deferred) {
+      if (!deferred.notedAt) {
+        await send(
+          '[ГЕЙТ КАЧЕСТВА 1С] Прогоны отложены пользователем до конца сессии — работа не блокируется.\n' +
+            `Решение: ${deferred.text || 'без формулировки'}. Явный запуск проверки вернёт возвраты.`,
+          { note: true }
+        ).catch(() => {});
+        core.markDeferredNoted({ root, sessionId, env: stateEnv });
+      }
+      return;
+    }
+
     // Отпечаток состава правок: новая правка меняет его и сбрасывает счётчик
     // возвратов. На неизменный состав — не более MAX_REPROMPTS попыток.
     const fingerprint = JSON.stringify(files.map(([f, v]) => [f, v.edits, v.lastEdit]).sort());

@@ -95,7 +95,10 @@ node tools/gen-signs-map-md.mjs      # перегенерация signs-map.md, 
   работу.
 - `tools/gate.mjs` — единственный законный путь снятия: `release --evidence <файл>` либо
   `release --class C0|C1 --reason "<почему>"` (для C2/C3 только след; заявленный класс
-  сверяется с реальным охватом). Команда `verify --layer <code|arch|xml|hygiene>` отмечает
+  сверяется с реальным охватом), либо `release --declined "<кто решил и что>"` — отказ
+  пользователя от прогона (запись `mode: 'declined'` в журнале; `--for-session` откладывает
+  прогоны до конца сессии: Stop-хук не блокирует, а явный `run` возвращает блокировку).
+  Команда `verify --layer <code|arch|xml|hygiene>` отмечает
   файлы проверенными; отметку снимает следующая правка.
 - Формат следа описан в `skills/quality-gate/references/evidence-format.md`; валидируется
   `tools/evidence-validator.mjs` (режим `--gate` для снятия гейта). Поле `config` записи

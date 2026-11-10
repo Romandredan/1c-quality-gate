@@ -13,6 +13,8 @@
  *   node gate.mjs disown --reason "<кто записал>" <файл или каталог>  # снять с сессии чужой файл
  *   node gate.mjs release --evidence <файл>            # снять по результатам прогона
  *   node gate.mjs release --class C0 --reason "<...>"  # снять как не требующий проверки
+ *   node gate.mjs release --declined "<кто решил и что>" [--for-session]
+ *                                                       # снять отказом пользователя от прогона
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, copyFileSync, rmSync, mkdtempSync } from 'node:fs';
@@ -31,7 +33,7 @@ import { SCOPES } from './evidence-scopes.mjs';
 import { readCatalog } from './gen-catalog-index.mjs';
 import { expectedExamined } from './catalog.mjs';
 import { validatePatterns, matchesAny } from './path-match.mjs';
-import { handoffLines, toProjectRelative, pathKey, retireEmptySession } from '../hooks/gate-core.mjs';
+import { handoffLines, toProjectRelative, pathKey, retireEmptySession, sessionDeferred } from '../hooks/gate-core.mjs';
 import { MAX_PASSES, passCount, startPass, addDecision, updateSession, snapshotBlobs, resolveBases, lastAcceptedReport } from './gate-cycle.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -224,6 +226,9 @@ function cmdStatus() {
       );
     }
     if (s.disowned?.length) process.stdout.write(`  Снято с сессии отказом: ${s.disowned.length} — причины в состоянии сессии.\n`);
+    if (sessionDeferred(s)) {
+      process.stdout.write('  Прогоны отложены пользователем до конца сессии: завершение не блокируется; явный запуск прогона вернёт блокировку.\n');
+    }
     if (s.cycle?.passes?.length) {
       const decisions = s.cycle.decisions?.length ? `, решений сверх потолка: ${s.cycle.decisions.length}` : '';
       process.stdout.write(`  проходов в цикле: ${passCount(s)} из ${MAX_PASSES}${decisions}\n`);
@@ -330,6 +335,19 @@ function cmdRelease(args) {
   const evidenceFile = typeof args.evidence === 'string' ? args.evidence : null;
   const cls = typeof args.class === 'string' ? args.class : null;
   const reason = typeof args.reason === 'string' ? args.reason : null;
+  const declined = typeof args.declined === 'string' ? args.declined : null;
+  const forSession = args['for-session'] === true;
+
+  // Отказ от прогона — отдельный исход, а не разновидность результата: смешение с путями
+  // «прогон был» делало бы журнал снятий двусмысленным (declined с evidence — проверяли или нет?).
+  if (declined && (evidenceFile || cls)) {
+    process.stderr.write('--declined не комбинируется с --evidence/--class: это отказ от прогона, а не его результат.\n');
+    return 2;
+  }
+  if (forSession && !declined) {
+    process.stderr.write('--for-session относится к --declined: отложить прогоны можно только отказом.\n');
+    return 2;
+  }
 
   let evidenceText = null;
   // Предупреждения валидатора переживают снятие: часть из них — заявления о неполноте
@@ -393,6 +411,18 @@ function cmdRelease(args) {
         return 2;
       }
     }
+  } else if (declined) {
+    // Отказ от прогона — решение пользователя, а не заявление модели: потому без ограничений
+    // класса и объёма охвата, действующих для --class (модель своё «не требует проверки»
+    // подтверждает охватом, подтверждение чужого решения — сам факт, что оно чужое). Проверка
+    // одна, как у --critical-decision: названный решающий и вменяемая длина.
+    if (declined.trim().length < 20) {
+      process.stderr.write(
+        'Решение об отказе от прогона слишком короткое — гейт НЕ снят. Назови, кто решил и что: ' +
+          '«Пользователь: правка проверена вручную в платформе, полный прогон не нужен».\n'
+      );
+      return 2;
+    }
   } else if (cls && reason) {
     if (!['C0', 'C1'].includes(cls)) {
       process.stderr.write(
@@ -425,7 +455,8 @@ function cmdRelease(args) {
     }
   } else {
     process.stderr.write(
-      'Нужен либо --evidence <файл>, либо пара --class C0|C1 --reason "<почему проверка не требуется>".\n'
+      'Нужен либо --evidence <файл>, либо пара --class C0|C1 --reason "<почему проверка не требуется>", ' +
+        'либо --declined "<кто решил и что>" — отказ пользователя от прогона.\n'
     );
     return 2;
   }
@@ -505,15 +536,21 @@ function cmdRelease(args) {
     if (isInside(root(), src) && !isInside(dir, src)) strayReport = relative(root(), src).split(sep).join('/');
   }
 
+  const releasedAt = new Date().toISOString();
   const record = {
-    releasedAt: new Date().toISOString(),
+    releasedAt,
     armedAt: sessionState.armedAt,
     files: sessionState.files,
-    mode: evidenceFile ? 'evidence' : 'declared',
+    mode: evidenceFile ? 'evidence' : declined ? 'declined' : 'declared',
     evidenceFile: evidenceFile || null,
     evidenceArchive,
     class: cls || null,
     reason: reason || null,
+    declined: declined || null,
+    // Флаг отсрочки читает armGate при следующем взводе этой же сессии: он переносит его
+    // из журнала в состояние, где его видят хуки блокировки. Живёт только при --for-session —
+    // разовый отказ (--declined без флага) на следующие правки не распространяется.
+    declinedForSession: forSession && declined ? { at: releasedAt, text: declined } : null,
     criticalDecision: criticalFindings.length ? criticalDecision : null,
     criticalFindings: criticalFindings.map((x) => x.title),
     residual,
@@ -584,7 +621,11 @@ function cmdRelease(args) {
   process.stdout.write(
     (evidenceFile
       ? `Гейт сессии ${sessionId} снят по следу прогона (${evidenceFile}). Файлов в охвате: ${count}.${versionSuffix()}\n`
-      : `Гейт сессии ${sessionId} снят как ${cls} без прогона. Причина: ${reason}\nФайлов в охвате: ${count}.${versionSuffix()}\n`) +
+      : declined
+        ? `Гейт сессии ${sessionId} снят отказом пользователя от прогона. Решение: ${declined}\nФайлов в охвате: ${count}.${
+            versionSuffix()
+          }\n${forSession ? 'Прогоны отложены до конца сессии: новые правки продолжат взводить гейт, но завершение не будет блокироваться. Явный запуск gate.mjs run вернёт блокировку.\n' : ''}`
+        : `Гейт сессии ${sessionId} снят как ${cls} без прогона. Причина: ${reason}\nФайлов в охвате: ${count}.${versionSuffix()}\n`) +
       (evidenceArchive ? `Копия отчёта: ${evidenceArchive}\n` : '') +
       (archiveError ? `ПРЕДУПРЕЖДЕНИЕ: копия отчёта в ${REPORTS} не сохранена (${archiveError}) — ссылайся на исходный файл.\n` : '') +
       (strayReport && evidenceArchive
@@ -1672,6 +1713,7 @@ function cmdRun(args) {
   // проекте). Запись прохода — до инструментов: прерванный прогон тоже проход.
   let passLine = null;
   let outcome = null;
+  let deferredRevoked = false;
   if (sessionId) {
     const decision = typeof args.decision === 'string' ? args.decision.trim() : null;
     if (decision !== null && decision.length < 20) {
@@ -1684,6 +1726,12 @@ function cmdRun(args) {
       root: rootDir,
       sessionId,
       mutate: (session) => {
+        // Явный запуск прогона отзывает отсрочку: она была отказом от ПРИНУЖДЕНИЯ к проверке,
+        // а не от самой проверки — раз прогон попросили, блокировка завершения возвращается.
+        if (session.declinedForSession) {
+          delete session.declinedForSession;
+          deferredRevoked = true;
+        }
         // Перезапуск инструмента через --only — продолжение последнего прохода, а не новый:
         // иначе один повтор упавшего анализатора съедает проход из трёх.
         const last = session.cycle?.passes?.at?.(-1);
@@ -1711,6 +1759,9 @@ function cmdRun(args) {
           'Решение остаётся в журнале снятий.\n'
       );
       return 2;
+    }
+    if (deferredRevoked) {
+      process.stdout.write('Отсрочка прогонов снята: явный запуск вернул блокировку завершения.\n');
     }
     if (outcome?.pass) passLine = `Проход ${outcome.pass.n} из ${MAX_PASSES} · база ${outcome.pass.base}`;
   }
@@ -1928,7 +1979,8 @@ function main(argv) {
           '  node gate.mjs verify --layer <code|arch|xml|hygiene> <файл> [...]\n' +
           '  node gate.mjs disown [--session <id>] --reason "<кто записал файл>" <файл или каталог> [...]\n' +
           '  node gate.mjs release --evidence <файл> [--critical-decision "<кто решил и что>"]\n' +
-          '  node gate.mjs release --class C0 --reason "<почему>"\n'
+          '  node gate.mjs release --class C0 --reason "<почему>"\n' +
+          '  node gate.mjs release --declined "<кто решил и что>" [--for-session]\n'
       );
       return 2;
   }

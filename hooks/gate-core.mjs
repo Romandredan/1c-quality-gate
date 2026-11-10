@@ -405,11 +405,17 @@ export function armGate({
       try {
         const done = JSON.parse(readFileSync(donePath, 'utf8'));
         if (done?.sessions) {
-          // Отказы от файлов переживают запись о снятии: это след пропуска, а не прогона.
-          const kept = done.sessions[sessionId]?.disowned;
-          if (kept?.length) {
-            session.disowned = [...kept, ...(session.disowned || [])];
-            writeFileSync(pendingPath, JSON.stringify(state, null, 2), 'utf8');
+          // Отказы от файлов и отсрочка прогонов переживают запись о снятии: это решения
+          // пользователя о СЕССИИ, а не свойства одного прогона — снять гейт ими не значит
+          // отменить их действие на следующие правки этой же сессии.
+          const prev = done.sessions[sessionId];
+          const kept = prev?.disowned;
+          const deferred = prev?.declinedForSession;
+          if (kept?.length || deferred) {
+            if (kept?.length) session.disowned = [...kept, ...(session.disowned || [])];
+            // Отсрочка живёт в состоянии сессии: хуки блокировки читают pending, а не журнал.
+            if (deferred) session.declinedForSession = deferred;
+            writeFileSync(pendingPath, JSON.stringify(state, null, 2), 'utf-8');
           }
           delete done.sessions[sessionId];
           if (Object.keys(done.sessions).length) writeFileSync(donePath, JSON.stringify(done, null, 2), 'utf8');
@@ -468,6 +474,44 @@ export function passesOf({ root, sessionId, env = process.env }) {
   }
 }
 
+/**
+ * Флаг «пользователь отложил прогоны гейта до конца сессии» — или null.
+ *
+ * Хуки блокировки (Stop-хук Claude Code и мягкий возврат OpenCode) читают его из состояния
+ * сессии: пока он активен, блокировать завершение нельзя — отказ от прогонов уже был
+ * решением пользователя, и повторный вопрос превращается в принуждение к проверке.
+ * Отзывает флаг только явный запуск прогона (`gate.mjs run`): запрос проверки у пользователя
+ * отменяет его же отказ от неё.
+ */
+export function sessionDeferred(session) {
+  const flag = session?.declinedForSession;
+  return flag && typeof flag === 'object' ? flag : null;
+}
+
+/**
+ * Помечает напоминание об отсрочке выданным — однократно.
+ *
+ * Предупреждение на каждом шаге сессии превращается в шум, который перестают читать, а молчание
+ * неотличимо от «гейта нет». Сбой записи молчит: худший исход — напоминание повторится, это
+ * безопаснее потери флага.
+ */
+export function markDeferredNoted({ root, sessionId, env = process.env }) {
+  try {
+    const stateDir = join(root, ...stateDirSegments(env));
+    const pendingPath = join(stateDir, PENDING);
+    withStateLock(stateDir, () => {
+      if (!existsSync(pendingPath)) return;
+      const state = JSON.parse(readFileSync(pendingPath, 'utf-8'));
+      const flag = sessionDeferred(state?.sessions?.[sessionId]);
+      if (!flag || flag.notedAt) return;
+      flag.notedAt = new Date().toISOString();
+      writeFileSync(pendingPath, JSON.stringify(state, null, 2), 'utf-8');
+    });
+  } catch {
+    /* напоминание не обязано мешать работе */
+  }
+}
+
 /** Имя плагина из манифеста: с ним Claude Code называет типы субагентов (`<плагин>:<агент>`). */
 function pluginName(packageRoot) {
   try {
@@ -503,6 +547,22 @@ export function handoffLines({ sessionId, packageRoot, mode = 'claude', passes =
   return [
     'Проверку исполняет субагент. НЕ прогоняй гейт сам и не загружай навык quality-gate: это',
     'десятки ходов в контексте этой сессии, и каждый оплачивает её целиком.',
+    '',
+    // Решение «гонять ли вообще» — у пользователя, если он рядом: полный прогон для C2/C3 — это
+    // минуты машинной части и контуры, и когда правка уже проверена вручную, принуждение к
+    // прогону дороже его пользы. Пропуск законен только как решение пользователя и оставляет
+    // запись в журнале снятий — молчаливого обхода гейта эта ветка не добавляет.
+    'Прежде чем запускать — решить, нужен ли прогон вообще. Класс правки скажет план',
+    '(одна команда, без контуров и субагентов):',
+    `  node "${qg}/tools/gate.mjs" plan --session ${sessionId}`,
+    'C0/C1 — вопрос не нужен: мелкая правка снимается дешёвым путём, названным ниже.',
+    'C2/C3 и пользователь рядом — спроси его: полный прогон или пропуск. Пользователь уже',
+    'потребовал проверку явно — не спрашивай. Пропуск записывается в журнал снятий решением',
+    'пользователя, а не твоим:',
+    `  node "${qg}/tools/gate.mjs" release --session ${sessionId} --declined "<кто решил и что>"`,
+    '«Не гонять до конца сессии» — добавь --for-session: правки продолжат взводить гейт, но',
+    'завершение не будет блокироваться до явного запуска прогона. Пользователя рядом нет —',
+    'не спрашивай и не выдумывай его отказ: запускай субагента.',
     '',
     `Запусти инструментом ${tool} субагента \`${runnerType({ packageRoot, mode })}\` одним вызовом${
       mode === 'claude' ? ', синхронно (run_in_background: false): фоновый запуск заканчивает ход раньше отчёта' : ''

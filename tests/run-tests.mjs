@@ -3154,6 +3154,96 @@ section('Механика гейта');
 }
 
 // ---------------------------------------------------------------------------
+section('Отказ пользователя от прогона');
+
+// Отказ — третий исход рядом с прогоном и дешёвым C0: решение пользователя, поэтому без
+// ограничений охвата, действующих для --class (модель своё «не требует проверки» подтверждает
+// охватом; чужое решение подтверждает названный решающий). Отказ обязан оставить запись в
+// журнале снятий, а отсрочка на сессию — подавлять блокировку ровно до явного запуска прогона.
+{
+  const proj = join(WORK, 'proj-declined');
+  rmSync(proj, { recursive: true, force: true });
+  for (const m of ['М1', 'М2', 'М3']) {
+    mkdirSync(join(proj, 'src', 'cf', 'CommonModules', m, 'Ext'), { recursive: true });
+    writeFileSync(join(proj, 'src', 'cf', 'CommonModules', m, 'Ext', 'Module.bsl'), 'Процедура Т() КонецПроцедуры\n', 'utf8');
+  }
+  const env = { CLAUDE_PROJECT_DIR: proj };
+  const files = ['М1', 'М2', 'М3'].map((m) => join(proj, 'src', 'cf', 'CommonModules', m, 'Ext', 'Module.bsl'));
+  const donePath = () => join(proj, '.claude', '.state', 'qg-done.json');
+  const pendingPath = () => join(proj, '.claude', '.state', 'qg-pending.json');
+
+  const arm = (sessionId, path) => {
+    const payload = JSON.stringify({ session_id: sessionId, cwd: proj, tool_input: { file_path: path } });
+    try {
+      return execFileSync(process.execPath, [join(ROOT, 'hooks', 'gate-arm.mjs')], {
+        input: payload, encoding: 'utf8', env: { ...process.env, ...env },
+      });
+    } catch {
+      return '';
+    }
+  };
+  const stop = (sessionId) => {
+    const payload = JSON.stringify({ session_id: sessionId, cwd: proj });
+    // spawnSync, а не execFileSync: stderr нужен и при коде 0 — напоминание об отсрочке
+    // печатается в stderr без блокировки, а execFileSync отдаёт stderr только в исключении.
+    const r = spawnSync(process.execPath, [join(ROOT, 'hooks', 'gate-check.mjs')], {
+      input: payload, encoding: 'utf8', env: { ...process.env, ...env },
+    });
+    return { code: r.status ?? 1, err: r.stderr || '' };
+  };
+
+  const D = 'Пользователь: правка проверена вручную в платформе, полный прогон не нужен';
+  for (const f of files) arm('S1', f);
+
+  const short = run('tools/gate.mjs', ['release', '--session', 'S1', '--declined', 'нет'], { env });
+  check('короткий отказ не снимает гейт', short.code === 2 && existsSync(pendingPath()), short.out.trim().slice(0, 120));
+  const mixed = run('tools/gate.mjs', ['release', '--session', 'S1', '--declined', D, '--class', 'C0'], { env });
+  check('--declined не комбинируется с --class', mixed.code === 2 && existsSync(pendingPath()), mixed.out.trim().slice(0, 120));
+  const flagOnly = run('tools/gate.mjs', ['release', '--session', 'S1', '--for-session'], { env });
+  check('--for-session без --declined отказывает', flagOnly.code === 2, flagOnly.out.trim().slice(0, 120));
+
+  // Контраст с дешёвым путём: три файла — уже не «точечная правка», --class C0 отказывает,
+  // отказ пользователя — нет: у них разная природа подтверждения.
+  const asC0 = run('tools/gate.mjs', ['release', '--session', 'S1', '--class', 'C0', '--reason', D], { env });
+  check('--class C0 на трёх файлах по-прежнему отказывает', asC0.code === 2, asC0.out.trim().slice(0, 120));
+
+  const rel = run('tools/gate.mjs', ['release', '--session', 'S1', '--declined', D], { env });
+  check('отказ снимает гейт на большом охвате', rel.code === 0, rel.out.trim().slice(0, 200));
+  const rec = JSON.parse(readFileSync(donePath(), 'utf8')).sessions.S1;
+  check('журнал хранит отказ с решением и охватом',
+    rec?.mode === 'declined' && rec?.declined === D && Object.keys(rec?.files || {}).length === 3,
+    JSON.stringify({ mode: rec?.mode, files: Object.keys(rec?.files || {}).length }));
+  check('разовый отказ не ставит флаг отсрочки', rec?.declinedForSession === null);
+
+  // Разовый отказ действует на одно снятие: следующая правка блокирует как обычно.
+  arm('S1', files[0]);
+  check('после разового отказа Stop снова блокирует', stop('S1').code === 2);
+
+  // Отсрочка на сессию: взвод после снятия переносит флаг из журнала в состояние, Stop
+  // не блокирует и напоминает один раз, явный запуск прогона возвращает блокировку.
+  const D2 = 'Пользователь: не гонять гейт до конца сессии, проверю сам перед коммитом';
+  const relS = run('tools/gate.mjs', ['release', '--session', 'S1', '--declined', D2, '--for-session'], { env });
+  check('отказ с --for-session снимает гейт', relS.code === 0 && relS.out.includes('отложены'), relS.out.trim().slice(0, 200));
+  const recS = JSON.parse(readFileSync(donePath(), 'utf8')).sessions.S1;
+  check('журнал хранит флаг отсрочки с текстом решения', recS?.declinedForSession?.text === D2);
+
+  arm('S1', files[1]);
+  const pend = JSON.parse(readFileSync(pendingPath(), 'utf8')).sessions.S1;
+  check('повторный взвод переносит отсрочку в состояние', pend?.declinedForSession?.text === D2);
+  const st = run('tools/gate.mjs', ['status'], { env });
+  check('status помечает сессию с отсрочкой', st.out.includes('отложены пользователем'), st.out.trim().slice(0, 200));
+
+  const stop1 = stop('S1');
+  check('Stop при отсрочке не блокирует и напоминает', stop1.code === 0 && stop1.err.includes('отложены'), stop1.err.slice(0, 200));
+  const stop2 = stop('S1');
+  check('повторный Stop при отсрочке молчит', stop2.code === 0 && !stop2.err.includes('отложены'), stop2.err.slice(0, 200));
+
+  const back = run('tools/gate.mjs', ['run', '--session', 'S1', '--no-analyzer', '--only', 'hygiene-check'], { env });
+  check('явный запуск прогона отзывает отсрочку', back.code === 0 && back.out.includes('Отсрочка прогонов снята'), back.out.trim().slice(0, 300));
+  check('после явного запуска Stop снова блокирует', stop('S1').code === 2);
+}
+
+// ---------------------------------------------------------------------------
 section('Свежесть артефактов при снятии гейта');
 
 // Сценарий: дефект исправлен в исходниках в 00:09, пользователь в 00:10 запустил сборку от

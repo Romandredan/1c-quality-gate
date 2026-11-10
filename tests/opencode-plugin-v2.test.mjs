@@ -508,6 +508,43 @@ const sessEvents = [];
   check('итог отправлен с resume: false и без noReply', ctx6.prompts[0]?.resume === false && !('noReply' in (ctx6.prompts[0] || {})));
   rmSync(noteRoot, { recursive: true, force: true });
 
+  // Отсрочка прогонов пользователем: возврат к работе был бы принуждением к проверке, от
+  // которой явно отказались, — одно note-уведомление вместо текста мягкого гейта.
+  const defRoot = mkdtempSync(join(tmpdir(), 'qg-oc2-defer-'));
+  const defDir = join(defRoot, '.opencode', '.state');
+  mkdirSync(defDir, { recursive: true });
+  writeFileSync(
+    join(defDir, 'qg-pending.json'),
+    JSON.stringify({
+      version: 2,
+      sessions: {
+        's-def': {
+          armedAt: 'now',
+          files: { 'CommonModules/Модуль/Module.bsl': { kind: 'bsl', edits: 1, lastEdit: 'now', source: 'tool' } },
+          declinedForSession: { at: 'now', text: 'Пользователь: не гонять до конца сессии' },
+        },
+      },
+    }),
+    'utf8'
+  );
+  const ctxDef = makeCtx(defRoot);
+  const evDef = [{ type: 'session.execution.succeeded', data: { sessionID: 's-def' } }];
+  ctxDef.event.subscribe = () => feed(evDef);
+  await mod.default.setup(ctxDef);
+  await new Promise((r) => setTimeout(r, 120));
+  check(
+    'отсрочка не возвращает агента к работе, а напоминает один раз',
+    ctxDef.prompts.length === 1 &&
+      /отложены пользователем/.test(ctxDef.prompts[0]?.text || '') &&
+      !/РАБОТА НЕ ЗАВЕРШЕНА/.test(ctxDef.prompts[0]?.text || ''),
+    JSON.stringify(ctxDef.prompts.map((p) => (p?.text || '').slice(0, 60)))
+  );
+  evDef.push({ type: 'session.execution.started', data: { sessionID: 's-def' } });
+  evDef.push({ type: 'session.execution.succeeded', data: { sessionID: 's-def' } });
+  await new Promise((r) => setTimeout(r, 120));
+  check('повторный конец прогона при отсрочке молчит', ctxDef.prompts.length === 1);
+  rmSync(defRoot, { recursive: true, force: true });
+
   // Поток событий, закончившийся сам (не выгрузкой плагина), — это потерянный мягкий гейт: след обязателен.
   const ctx7 = makeCtx(root);
   ctx7.event.subscribe = () => ({ [Symbol.asyncIterator]() { return { next: async () => ({ value: undefined, done: true }) }; } });
