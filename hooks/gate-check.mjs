@@ -15,7 +15,7 @@
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readPayload, projectRoot } from './_shared.mjs';
-import { readPendingState, blockMessage, residualNote } from './gate-core.mjs';
+import { readPendingState, blockMessage, residualNote, sessionDeferred, markDeferredNoted } from './gate-core.mjs';
 import { passCount } from '../tools/gate-cycle.mjs';
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -71,6 +71,22 @@ function main() {
         `[гейт качества] В проекте есть непроверенные правки другой сессии (${foreign}). ` +
           'Эта сессия их не касалась — завершение не блокируется.\n'
       );
+    }
+    return relay();
+  }
+
+  // Отсрочка прогонов — явное решение пользователя («не гонять до конца сессии»). Блокировать
+  // нельзя: это принуждение к проверке, от которой пользователь уже отказался. Но и молчать
+  // нечестно — напомнить один раз, что проверки не было и что вернёт её явный запуск.
+  const deferred = sessionDeferred(sessions[sessionId]);
+  if (deferred) {
+    if (!deferred.notedAt) {
+      process.stderr.write(
+        `[гейт качества] Прогоны отложены пользователем до конца сессии — завершение не блокируется.\n` +
+          `Решение: ${deferred.text || 'без формулировки'}\n` +
+          'Явный запуск проверки (gate.mjs run) вернёт блокировку.\n'
+      );
+      markDeferredNoted({ root, sessionId });
     }
     return relay();
   }
