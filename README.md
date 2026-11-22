@@ -589,7 +589,8 @@ node "$QG/tools/evidence-validator.mjs" <файл отчёта> --gate --session
 `transaction-nesting`, `enum-string-assign`, `unbounded-string-column`, `attribute-access`,
 `form-attribute-shadowing`, `dispatch-fallback`, `db-read-in-loop`, `field-transfer`,
 `batch-single-result`, `record-manager-read`, `queried-object-attributes`,
-`own-structure-check`, `comment-reference`, `mechanic-word`, `stale-local-calls`,
+`own-structure-check`, `comment-reference`, `mechanic-word`, `foreach-query-selection`,
+`stale-local-calls`,
 `file-encoding`, `registration-check`,
 `uuid-uniqueness`, `structure-validation`, `form-binding`, `ai-antipatterns`,
 `platform-antipatterns`, `ai-antipatterns-diff` (все три — `tools/catalog.mjs`, аттестация

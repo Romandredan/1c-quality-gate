@@ -214,6 +214,18 @@ export const SCOPES = {
     granularity: 'files',
     applies: ['.bsl', '.os']
   },
+  // Курсор запроса против коллекции: правило знает только форму «переменной присвоен
+  // .Выбрать(), ниже Для Каждого по ней». Что за переменная на самом деле и можно ли её
+  // обходить — тип из выражения не выводится, поэтому находка предупреждающая: в редком
+  // случае переприсваивания коллекции между выборкой и циклом файл чист, и это проверяется
+  // чтением, а не перепрогоном.
+  'foreach-query-selection': {
+    layer: 'code',
+    tool: 'tools/bsl-lint.mjs',
+    about: 'обход выборки запроса через Для Каждого вместо Пока Выборка.Следующий()',
+    granularity: 'files',
+    applies: ['.bsl', '.os']
+  },
   // Правила с предметом от проекта (секция bslLint настройки). Слов механики у плагина нет:
   // при пустом списке проекта проверка неприменима и отмечается пропуском с причиной.
   'comment-reference': {
@@ -437,6 +449,7 @@ export const QG_IDS = {
   'qg:BSL-QUERIED-OBJECT-ATTRIBUTES': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-OWN-STRUCTURE-CHECK': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-COMMENT-REFERENCE': { tool: 'tools/bsl-lint.mjs' },
+  'qg:BSL-FOR-EACH-QUERY-SELECTION': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-MECHANIC-WORD': { tool: 'tools/bsl-lint.mjs' },
   'qg:BSL-STALE-LOCAL-CALL': { tool: 'tools/rename-check.mjs' },
 
@@ -471,6 +484,13 @@ export const QG_IDS = {
   'qg:BSL-NO-CACHE': { tool: null },
   'qg:BSL-NESTED-LOOP-SEARCH': { tool: null },
   'qg:BSL-DEEP-NESTING': { tool: null },
+  // Молчаливое поведение платформы: перенос свойств в приёмник с неполным составом ключей и
+  // сравнение дат без отсечения времени. Оба дефекта выглядят нормально на тексте и на
+  // подготовленных данных, поэтому инструмента у них нет — ставит их читатель, зная предмет поля.
+  'qg:BSL-FILL-PROPS-SILENT-DROP': { tool: null },
+  'qg:BSL-DATE-COMPARE-WITH-TIME': { tool: null },
+  // Расчёт, зависящий от реквизита-признака: одна ветка формулы вместо двух режимов.
+  'qg:BSL-VAT-SUM-IGNORES-FLAG': { tool: null },
 
   // --- архитектура: состав сверяется тестом с signs-map.json ---------------
   ...Object.fromEntries(ARCH_SIGNS),
