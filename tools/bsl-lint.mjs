@@ -13,6 +13,10 @@
  *     `КвалификаторыСтроки`, у таблицы, которая в том же модуле уходит в
  *     `УстановитьПараметр`. Поле неограниченной длины движок запросов не умеет сравнивать:
  *     `РАЗЛИЧНЫЕ`, `СГРУППИРОВАТЬ ПО`, соединение, `ГДЕ` (#std432 п. 3.1).
+ *   - `qg:BSL-FOR-EACH-QUERY-SELECTION` — `Для Каждого` по переменной, которой присвоен
+ *     результат `Выбрать()`. Выборка запроса — курсор, а не коллекция: обход падает в
+ *     рантайме «Итератор для значения не определен». Ни сборка, ни анализатор этого не
+ *     видят: тип выводится из выражения, а само выражение синтаксически безупречно.
  *   - `qg:BSL-DISPATCH-NO-FALLBACK` — цепочка `Если … ИначеЕсли …` перебирает значения
  *     перечисления или типы документа в трёх и более ветках и не закрыта веткой `Иначе`.
  *     Значение, не попавшее ни в одну ветку, проходит цепочку молча, и метод продолжает
@@ -533,6 +537,98 @@ export function lintUnboundedColumns(source) {
         'ВЫРАЗИТЬ(… КАК СТРОКА(N)). Попадает ли колонка в сравнение, отсюда не видно: если поле только ' +
         'выводится, находка ложная',
     });
+  }
+  return findings;
+}
+
+// ---------------------------------------------------------------------------
+// Обход выборки запроса через «Для Каждого»
+
+/**
+ * `Для Каждого` по переменной, которой присвоен результат `Выбрать()`.
+ *
+ * `Выбрать()` возвращает `ВыборкаИзРезультатаЗапроса` — курсор, а не коллекцию: обход
+ * `Для Каждого` по нему падает в рантайме «Итератор для значения не определен». Ни сборка, ни
+ * статический анализатор этого не видят: выражение `Запрос.Выполнить().Выбрать()`
+ * синтаксически безупречно, а ошибка появляется только при выполнении, причём в ветке, которая
+ * на стенде могла ни разу не исполниться.
+ *
+ * Проверка сравнивает пару в границах ОДНОГО метода и берёт ПОСЛЕДНЕЕ присваивание перед
+ * циклом: переменная, которую после выборки переприсвоили таблицей (`…Выгрузить()`),
+ * дефектом не является, и находка на ней была бы ложной.
+ *
+ * Приближения:
+ *   - присваивание распознаётся по тексту одной строки: перенос правой части на следующую
+ *     строку инструменту не виден;
+ *   - имя переменной не разрешается: `Для Каждого` по одноимённой переменной другого смысла —
+ *     та же строка, и находка остаётся предупреждением, а не блокировкой.
+ */
+/**
+ * Правая часть присваивания оставляет курсор, а не таблицу.
+ *
+ * `…Выбрать()` — курсор; `…Выбрать().Выгрузить()` — уже таблица значений. Различается
+ * последним вызовом в цепочке: искать `.Выбрать(` без этой оговорки значит ругаться на
+ * законную форму, которую как раз и советует текст находки.
+ */
+function endsWithCursor(expression) {
+  const selects = [...expression.matchAll(/\.\s*Выбрать\s*\(/gi)].map((m) => m.index);
+  if (selects.length === 0) return false;
+  const unloads = [...expression.matchAll(/\.\s*Выгрузить\s*\(/gi)].map((m) => m.index);
+  const last = selects[selects.length - 1];
+  return !unloads.some((index) => index > last);
+}
+
+export function lintForEachOverSelection(source) {
+  const masked = maskModule(source);
+  const findings = [];
+  // `=` в сравнении (`<>`, `>=`, `<=`) присваиванием не является — отсюда запрет на знаки
+  // сравнения в lookbehind.
+  const assignRe = new RegExp(
+    `(?<![${W}.<>=])(${IDENT})\\s*=(?!=)\\s*([^;\\n]*)`,
+    'gu'
+  );
+  const forEachRe = new RegExp(
+    `(?<![${W}])Для\\s+Каждого\\s+${IDENT}\\s+Из\\s+(${IDENT})(?![${W}])\\s+Цикл`,
+    'giu'
+  );
+
+  for (const routine of parseRoutines(masked)) {
+    const body = masked.slice(routine.bodyStart, routine.end);
+
+    const assignments = [];
+    assignRe.lastIndex = 0;
+    let hit;
+    while ((hit = assignRe.exec(body)) !== null) {
+      assignments.push({
+        name: hit[1].toLowerCase(),
+        index: hit.index,
+        selects: endsWithCursor(hit[2]),
+      });
+    }
+    if (!assignments.some((a) => a.selects)) continue;
+
+    forEachRe.lastIndex = 0;
+    let loop;
+    while ((loop = forEachRe.exec(body)) !== null) {
+      const list = loop[1].toLowerCase();
+      const before = assignments.filter((a) => a.name === list && a.index < loop.index);
+      if (before.length === 0) continue;
+      const last = before[before.length - 1];
+      if (!last.selects) continue;
+
+      findings.push({
+        severity: 'warn',
+        rule: 'qg:BSL-FOR-EACH-QUERY-SELECTION',
+        line: lineAt(source, routine.bodyStart + loop.index),
+        method: routine.name,
+        variable: loop[1],
+        message:
+          `«Для Каждого» по «${loop[1]}» в «${routine.name}»: переменной присвоен результат ` +
+          '«Выбрать()» — это курсор, а не коллекция, и обход падает в рантайме «Итератор для ' +
+          'значения не определен». Перебор выборки: «Пока Выборка.Следующий() Цикл»; обход ' +
+          'коллекции: «Для Каждого» после «Выгрузить()». Сборка и анализатор эту ошибку не видят',
+      });
+    }
   }
   return findings;
 }
@@ -2371,6 +2467,7 @@ function checkFile(path, settings = LINT_DEFAULTS) {
   const source = readFileSync(path, 'utf8').replace(/^﻿/, '');
   const findings = lintSource(source, basename(path));
   findings.push(...lintUnboundedColumns(source));
+  findings.push(...lintForEachOverSelection(source));
   findings.push(...lintRefDotAccess(source));
   findings.push(...lintDispatchFallback(source));
   const changed = changedRoutines(path, source);
@@ -2490,6 +2587,7 @@ function evidenceBlock(findings, modulesSeen, metaResolved, files = [], formsSee
     ['queried-object-attributes', 'qg:BSL-QUERIED-OBJECT-ATTRIBUTES'],
     ['own-structure-check', 'qg:BSL-OWN-STRUCTURE-CHECK'],
     ['comment-reference', 'qg:BSL-COMMENT-REFERENCE'],
+    ['foreach-query-selection', 'qg:BSL-FOR-EACH-QUERY-SELECTION'],
   ]) {
     const hit = findings.some((f) => f.rule === id);
     recordRun({ scope, tool: 'tools/bsl-lint.mjs', verdict: hit ? 'violation' : 'clean', files });
